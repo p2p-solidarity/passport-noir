@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  NARGO_VERSION: "1.0.0-beta.19"
+
+jobs:
+  noir-circuits:
+    name: Noir Circuit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nargo
+        uses: noir-lang/noirup@v0.1.4
+        with:
+          toolchain: ${{ env.NARGO_VERSION }}
+
+      - name: Check circuits compile
+        working-directory: circuits
+        run: nargo compile --workspace
+
+      - name: Run circuit tests
+        working-directory: circuits
+        run: nargo test --workspace
+
+  mopro-binding:
+    name: Mopro Rust Binding
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            mopro-binding/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('mopro-binding/Cargo.lock', 'mopro-binding/Cargo.toml') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build
+        working-directory: mopro-binding
+        run: cargo build
+
+      - name: Run tests (non-ignored)
+        working-directory: mopro-binding
+        run: cargo test -- --nocapture
+
+  integration:
+    name: Integration (Compile + Prove)
+    runs-on: ubuntu-latest
+    needs: [noir-circuits, mopro-binding]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nargo
+        uses: noir-lang/noirup@v0.1.4
+        with:
+          toolchain: ${{ env.NARGO_VERSION }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            mopro-binding/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('mopro-binding/Cargo.lock', 'mopro-binding/Cargo.toml') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Compile circuits
+        working-directory: circuits
+        run: nargo compile --workspace
+
+      - name: Copy circuit artifacts to mopro test-vectors
+        run: |
+          mkdir -p mopro-binding/test-vectors/noir
+          cp circuits/target/passport_verifier.json mopro-binding/test-vectors/noir/ 2>/dev/null || true
+          cp circuits/target/data_integrity.json mopro-binding/test-vectors/noir/ 2>/dev/null || true
+          cp circuits/target/disclosure.json mopro-binding/test-vectors/noir/ 2>/dev/null || true
+
+      - name: Run integration tests (with circuit artifacts)
+        working-directory: mopro-binding
+        run: cargo test -- --ignored --nocapture
+        timeout-minutes: 30

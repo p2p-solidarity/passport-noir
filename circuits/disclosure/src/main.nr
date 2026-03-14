@@ -194,3 +194,323 @@ fn test_age_verification() {
         true,     // is older than 18 (age = 25)
     );
 }
+
+// Helper: build standard test MRZ with custom fields
+fn build_test_mrz(
+    nationality: [u8; 3],
+    dob: [u8; 6],
+    name_bytes: [u8; 39],
+) -> [u8; MRZ_TOTAL_LEN] {
+    let mut mrz: [u8; MRZ_TOTAL_LEN] = [60; MRZ_TOTAL_LEN]; // fill with '<'
+    mrz[0] = 80;  // P
+    mrz[1] = 60;  // <
+    mrz[2] = 85;  // U (issuing country)
+    mrz[3] = 84;  // T
+    mrz[4] = 79;  // O
+    // Name at positions 5..43
+    for i in 0..39 {
+        mrz[5 + i] = name_bytes[i];
+    }
+    // Nationality at line2 positions 10..12 (absolute 54..56)
+    mrz[54] = nationality[0];
+    mrz[55] = nationality[1];
+    mrz[56] = nationality[2];
+    // DOB at line2 positions 13..18 (absolute 57..62)
+    mrz[57] = dob[0];
+    mrz[58] = dob[1];
+    mrz[59] = dob[2];
+    mrz[60] = dob[3];
+    mrz[61] = dob[4];
+    mrz[62] = dob[5];
+    mrz
+}
+
+// DS-3: Name disclosure
+#[test]
+fn test_name_disclosure() {
+    let mut name_bytes: [u8; 39] = [60; 39]; // fill with '<'
+    // "DOE<<JOHN"
+    name_bytes[0] = 68; name_bytes[1] = 79; name_bytes[2] = 69; // DOE
+    name_bytes[3] = 60; name_bytes[4] = 60; // <<
+    name_bytes[5] = 74; name_bytes[6] = 79; name_bytes[7] = 72; name_bytes[8] = 78; // JOHN
+
+    let mrz = build_test_mrz(
+        [85, 84, 79], // UTO
+        [57, 48, 48, 49, 48, 49], // 900101
+        name_bytes,
+    );
+    let mrz_hash: [u8; 32] = sha256_hash(mrz);
+
+    main(
+        mrz, mrz_hash,
+        false, false, true, // only disclose name
+        18, [50, 54, 48, 51, 49, 52],
+        [0; 3], name_bytes, false,
+    );
+}
+
+// DS-4: All three disclosures simultaneously
+#[test]
+fn test_all_disclosures_simultaneously() {
+    let mut name_bytes: [u8; 39] = [60; 39];
+    name_bytes[0] = 68; name_bytes[1] = 79; name_bytes[2] = 69; // DOE
+    name_bytes[3] = 60; name_bytes[4] = 60;
+    name_bytes[5] = 74; name_bytes[6] = 79; name_bytes[7] = 72; name_bytes[8] = 78; // JOHN
+
+    let mrz = build_test_mrz(
+        [85, 84, 79], // UTO
+        [57, 48, 48, 49, 48, 49], // 900101 -> 1990, age 36
+        name_bytes,
+    );
+    let mrz_hash: [u8; 32] = sha256_hash(mrz);
+
+    main(
+        mrz, mrz_hash,
+        true, true, true, // all flags on
+        18, [50, 54, 48, 51, 49, 52], // 260314
+        [85, 84, 79], // UTO
+        name_bytes,
+        true, // age 36 >= 18
+    );
+}
+
+// DS-5: No disclosure - all flags false, outputs zeroed
+#[test]
+fn test_no_disclosure() {
+    let mrz = build_test_mrz(
+        [85, 84, 79],
+        [57, 48, 48, 49, 48, 49],
+        [60; 39],
+    );
+    let mrz_hash: [u8; 32] = sha256_hash(mrz);
+
+    main(
+        mrz, mrz_hash,
+        false, false, false,
+        18, [50, 54, 48, 51, 49, 52],
+        [0; 3], [0; 39], false,
+    );
+}
+
+// DS-6: Age exactly at threshold (18th birthday today)
+#[test]
+fn test_age_exactly_at_threshold() {
+    // DOB = 080314 (2008-03-14), current = 260314, age = exactly 18
+    let mrz = build_test_mrz(
+        [85, 84, 79],
+        [48, 56, 48, 51, 49, 52], // "080314"
+        [60; 39],
+    );
+    let mrz_hash: [u8; 32] = sha256_hash(mrz);
+
+    main(
+        mrz, mrz_hash,
+        false, true, false,
+        18, [50, 54, 48, 51, 49, 52], // "260314"
+        [0; 3], [0; 39],
+        true, // exactly 18, >= threshold
+    );
+}
+
+// DS-7: Age one day below threshold - birthday tomorrow
+#[test]
+fn test_age_one_day_below_threshold() {
+    // DOB = 080315 (2008-03-15), current = 260314, age = 17 years 364 days
+    let mrz = build_test_mrz(
+        [85, 84, 79],
+        [48, 56, 48, 51, 49, 53], // "080315"
+        [60; 39],
+    );
+    let mrz_hash: [u8; 32] = sha256_hash(mrz);
+
+    // out_is_older = false because age < 18
+    main(
+        mrz, mrz_hash,
+        false, true, false,
+        18, [50, 54, 48, 51, 49, 52], // "260314"
+        [0; 3], [0; 39],
+        false, // NOT older: age 17
+    );
+}
+
+// DS-9: Wrong MRZ hash - should fail
+#[test(should_fail)]
+fn test_wrong_mrz_hash_fails() {
+    let mrz = build_test_mrz(
+        [85, 84, 79],
+        [57, 48, 48, 49, 48, 49],
+        [60; 39],
+    );
+    // Compute correct hash then tamper it
+    let mut bad_hash: [u8; 32] = sha256_hash(mrz);
+    bad_hash[0] ^= 0xFF;
+
+    main(
+        mrz, bad_hash,
+        false, false, false,
+        18, [50, 54, 48, 51, 49, 52],
+        [0; 3], [0; 39], false,
+    );
+}
+
+// DS-10: Wrong nationality output - should fail
+#[test(should_fail)]
+fn test_wrong_nationality_output_fails() {
+    let mrz = build_test_mrz(
+        [85, 84, 79], // UTO
+        [57, 48, 48, 49, 48, 49],
+        [60; 39],
+    );
+    let mrz_hash: [u8; 32] = sha256_hash(mrz);
+
+    main(
+        mrz, mrz_hash,
+        true, false, false,
+        18, [50, 54, 48, 51, 49, 52],
+        [85, 83, 65], // "USA" - wrong, should be "UTO"
+        [0; 39], false,
+    );
+}
+
+// DS-11: Wrong name output - should fail
+#[test(should_fail)]
+fn test_wrong_name_output_fails() {
+    let mut name_bytes: [u8; 39] = [60; 39];
+    name_bytes[0] = 68; name_bytes[1] = 79; name_bytes[2] = 69; // DOE
+
+    let mrz = build_test_mrz([85, 84, 79], [57, 48, 48, 49, 48, 49], name_bytes);
+    let mrz_hash: [u8; 32] = sha256_hash(mrz);
+
+    // Wrong name output
+    let mut wrong_name: [u8; 39] = [60; 39];
+    wrong_name[0] = 83; wrong_name[1] = 77; wrong_name[2] = 73; // SMI (not DOE)
+
+    main(
+        mrz, mrz_hash,
+        false, false, true,
+        18, [50, 54, 48, 51, 49, 52],
+        [0; 3], wrong_name, false,
+    );
+}
+
+// DS-12: Person IS older but out_is_older = false - should fail
+#[test(should_fail)]
+fn test_wrong_is_older_output_fails() {
+    // DOB 900101 -> age 36 >= 18, but we claim out_is_older = false
+    let mrz = build_test_mrz(
+        [85, 84, 79],
+        [57, 48, 48, 49, 48, 49], // "900101"
+        [60; 39],
+    );
+    let mrz_hash: [u8; 32] = sha256_hash(mrz);
+
+    main(
+        mrz, mrz_hash,
+        false, true, false,
+        18, [50, 54, 48, 51, 49, 52],
+        [0; 3], [0; 39],
+        false, // WRONG: age 36 >= 18, should be true
+    );
+}
+
+// DS-13: Century rollover - DOB YY=99 -> 1999 (age = 27 in 2026)
+#[test]
+fn test_century_rollover_dob_1999() {
+    // DOB "990101" -> if curr_yy(26) < birth_yy(99): age = 100 + 26 - 99 = 27
+    let mrz = build_test_mrz(
+        [85, 84, 79],
+        [57, 57, 48, 49, 48, 49], // "990101"
+        [60; 39],
+    );
+    let mrz_hash: [u8; 32] = sha256_hash(mrz);
+
+    main(
+        mrz, mrz_hash,
+        false, true, false,
+        18, [50, 54, 48, 51, 49, 52], // "260314"
+        [0; 3], [0; 39],
+        true, // age 27 >= 18
+    );
+}
+
+// DS-14: Young person - DOB YY=10 -> 2010 (age = 16 in 2026)
+#[test]
+fn test_young_person_century_2010() {
+    // DOB "100101" -> curr_yy(26) >= birth_yy(10): age = 26 - 10 = 16
+    let mrz = build_test_mrz(
+        [85, 84, 79],
+        [49, 48, 48, 49, 48, 49], // "100101"
+        [60; 39],
+    );
+    let mrz_hash: [u8; 32] = sha256_hash(mrz);
+
+    main(
+        mrz, mrz_hash,
+        false, true, false,
+        18, [50, 54, 48, 51, 49, 52], // "260314"
+        [0; 3], [0; 39],
+        false, // age 16 < 18
+    );
+}
+
+// DS-15: Name with filler characters (< padding)
+#[test]
+fn test_name_with_filler_characters() {
+    // "DOE<<JOHN<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<" (full 39 bytes with fillers)
+    let mut name_bytes: [u8; 39] = [60; 39]; // all '<'
+    name_bytes[0] = 68; name_bytes[1] = 79; name_bytes[2] = 69; // DOE
+    name_bytes[3] = 60; name_bytes[4] = 60; // <<
+    name_bytes[5] = 74; name_bytes[6] = 79; name_bytes[7] = 72; name_bytes[8] = 78; // JOHN
+
+    let mrz = build_test_mrz([85, 84, 79], [57, 48, 48, 49, 48, 49], name_bytes);
+    let mrz_hash: [u8; 32] = sha256_hash(mrz);
+
+    // out_name should include the '<' filler characters as-is
+    main(
+        mrz, mrz_hash,
+        false, false, true,
+        18, [50, 54, 48, 51, 49, 52],
+        [0; 3], name_bytes, false,
+    );
+}
+
+// DS-16: Leap year DOB (2000-02-29)
+#[test]
+fn test_leap_year_dob() {
+    // DOB "000229" -> 2000-02-29, current "260314" -> age 26
+    let mrz = build_test_mrz(
+        [85, 84, 79],
+        [48, 48, 48, 50, 50, 57], // "000229"
+        [60; 39],
+    );
+    let mrz_hash: [u8; 32] = sha256_hash(mrz);
+
+    main(
+        mrz, mrz_hash,
+        false, true, false,
+        18, [50, 54, 48, 51, 49, 52], // "260314"
+        [0; 3], [0; 39],
+        true, // age 26 >= 18
+    );
+}
+
+// DS-17: Undisclosed fields must be zeroed
+#[test]
+fn test_undisclosed_fields_zeroed() {
+    let mrz = build_test_mrz(
+        [85, 84, 79],
+        [57, 48, 48, 49, 48, 49],
+        [60; 39],
+    );
+    let mrz_hash: [u8; 32] = sha256_hash(mrz);
+
+    // Only nationality disclosed; name and age must be zeroed
+    main(
+        mrz, mrz_hash,
+        true, false, false, // only nationality
+        18, [50, 54, 48, 51, 49, 52],
+        [85, 84, 79], // correct nationality
+        [0; 39],      // name must be zero
+        false,        // is_older must be false
+    );
+}
