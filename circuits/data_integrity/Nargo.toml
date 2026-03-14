@@ -1,0 +1,8 @@
+[package]
+name = "data_integrity"
+type = "bin"
+authors = ["kidneyweakx"]
+description = "ZK passport data integrity verification - validates SOD hash chain over data groups"
+
+[dependencies]
+sha256 = { tag = "v0.3.0", git = "https://github.com/noir-lang/sha256" }
