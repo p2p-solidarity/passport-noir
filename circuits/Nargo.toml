@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "passport_verifier",
+    "data_integrity",
+    "disclosure",
+]
+default-member = "passport_verifier"
