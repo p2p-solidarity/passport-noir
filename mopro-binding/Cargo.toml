@@ -1,0 +1,25 @@
+[package]
+name = "passport-zk-mopro"
+version = "0.1.0"
+edition = "2021"
+description = "Mopro FFI bindings for passport ZK verification circuits (Noir) → Swift"
+
+[dependencies]
+mopro-ffi = "0.3"
+noir_rs = { package = "noir", git = "https://github.com/zkmopro/noir-rs", features = ["barretenberg"], branch = "v1.0.0-beta.8-3" }
+serde_json = "1.0"
+thiserror = "2.0"
+
+[build-dependencies]
+mopro-ffi = "0.3"
+
+[lib]
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[[bin]]
+name = "ios"
+path = "src/bin/ios.rs"
+
+[features]
+default = ["uniffi"]
+uniffi = ["mopro-ffi/uniffi"]
