@@ -1,4 +1,5 @@
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, uniffi::Error)]
+#[uniffi(flat_error)]
 pub enum MoproError {
     #[error("Circuit error: {0}")]
     CircuitError(String),

@@ -1,0 +1,22 @@
+# macOS
+.DS_Store
+
+# Xcode / SwiftPM local artifacts
+.swiftpm/
+DerivedData/
+*.xcresult
+*.xcuserstate
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+
+# Rust build artifacts
+mopro-binding/target/
+mopro-binding/build/
+mopro-binding/Cargo.lock
+mopro-binding/MoproiOSBindings/
+
+# Local generated vectors
+mopro-binding/test-vectors/
+
+# Swift Package build
+.build/

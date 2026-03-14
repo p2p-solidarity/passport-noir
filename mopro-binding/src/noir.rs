@@ -4,6 +4,12 @@ use std::collections::HashMap;
 use noir_rs::native_types::WitnessMap;
 use noir_rs::FieldElement;
 
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct NoirProofResult {
+    pub proof: Vec<u8>,
+    pub vk: Vec<u8>,
+}
+
 /// Load circuit bytecode from a compiled Noir circuit JSON file.
 fn load_circuit_bytecode(circuit_path: &str) -> Result<String, MoproError> {
     let json_str = std::fs::read_to_string(circuit_path)
@@ -108,12 +114,13 @@ fn count_abi_witnesses(typ: Option<&serde_json::Value>) -> u32 {
 /// * `inputs` - Map of input name -> list of string values
 ///
 /// # Returns
-/// A tuple of (proof_bytes, verification_key_bytes)
+/// `NoirProofResult` containing proof and verification key bytes.
+#[uniffi::export]
 pub fn generate_noir_proof(
     circuit_path: String,
     srs_path: Option<String>,
     inputs: HashMap<String, Vec<String>>,
-) -> Result<(Vec<u8>, Vec<u8>), MoproError> {
+) -> Result<NoirProofResult, MoproError> {
     let bytecode = load_circuit_bytecode(&circuit_path)?;
 
     // Setup SRS (downloads or loads from file)
@@ -140,7 +147,7 @@ pub fn generate_noir_proof(
     )
     .map_err(|e| MoproError::ProofGenerationError(format!("{e}")))?;
 
-    Ok((proof, vk))
+    Ok(NoirProofResult { proof, vk })
 }
 
 /// Get the verification key for a Noir circuit.
@@ -151,6 +158,7 @@ pub fn generate_noir_proof(
 ///
 /// # Returns
 /// The verification key bytes
+#[uniffi::export]
 pub fn get_noir_verification_key(
     circuit_path: String,
     srs_path: Option<String>,
@@ -178,6 +186,7 @@ pub fn get_noir_verification_key(
 ///
 /// # Returns
 /// True if the proof is valid
+#[uniffi::export]
 pub fn verify_noir_proof(
     proof: Vec<u8>,
     vk: Vec<u8>,
@@ -309,11 +318,11 @@ mod tests {
 
         let result = generate_noir_proof(path, None, inputs);
         match &result {
-            Ok((proof, vk)) => {
+            Ok(bundle) => {
                 println!("MP-1 PASS: proof={} bytes, vk={} bytes",
-                    proof.len(), vk.len());
-                assert!(!proof.is_empty(), "Proof should not be empty");
-                assert!(!vk.is_empty(), "VK should not be empty");
+                    bundle.proof.len(), bundle.vk.len());
+                assert!(!bundle.proof.is_empty(), "Proof should not be empty");
+                assert!(!bundle.vk.is_empty(), "VK should not be empty");
             }
             Err(e) => panic!("MP-1 FAIL: proof generation failed: {e}"),
         }
@@ -327,10 +336,10 @@ mod tests {
         let path = circuit_path("disclosure");
         let inputs = disclosure_test_inputs();
 
-        let (proof, vk) = generate_noir_proof(path, None, inputs)
+        let bundle = generate_noir_proof(path, None, inputs)
             .expect("Proof generation should succeed");
 
-        let is_valid = verify_noir_proof(proof, vk)
+        let is_valid = verify_noir_proof(bundle.proof, bundle.vk)
             .expect("Verification should not error");
         assert!(is_valid, "MP-2: Valid proof should verify successfully");
     }
@@ -343,15 +352,15 @@ mod tests {
         let path = circuit_path("disclosure");
         let inputs = disclosure_test_inputs();
 
-        let (mut proof, vk) = generate_noir_proof(path, None, inputs)
+        let mut bundle = generate_noir_proof(path, None, inputs)
             .expect("Proof generation should succeed");
 
         // Tamper the proof
-        if !proof.is_empty() {
-            proof[0] ^= 0xFF;
+        if !bundle.proof.is_empty() {
+            bundle.proof[0] ^= 0xFF;
         }
 
-        let result = verify_noir_proof(proof, vk);
+        let result = verify_noir_proof(bundle.proof, bundle.vk);
         match result {
             Ok(false) => println!("MP-3 PASS: tampered proof correctly rejected"),
             Err(_) => println!("MP-3 PASS: tampered proof caused verification error"),
@@ -415,10 +424,10 @@ mod tests {
                 continue;
             };
 
-            let (proof, vk) = generate_noir_proof(path, None, inputs)
+            let bundle = generate_noir_proof(path, None, inputs)
                 .unwrap_or_else(|e| panic!("MP-7: {name} prove failed: {e}"));
 
-            let is_valid = verify_noir_proof(proof, vk)
+            let is_valid = verify_noir_proof(bundle.proof, bundle.vk)
                 .unwrap_or_else(|e| panic!("MP-7: {name} verify failed: {e}"));
 
             assert!(is_valid, "MP-7: {name} roundtrip should pass");
@@ -434,13 +443,17 @@ mod tests {
         let path = circuit_path("disclosure");
         let inputs = disclosure_test_inputs();
 
-        let (proof, vk) = generate_noir_proof(path, None, inputs)
+        let bundle = generate_noir_proof(path, None, inputs)
             .expect("Should generate proof");
 
         // Proof should be non-trivial (not all zeros)
-        let all_zero = proof.iter().all(|&b| b == 0);
+        let all_zero = bundle.proof.iter().all(|&b| b == 0);
         assert!(!all_zero, "MP-8: Proof should not be all zeros");
-        println!("MP-8: proof={} bytes, vk={} bytes", proof.len(), vk.len());
+        println!(
+            "MP-8: proof={} bytes, vk={} bytes",
+            bundle.proof.len(),
+            bundle.vk.len()
+        );
     }
 
     // ===== Performance Benchmarks =====
@@ -470,11 +483,11 @@ mod tests {
         let path = circuit_path("disclosure");
         let inputs = disclosure_test_inputs();
 
-        let (proof, vk) = generate_noir_proof(path, None, inputs)
+        let bundle = generate_noir_proof(path, None, inputs)
             .expect("Prove should succeed");
 
         let start = std::time::Instant::now();
-        let is_valid = verify_noir_proof(proof, vk)
+        let is_valid = verify_noir_proof(bundle.proof, bundle.vk)
             .expect("Verify should not error");
         let elapsed = start.elapsed();
 
@@ -491,11 +504,14 @@ mod tests {
         let path = circuit_path("disclosure");
         let inputs = disclosure_test_inputs();
 
-        let (proof, vk) = generate_noir_proof(path, None, inputs)
+        let bundle = generate_noir_proof(path, None, inputs)
             .expect("Prove should succeed");
 
-        println!("PERF-5: disclosure proof_size={} bytes, vk_size={} bytes",
-            proof.len(), vk.len());
+        println!(
+            "PERF-5: disclosure proof_size={} bytes, vk_size={} bytes",
+            bundle.proof.len(),
+            bundle.vk.len()
+        );
     }
 
     // PERF-7: Memory usage (approximate via resident set)

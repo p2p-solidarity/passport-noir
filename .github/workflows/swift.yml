@@ -1,0 +1,32 @@
+name: Test iOS Swift Package
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test-ios-package:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Pick Available iPhone Simulator
+        id: sim
+        shell: bash
+        run: |
+          DEVICE_ID=$(xcrun simctl list devices available | grep "iPhone" | head -n 1 | sed -E 's/.*\(([A-F0-9-]+)\) \((Shutdown|Booted)\).*/\1/')
+          if [ -z "$DEVICE_ID" ]; then
+            echo "No available iPhone simulator found."
+            exit 1
+          fi
+          echo "device_id=$DEVICE_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Build and Test Swift Package
+        run: |
+          xcodebuild test \
+            -scheme OpenPassportSwift \
+            -destination "id=${{ steps.sim.outputs.device_id }}"

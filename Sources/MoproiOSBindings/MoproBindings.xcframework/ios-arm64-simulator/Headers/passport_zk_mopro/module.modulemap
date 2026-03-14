@@ -1,0 +1,4 @@
+module passport_zk_moproFFI {
+    header "passport_zk_moproFFI.h"
+    export *
+}
