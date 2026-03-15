@@ -533,3 +533,95 @@ fn test_pipeline_wrong_sod_breaks_chain() {
 
     main(1, dg_contents, [2, 0, 0, 0], expected, sod_hash);
 }
+
+// ============================================================
+// OpenAC extension: explicit DG1(MRZ) hash link for disclosure
+// ============================================================
+
+fn derive_td3_mrz_hash(
+    dg1_content: [u8; MAX_DG_SIZE],
+    dg1_length: u32,
+) -> [u8; 32] {
+    assert(dg1_length >= 88, "DG1 length too short for TD3 MRZ");
+
+    let mut mrz_data: [u8; 88] = [0; 88];
+    for i in 0..88 {
+        mrz_data[i] = dg1_content[i];
+    }
+
+    digest(mrz_data)
+}
+
+fn main_with_mrz_link(
+    dg_count: u8,
+    dg_contents: [[u8; MAX_DG_SIZE]; MAX_DG_COUNT],
+    dg_lengths: [u32; MAX_DG_COUNT],
+    expected_dg_hashes: [[u8; 32]; MAX_DG_COUNT],
+    sod_hash: [u8; 32],
+    mrz_hash: [u8; 32],
+) {
+    main(dg_count, dg_contents, dg_lengths, expected_dg_hashes, sod_hash);
+
+    let computed_mrz_hash = derive_td3_mrz_hash(dg_contents[0], dg_lengths[0]);
+    for i in 0..32 {
+        assert(
+            computed_mrz_hash[i] == mrz_hash[i],
+            "MRZ hash link mismatch",
+        );
+    }
+}
+
+#[test]
+fn test_dg1_mrz_hash_output_matches_disclosure_input() {
+    let mut dg_contents: [[u8; MAX_DG_SIZE]; MAX_DG_COUNT] = [[0; MAX_DG_SIZE]; MAX_DG_COUNT];
+    let mut mrz: [u8; 88] = [60; 88];
+
+    // TD3-style MRZ prefix
+    mrz[0] = 80; mrz[1] = 60; mrz[2] = 85; mrz[3] = 84; mrz[4] = 79;
+    mrz[5] = 68; mrz[6] = 79; mrz[7] = 69; mrz[8] = 60; mrz[9] = 60;
+    mrz[10] = 74; mrz[11] = 79; mrz[12] = 72; mrz[13] = 78;
+    mrz[54] = 85; mrz[55] = 84; mrz[56] = 79;
+    mrz[57] = 48; mrz[58] = 48; mrz[59] = 48;
+    mrz[60] = 51; mrz[61] = 49; mrz[62] = 53;
+
+    for i in 0..88 {
+        dg_contents[0][i] = mrz[i];
+    }
+
+    let dg_lengths: [u32; MAX_DG_COUNT] = [88, 0, 0, 0];
+    let h0 = make_dg_padded(dg_contents[0]);
+    let zero: [u8; 32] = [0; 32];
+    let mut expected: [[u8; 32]; MAX_DG_COUNT] = [[0; 32]; MAX_DG_COUNT];
+    expected[0] = h0;
+
+    let sod_hash = compute_sod_hash(h0, zero, zero, zero);
+    let mrz_hash = digest(mrz);
+
+    main_with_mrz_link(1, dg_contents, dg_lengths, expected, sod_hash, mrz_hash);
+}
+
+#[test(should_fail)]
+fn test_tampered_mrz_hash_link_fails() {
+    let mut dg_contents: [[u8; MAX_DG_SIZE]; MAX_DG_COUNT] = [[0; MAX_DG_SIZE]; MAX_DG_COUNT];
+    let mut mrz: [u8; 88] = [60; 88];
+
+    mrz[0] = 80; mrz[1] = 60; mrz[2] = 85; mrz[3] = 84; mrz[4] = 79;
+    mrz[54] = 85; mrz[55] = 84; mrz[56] = 79;
+    mrz[57] = 48; mrz[58] = 48; mrz[59] = 48; mrz[60] = 51; mrz[61] = 49; mrz[62] = 53;
+
+    for i in 0..88 {
+        dg_contents[0][i] = mrz[i];
+    }
+
+    let dg_lengths: [u32; MAX_DG_COUNT] = [88, 0, 0, 0];
+    let h0 = make_dg_padded(dg_contents[0]);
+    let zero: [u8; 32] = [0; 32];
+    let mut expected: [[u8; 32]; MAX_DG_COUNT] = [[0; 32]; MAX_DG_COUNT];
+    expected[0] = h0;
+    let sod_hash = compute_sod_hash(h0, zero, zero, zero);
+
+    let mut bad_mrz_hash = digest(mrz);
+    bad_mrz_hash[0] = bad_mrz_hash[0] ^ 0xFF;
+
+    main_with_mrz_link(1, dg_contents, dg_lengths, expected, sod_hash, bad_mrz_hash);
+}

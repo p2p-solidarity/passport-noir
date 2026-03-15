@@ -514,3 +514,149 @@ fn test_undisclosed_fields_zeroed() {
         false,        // is_older must be false
     );
 }
+
+// ============================================================
+// OpenAC extension: challenge binding for show phase
+// ============================================================
+
+global CHALLENGE_BYTES: u32 = 32;
+global CHALLENGE_DOMAIN_BYTES: u32 = 14;
+global EPOCH_BYTES: u32 = 4;
+
+fn challenge_domain() -> [u8; CHALLENGE_DOMAIN_BYTES] {
+    [111, 112, 101, 110, 97, 99, 46, 115, 104, 111, 119, 46, 118, 49]
+}
+
+fn compute_challenge_binding(
+    challenge: [u8; CHALLENGE_BYTES],
+    mrz_hash: [u8; 32],
+    epoch: [u8; EPOCH_BYTES],
+) -> [u8; 32] {
+    let mut preimage: [u8; CHALLENGE_DOMAIN_BYTES + CHALLENGE_BYTES + 32 + EPOCH_BYTES] =
+        [0; CHALLENGE_DOMAIN_BYTES + CHALLENGE_BYTES + 32 + EPOCH_BYTES];
+    let domain = challenge_domain();
+
+    for i in 0..CHALLENGE_DOMAIN_BYTES {
+        preimage[i] = domain[i];
+    }
+
+    for i in 0..CHALLENGE_BYTES {
+        preimage[CHALLENGE_DOMAIN_BYTES + i] = challenge[i];
+    }
+
+    for i in 0..32 {
+        preimage[CHALLENGE_DOMAIN_BYTES + CHALLENGE_BYTES + i] = mrz_hash[i];
+    }
+
+    for i in 0..EPOCH_BYTES {
+        preimage[CHALLENGE_DOMAIN_BYTES + CHALLENGE_BYTES + 32 + i] = epoch[i];
+    }
+
+    sha256_hash(preimage)
+}
+
+fn main_with_challenge(
+    mrz_data: [u8; MRZ_TOTAL_LEN],
+    mrz_hash: [u8; 32],
+    disclose_nationality: bool,
+    disclose_older_than: bool,
+    disclose_name: bool,
+    age_threshold: u8,
+    current_date: [u8; 6],
+    out_nationality: [u8; 3],
+    out_name: [u8; 39],
+    out_is_older: bool,
+    challenge: [u8; CHALLENGE_BYTES],
+    epoch: [u8; EPOCH_BYTES],
+    out_challenge_digest: [u8; 32],
+) {
+    main(
+        mrz_data,
+        mrz_hash,
+        disclose_nationality,
+        disclose_older_than,
+        disclose_name,
+        age_threshold,
+        current_date,
+        out_nationality,
+        out_name,
+        out_is_older,
+    );
+
+    let computed = compute_challenge_binding(challenge, mrz_hash, epoch);
+    for i in 0..32 {
+        assert(
+            computed[i] == out_challenge_digest[i],
+            "Challenge digest mismatch",
+        );
+    }
+}
+
+fn sample_challenge(seed: u8) -> [u8; CHALLENGE_BYTES] {
+    let mut out: [u8; CHALLENGE_BYTES] = [0; CHALLENGE_BYTES];
+    for i in 0..CHALLENGE_BYTES {
+        out[i] = seed + (i as u8);
+    }
+    out
+}
+
+#[test]
+fn test_challenge_binding_pass() {
+    let mrz = build_test_mrz(
+        [85, 84, 79],
+        [57, 48, 48, 49, 48, 49],
+        [60; 39],
+    );
+    let mrz_hash: [u8; 32] = sha256_hash(mrz);
+    let challenge = sample_challenge(7);
+    let epoch: [u8; EPOCH_BYTES] = [0x20, 0x26, 0x03, 0x15];
+    let out_challenge_digest = compute_challenge_binding(challenge, mrz_hash, epoch);
+
+    main_with_challenge(
+        mrz,
+        mrz_hash,
+        false,
+        false,
+        false,
+        18,
+        [50, 54, 48, 51, 49, 52],
+        [0; 3],
+        [0; 39],
+        false,
+        challenge,
+        epoch,
+        out_challenge_digest,
+    );
+}
+
+#[test(should_fail)]
+fn test_challenge_binding_fails_on_replay_value() {
+    let mrz = build_test_mrz(
+        [85, 84, 79],
+        [57, 48, 48, 49, 48, 49],
+        [60; 39],
+    );
+    let mrz_hash: [u8; 32] = sha256_hash(mrz);
+    let challenge = sample_challenge(9);
+    let epoch: [u8; EPOCH_BYTES] = [0x20, 0x26, 0x03, 0x15];
+    let out_challenge_digest = compute_challenge_binding(challenge, mrz_hash, epoch);
+
+    let mut replayed_challenge = challenge;
+    replayed_challenge[0] = replayed_challenge[0] ^ 0x01;
+
+    main_with_challenge(
+        mrz,
+        mrz_hash,
+        false,
+        false,
+        false,
+        18,
+        [50, 54, 48, 51, 49, 52],
+        [0; 3],
+        [0; 39],
+        false,
+        replayed_challenge,
+        epoch,
+        out_challenge_digest,
+    );
+}

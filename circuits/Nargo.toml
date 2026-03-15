@@ -3,5 +3,7 @@ members = [
     "passport_verifier",
     "data_integrity",
     "disclosure",
+    "prepare_link",
+    "show_link",
 ]
 default-member = "passport_verifier"

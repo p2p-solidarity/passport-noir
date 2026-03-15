@@ -2,6 +2,11 @@
 
 Noir passport ZK circuits + mopro bindings packaged in a `SemaphoreSwift`-style Swift Package for iOS.
 
+OpenAC-mode additions are included:
+- `prepare_link` circuit for Prepare-phase commitment.
+- `show_link` circuit for Show-phase challenge/scoped linking.
+- Swift helpers for OpenAC prepare/show/link verification.
+
 ## Repository Format
 
 ```text
@@ -19,6 +24,7 @@ Tests/
 
 - Supported: iOS bindings and Swift Package integration.
 - Not included: Android bindings.
+- On non-iOS platforms, the package now compiles with a fallback shim (for tooling/tests), but proving/verification APIs throw unavailable-platform errors.
 
 ## Build iOS Bindings
 
@@ -37,6 +43,7 @@ make build-ios
 1. Copy compiled circuit JSON files to `mopro-binding/test-vectors/noir/`
 2. Run `IOS_ARCHS=<...> IPHONEOS_DEPLOYMENT_TARGET=15.0 CONFIGURATION=release cargo run --bin ios`
 3. Sync `mopro-binding/MoproiOSBindings` to `Sources/MoproiOSBindings`
+4. Auto-patch `mopro.swift` with a non-iOS fallback shim so `swift build/test` on macOS still works
 
 ## Use as Swift Package
 
@@ -88,6 +95,32 @@ let inputs: [String: [String]] = [
 
 let result = try generateNoirProof(circuitPath: circuitPath, srsPath: nil, inputs: inputs)
 let isValid = try verifyNoirProof(proof: result.proof, vk: result.vk)
+```
+
+## OpenAC Swift Helpers
+
+```swift
+import OpenPassportSwift
+
+let prepareCommitment = try computeOpenACPrepareCommitment(
+    sodHash: sodHash,
+    mrzHash: mrzHash,
+    linkRandomness: linkRandomness
+)
+
+let request = OpenACShowRequest(
+    challenge: challenge,
+    linkMode: .scopedLinkable,
+    linkScope: linkScope,
+    epoch: Data([0x20, 0x26, 0x03, 0x15])
+)
+
+let ok = try verifyOpenACLinking(
+    prepare: artifact,
+    show: presentation,
+    request: request,
+    nowUnix: UInt64(Date().timeIntervalSince1970)
+)
 ```
 
 ## References

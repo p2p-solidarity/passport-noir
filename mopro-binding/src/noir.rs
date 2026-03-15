@@ -36,15 +36,13 @@ fn build_witness_map(
         .map_err(|e| MoproError::InvalidInput(format!("Failed to parse circuit JSON: {e}")))?;
 
     // Extract ABI parameters to determine witness ordering
-    let abi = json.get("abi").ok_or_else(|| {
-        MoproError::InvalidInput("Circuit JSON missing 'abi' field".into())
-    })?;
+    let abi = json
+        .get("abi")
+        .ok_or_else(|| MoproError::InvalidInput("Circuit JSON missing 'abi' field".into()))?;
     let params = abi
         .get("parameters")
         .and_then(|p| p.as_array())
-        .ok_or_else(|| {
-            MoproError::InvalidInput("Circuit ABI missing 'parameters' array".into())
-        })?;
+        .ok_or_else(|| MoproError::InvalidInput("Circuit ABI missing 'parameters' array".into()))?;
 
     let mut witness_map = WitnessMap::new();
     let mut witness_idx: u32 = 0;
@@ -54,9 +52,7 @@ fn build_witness_map(
         let name = param
             .get("name")
             .and_then(|n| n.as_str())
-            .ok_or_else(|| {
-                MoproError::InvalidInput("ABI parameter missing 'name'".into())
-            })?;
+            .ok_or_else(|| MoproError::InvalidInput("ABI parameter missing 'name'".into()))?;
 
         if let Some(values) = inputs.get(name) {
             for val_str in values {
@@ -65,10 +61,7 @@ fn build_witness_map(
                         "Cannot parse '{val_str}' as field element for input '{name}'"
                     ))
                 })?;
-                witness_map.insert(
-                    noir_rs::native_types::Witness(witness_idx),
-                    field,
-                );
+                witness_map.insert(noir_rs::native_types::Witness(witness_idx), field);
                 witness_idx += 1;
             }
         } else {
@@ -89,10 +82,7 @@ fn count_abi_witnesses(typ: Option<&serde_json::Value>) -> u32 {
                 match kind {
                     "field" | "integer" | "boolean" => 1,
                     "array" => {
-                        let len = t
-                            .get("length")
-                            .and_then(|l| l.as_u64())
-                            .unwrap_or(1) as u32;
+                        let len = t.get("length").and_then(|l| l.as_u64()).unwrap_or(1) as u32;
                         let inner = count_abi_witnesses(t.get("type"));
                         len * inner
                     }
@@ -124,12 +114,8 @@ pub fn generate_noir_proof(
     let bytecode = load_circuit_bytecode(&circuit_path)?;
 
     // Setup SRS (downloads or loads from file)
-    noir_rs::barretenberg::srs::setup_srs_from_bytecode(
-        &bytecode,
-        srs_path.as_deref(),
-        false,
-    )
-    .map_err(|e| MoproError::CircuitError(format!("SRS setup failed: {e}")))?;
+    noir_rs::barretenberg::srs::setup_srs_from_bytecode(&bytecode, srs_path.as_deref(), false)
+        .map_err(|e| MoproError::CircuitError(format!("SRS setup failed: {e}")))?;
 
     // Build witness map from named inputs
     let witness_map = build_witness_map(&circuit_path, inputs)?;
@@ -139,13 +125,9 @@ pub fn generate_noir_proof(
         .map_err(|e| MoproError::CircuitError(format!("Failed to get VK: {e}")))?;
 
     // Generate proof
-    let proof = noir_rs::barretenberg::prove::prove_ultra_honk(
-        &bytecode,
-        witness_map,
-        vk.clone(),
-        false,
-    )
-    .map_err(|e| MoproError::ProofGenerationError(format!("{e}")))?;
+    let proof =
+        noir_rs::barretenberg::prove::prove_ultra_honk(&bytecode, witness_map, vk.clone(), false)
+            .map_err(|e| MoproError::ProofGenerationError(format!("{e}")))?;
 
     Ok(NoirProofResult { proof, vk })
 }
@@ -165,12 +147,8 @@ pub fn get_noir_verification_key(
 ) -> Result<Vec<u8>, MoproError> {
     let bytecode = load_circuit_bytecode(&circuit_path)?;
 
-    noir_rs::barretenberg::srs::setup_srs_from_bytecode(
-        &bytecode,
-        srs_path.as_deref(),
-        false,
-    )
-    .map_err(|e| MoproError::CircuitError(format!("SRS setup failed: {e}")))?;
+    noir_rs::barretenberg::srs::setup_srs_from_bytecode(&bytecode, srs_path.as_deref(), false)
+        .map_err(|e| MoproError::CircuitError(format!("SRS setup failed: {e}")))?;
 
     let vk = noir_rs::barretenberg::verify::get_ultra_honk_verification_key(&bytecode, false)
         .map_err(|e| MoproError::CircuitError(format!("{e}")))?;
@@ -187,10 +165,7 @@ pub fn get_noir_verification_key(
 /// # Returns
 /// True if the proof is valid
 #[uniffi::export]
-pub fn verify_noir_proof(
-    proof: Vec<u8>,
-    vk: Vec<u8>,
-) -> Result<bool, MoproError> {
+pub fn verify_noir_proof(proof: Vec<u8>, vk: Vec<u8>) -> Result<bool, MoproError> {
     let is_valid = noir_rs::barretenberg::verify::verify_ultra_honk(proof, vk)
         .map_err(|e| MoproError::VerificationError(format!("{e}")))?;
 
@@ -231,16 +206,30 @@ mod tests {
         let mut mrz = vec![60u8; 88];
         mrz[0] = 80; // P
         mrz[1] = 60; // <
-        mrz[2] = 85; mrz[3] = 84; mrz[4] = 79; // UTO
-        // Name at 5..43: DOE<<JOHN
-        mrz[5] = 68; mrz[6] = 79; mrz[7] = 69; // DOE
-        mrz[8] = 60; mrz[9] = 60; // <<
-        mrz[10] = 74; mrz[11] = 79; mrz[12] = 72; mrz[13] = 78; // JOHN
-        // Nationality at 54..56: UTO
-        mrz[54] = 85; mrz[55] = 84; mrz[56] = 79;
+        mrz[2] = 85;
+        mrz[3] = 84;
+        mrz[4] = 79; // UTO
+                     // Name at 5..43: DOE<<JOHN
+        mrz[5] = 68;
+        mrz[6] = 79;
+        mrz[7] = 69; // DOE
+        mrz[8] = 60;
+        mrz[9] = 60; // <<
+        mrz[10] = 74;
+        mrz[11] = 79;
+        mrz[12] = 72;
+        mrz[13] = 78; // JOHN
+                      // Nationality at 54..56: UTO
+        mrz[54] = 85;
+        mrz[55] = 84;
+        mrz[56] = 79;
         // DOB at 57..62: 900101
-        mrz[57] = 57; mrz[58] = 48; mrz[59] = 48;
-        mrz[60] = 49; mrz[61] = 48; mrz[62] = 49;
+        mrz[57] = 57;
+        mrz[58] = 48;
+        mrz[59] = 48;
+        mrz[60] = 49;
+        mrz[61] = 48;
+        mrz[62] = 49;
 
         inputs.insert(
             "mrz_data".to_string(),
@@ -263,19 +252,20 @@ mod tests {
         inputs.insert(
             "current_date".to_string(),
             vec!["0x32", "0x36", "0x30", "0x33", "0x31", "0x34"]
-                .iter().map(|s| s.to_string()).collect(),
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
         );
 
         // Expected outputs
         inputs.insert(
             "out_nationality".to_string(),
             vec!["0x55", "0x54", "0x4f"] // UTO
-                .iter().map(|s| s.to_string()).collect(),
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
         );
-        inputs.insert(
-            "out_name".to_string(),
-            vec!["0x00".to_string(); 39],
-        );
+        inputs.insert("out_name".to_string(), vec!["0x00".to_string(); 39]);
         inputs.insert("out_is_older".to_string(), vec!["0".to_string()]);
 
         inputs
@@ -298,7 +288,7 @@ mod tests {
 
         let mut result = [0u8; 32];
         for i in 0..32 {
-            result[i] = u8::from_str_radix(&hex[i*2..i*2+2], 16).unwrap();
+            result[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap();
         }
         result
     }
@@ -319,8 +309,11 @@ mod tests {
         let result = generate_noir_proof(path, None, inputs);
         match &result {
             Ok(bundle) => {
-                println!("MP-1 PASS: proof={} bytes, vk={} bytes",
-                    bundle.proof.len(), bundle.vk.len());
+                println!(
+                    "MP-1 PASS: proof={} bytes, vk={} bytes",
+                    bundle.proof.len(),
+                    bundle.vk.len()
+                );
                 assert!(!bundle.proof.is_empty(), "Proof should not be empty");
                 assert!(!bundle.vk.is_empty(), "VK should not be empty");
             }
@@ -332,15 +325,17 @@ mod tests {
     #[test]
     #[ignore]
     fn test_verify_proof_disclosure() {
-        if !has_test_vectors() { return; }
+        if !has_test_vectors() {
+            return;
+        }
         let path = circuit_path("disclosure");
         let inputs = disclosure_test_inputs();
 
-        let bundle = generate_noir_proof(path, None, inputs)
-            .expect("Proof generation should succeed");
+        let bundle =
+            generate_noir_proof(path, None, inputs).expect("Proof generation should succeed");
 
-        let is_valid = verify_noir_proof(bundle.proof, bundle.vk)
-            .expect("Verification should not error");
+        let is_valid =
+            verify_noir_proof(bundle.proof, bundle.vk).expect("Verification should not error");
         assert!(is_valid, "MP-2: Valid proof should verify successfully");
     }
 
@@ -348,12 +343,14 @@ mod tests {
     #[test]
     #[ignore]
     fn test_verify_tampered_proof_fails() {
-        if !has_test_vectors() { return; }
+        if !has_test_vectors() {
+            return;
+        }
         let path = circuit_path("disclosure");
         let inputs = disclosure_test_inputs();
 
-        let mut bundle = generate_noir_proof(path, None, inputs)
-            .expect("Proof generation should succeed");
+        let mut bundle =
+            generate_noir_proof(path, None, inputs).expect("Proof generation should succeed");
 
         // Tamper the proof
         if !bundle.proof.is_empty() {
@@ -372,11 +369,12 @@ mod tests {
     #[test]
     #[ignore]
     fn test_get_verification_key() {
-        if !has_test_vectors() { return; }
+        if !has_test_vectors() {
+            return;
+        }
         let path = circuit_path("disclosure");
 
-        let vk = get_noir_verification_key(path, None)
-            .expect("Should get verification key");
+        let vk = get_noir_verification_key(path, None).expect("Should get verification key");
         assert!(!vk.is_empty(), "MP-4: VK should not be empty");
         println!("MP-4 PASS: VK size = {} bytes", vk.len());
     }
@@ -397,7 +395,9 @@ mod tests {
     #[test]
     #[ignore]
     fn test_invalid_input_names() {
-        if !has_test_vectors() { return; }
+        if !has_test_vectors() {
+            return;
+        }
         let path = circuit_path("disclosure");
 
         let mut bad_inputs = HashMap::new();
@@ -411,7 +411,9 @@ mod tests {
     #[test]
     #[ignore]
     fn test_proof_roundtrip_all_circuits() {
-        if !has_test_vectors() { return; }
+        if !has_test_vectors() {
+            return;
+        }
 
         // Only test disclosure for now (smallest circuit, fastest prove)
         let circuits = ["disclosure"];
@@ -439,12 +441,13 @@ mod tests {
     #[test]
     #[ignore]
     fn test_proof_serialization_format() {
-        if !has_test_vectors() { return; }
+        if !has_test_vectors() {
+            return;
+        }
         let path = circuit_path("disclosure");
         let inputs = disclosure_test_inputs();
 
-        let bundle = generate_noir_proof(path, None, inputs)
-            .expect("Should generate proof");
+        let bundle = generate_noir_proof(path, None, inputs).expect("Should generate proof");
 
         // Proof should be non-trivial (not all zeros)
         let all_zero = bundle.proof.iter().all(|&b| b == 0);
@@ -462,7 +465,9 @@ mod tests {
     #[test]
     #[ignore]
     fn bench_prove_disclosure() {
-        if !has_test_vectors() { return; }
+        if !has_test_vectors() {
+            return;
+        }
         let path = circuit_path("disclosure");
         let inputs = disclosure_test_inputs();
 
@@ -472,40 +477,49 @@ mod tests {
 
         println!("PERF-1: disclosure prove time: {:?}", elapsed);
         assert!(result.is_ok(), "Proof should succeed");
-        assert!(elapsed.as_secs() < 60, "Disclosure proving took too long: {:?}", elapsed);
+        assert!(
+            elapsed.as_secs() < 60,
+            "Disclosure proving took too long: {:?}",
+            elapsed
+        );
     }
 
     // PERF-4: Verification time for disclosure
     #[test]
     #[ignore]
     fn bench_verify_disclosure() {
-        if !has_test_vectors() { return; }
+        if !has_test_vectors() {
+            return;
+        }
         let path = circuit_path("disclosure");
         let inputs = disclosure_test_inputs();
 
-        let bundle = generate_noir_proof(path, None, inputs)
-            .expect("Prove should succeed");
+        let bundle = generate_noir_proof(path, None, inputs).expect("Prove should succeed");
 
         let start = std::time::Instant::now();
-        let is_valid = verify_noir_proof(bundle.proof, bundle.vk)
-            .expect("Verify should not error");
+        let is_valid = verify_noir_proof(bundle.proof, bundle.vk).expect("Verify should not error");
         let elapsed = start.elapsed();
 
         println!("PERF-4: disclosure verify time: {:?}", elapsed);
         assert!(is_valid);
-        assert!(elapsed.as_secs() < 5, "Verification took too long: {:?}", elapsed);
+        assert!(
+            elapsed.as_secs() < 5,
+            "Verification took too long: {:?}",
+            elapsed
+        );
     }
 
     // PERF-5: Proof size measurement
     #[test]
     #[ignore]
     fn bench_proof_size_bytes() {
-        if !has_test_vectors() { return; }
+        if !has_test_vectors() {
+            return;
+        }
         let path = circuit_path("disclosure");
         let inputs = disclosure_test_inputs();
 
-        let bundle = generate_noir_proof(path, None, inputs)
-            .expect("Prove should succeed");
+        let bundle = generate_noir_proof(path, None, inputs).expect("Prove should succeed");
 
         println!(
             "PERF-5: disclosure proof_size={} bytes, vk_size={} bytes",
@@ -518,7 +532,9 @@ mod tests {
     #[test]
     #[ignore]
     fn bench_memory_usage() {
-        if !has_test_vectors() { return; }
+        if !has_test_vectors() {
+            return;
+        }
 
         let before = get_rss_mb();
         let path = circuit_path("disclosure");
@@ -527,7 +543,12 @@ mod tests {
         let _ = generate_noir_proof(path, None, inputs);
 
         let after = get_rss_mb();
-        println!("PERF-7: RSS before={}MB, after={}MB, delta={}MB", before, after, after - before);
+        println!(
+            "PERF-7: RSS before={}MB, after={}MB, delta={}MB",
+            before,
+            after,
+            after - before
+        );
         assert!(after < 2048, "Memory usage exceeded 2GB: {}MB", after);
     }
 

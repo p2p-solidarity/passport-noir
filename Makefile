@@ -27,6 +27,8 @@ build-ios: circuits
 	cp $(CIRCUIT_DIR)/target/passport_verifier.json $(MOPRO_DIR)/test-vectors/noir/ 2>/dev/null || true
 	cp $(CIRCUIT_DIR)/target/data_integrity.json $(MOPRO_DIR)/test-vectors/noir/ 2>/dev/null || true
 	cp $(CIRCUIT_DIR)/target/disclosure.json $(MOPRO_DIR)/test-vectors/noir/ 2>/dev/null || true
+	cp $(CIRCUIT_DIR)/target/prepare_link.json $(MOPRO_DIR)/test-vectors/noir/ 2>/dev/null || true
+	cp $(CIRCUIT_DIR)/target/show_link.json $(MOPRO_DIR)/test-vectors/noir/ 2>/dev/null || true
 	@echo "Building iOS bindings..."
 	cd $(MOPRO_DIR) && IOS_ARCHS="$(IOS_ARCHS)" IPHONEOS_DEPLOYMENT_TARGET=15.0 CONFIGURATION=release cargo run --bin ios
 	@$(MAKE) sync-ios-bindings
@@ -40,6 +42,7 @@ sync-ios-bindings:
 	rm -rf $(SWIFT_PACKAGE_BINDINGS_DIR)
 	mkdir -p Sources
 	cp -R $(MOPRO_IOS_BINDINGS_DIR) $(SWIFT_PACKAGE_BINDINGS_DIR)
+	./scripts/patch_mopro_fallback.sh $(SWIFT_PACKAGE_BINDINGS_DIR)/mopro.swift
 
 # Clean build artifacts
 clean:
