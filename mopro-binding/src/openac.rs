@@ -5,6 +5,9 @@ pub const HASH_BYTES: usize = 32;
 const PREPARE_DOMAIN: &[u8] = b"openac.preparev1";
 const SHOW_DOMAIN: &[u8] = b"openac.show.v1";
 const SCOPE_DOMAIN: &[u8] = b"openac.scope.v1";
+const FIELD_BYTES: usize = 32;
+const PREPARE_PUBLIC_INPUT_COUNT: usize = HASH_BYTES;
+const SHOW_PUBLIC_INPUT_COUNT: usize = 1 + HASH_BYTES + 4 + HASH_BYTES + HASH_BYTES + HASH_BYTES;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenAcLinkMode {
@@ -41,6 +44,9 @@ pub struct OpenAcPolicy {
     pub link_scope: Option<[u8; HASH_BYTES]>,
     pub epoch: [u8; 4],
     pub now_unix: u64,
+    pub expected_challenge: [u8; HASH_BYTES],
+    pub prepare_vk_hash: [u8; HASH_BYTES],
+    pub show_vk_hash: [u8; HASH_BYTES],
 }
 
 fn verification_error(code: &str) -> MoproError {
@@ -74,6 +80,65 @@ fn sha256_concat(parts: &[&[u8]]) -> [u8; HASH_BYTES] {
         hasher.update(part);
     }
     hasher.finalize().into()
+}
+
+fn hash_bytes(input: &[u8]) -> [u8; HASH_BYTES] {
+    sha256_concat(&[input])
+}
+
+fn append_field_u8(encoded: &mut Vec<u8>, value: u8) {
+    let mut field = [0u8; FIELD_BYTES];
+    field[FIELD_BYTES - 1] = value;
+    encoded.extend_from_slice(&field);
+}
+
+fn append_field_bool(encoded: &mut Vec<u8>, value: bool) {
+    append_field_u8(encoded, if value { 1 } else { 0 });
+}
+
+fn append_field_u8_array<const N: usize>(encoded: &mut Vec<u8>, values: &[u8; N]) {
+    values.iter().for_each(|v| append_field_u8(encoded, *v));
+}
+
+fn encode_prepare_public_inputs(prepare_commitment: [u8; HASH_BYTES]) -> Vec<u8> {
+    let mut encoded = Vec::with_capacity(PREPARE_PUBLIC_INPUT_COUNT * FIELD_BYTES);
+    append_field_u8_array(&mut encoded, &prepare_commitment);
+    encoded
+}
+
+fn encode_show_public_inputs(
+    link_mode: bool,
+    link_scope: [u8; HASH_BYTES],
+    epoch: [u8; 4],
+    prepare_commitment: [u8; HASH_BYTES],
+    challenge_digest: [u8; HASH_BYTES],
+    link_tag: [u8; HASH_BYTES],
+) -> Vec<u8> {
+    let mut encoded = Vec::with_capacity(SHOW_PUBLIC_INPUT_COUNT * FIELD_BYTES);
+    append_field_bool(&mut encoded, link_mode);
+    append_field_u8_array(&mut encoded, &link_scope);
+    append_field_u8_array(&mut encoded, &epoch);
+    append_field_u8_array(&mut encoded, &prepare_commitment);
+    append_field_u8_array(&mut encoded, &challenge_digest);
+    append_field_u8_array(&mut encoded, &link_tag);
+    encoded
+}
+
+fn verify_public_input_prefix(
+    proof: &[u8],
+    expected_public_inputs: &[u8],
+    missing_code: &str,
+    mismatch_code: &str,
+) -> Result<(), MoproError> {
+    if proof.len() < expected_public_inputs.len() {
+        return Err(verification_error(missing_code));
+    }
+
+    if proof[..expected_public_inputs.len()] != expected_public_inputs[..] {
+        return Err(verification_error(mismatch_code));
+    }
+
+    Ok(())
 }
 
 pub fn compute_prepare_commitment(
@@ -117,6 +182,16 @@ pub fn verify_openac_prepare_show_with_verifier<F>(
 where
     F: Fn(Vec<u8>, Vec<u8>) -> Result<bool, MoproError>,
 {
+    let trusted_prepare_vk_hash = hash_bytes(&prepare.vk);
+    if trusted_prepare_vk_hash != policy.prepare_vk_hash {
+        return Err(verification_error("untrusted_prepare_vk"));
+    }
+
+    let trusted_show_vk_hash = hash_bytes(&show.vk);
+    if trusted_show_vk_hash != policy.show_vk_hash {
+        return Err(verification_error("untrusted_show_vk"));
+    }
+
     verify_noir_bundle_with(
         &prepare.proof,
         &prepare.vk,
@@ -124,6 +199,36 @@ where
         verifier,
     )?;
     verify_noir_bundle_with(&show.proof, &show.vk, "invalid_show_proof", verifier)?;
+
+    let expected_prepare_public_inputs = encode_prepare_public_inputs(prepare.prepare_commitment);
+    verify_public_input_prefix(
+        &prepare.proof,
+        &expected_prepare_public_inputs,
+        "prepare_public_inputs_missing",
+        "prepare_public_inputs_mismatch",
+    )?;
+
+    let public_link_scope = match policy.link_mode {
+        OpenAcLinkMode::Unlinkable => [0u8; HASH_BYTES],
+        OpenAcLinkMode::ScopedLinkable => policy
+            .link_scope
+            .ok_or_else(|| verification_error("scope_mismatch"))?,
+    };
+
+    let expected_show_public_inputs = encode_show_public_inputs(
+        matches!(policy.link_mode, OpenAcLinkMode::ScopedLinkable),
+        public_link_scope,
+        policy.epoch,
+        show.prepare_commitment,
+        show.challenge_digest,
+        show.link_tag,
+    );
+    verify_public_input_prefix(
+        &show.proof,
+        &expected_show_public_inputs,
+        "show_public_inputs_missing",
+        "show_public_inputs_mismatch",
+    )?;
 
     if prepare.created_at_unix > policy.now_unix {
         return Err(verification_error("prepare_not_active"));
@@ -145,8 +250,15 @@ where
         return Err(verification_error("mrz_hash_mismatch"));
     }
 
-    let expected_challenge_digest =
-        compute_challenge_digest(show.challenge, show.prepare_commitment, policy.epoch);
+    if show.challenge != policy.expected_challenge {
+        return Err(verification_error("invalid_challenge"));
+    }
+
+    let expected_challenge_digest = compute_challenge_digest(
+        policy.expected_challenge,
+        show.prepare_commitment,
+        policy.epoch,
+    );
     if show.challenge_digest != expected_challenge_digest {
         return Err(verification_error("invalid_challenge"));
     }
@@ -191,6 +303,34 @@ mod tests {
         out
     }
 
+    fn combine_with_public_inputs(public_inputs: Vec<u8>, proof_body: &[u8]) -> Vec<u8> {
+        let mut out = public_inputs;
+        out.extend_from_slice(proof_body);
+        out
+    }
+
+    fn proof_body_from_combined(proof: &[u8], num_public_inputs: usize) -> Vec<u8> {
+        let offset = num_public_inputs * FIELD_BYTES;
+        proof[offset..].to_vec()
+    }
+
+    fn rewrite_show_proof_public_inputs(show: &mut OpenAcShowPresentation, policy: &OpenAcPolicy) {
+        let link_scope = match policy.link_mode {
+            OpenAcLinkMode::Unlinkable => [0u8; HASH_BYTES],
+            OpenAcLinkMode::ScopedLinkable => policy.link_scope.unwrap_or([0u8; HASH_BYTES]),
+        };
+        let show_public_inputs = encode_show_public_inputs(
+            matches!(policy.link_mode, OpenAcLinkMode::ScopedLinkable),
+            link_scope,
+            policy.epoch,
+            show.prepare_commitment,
+            show.challenge_digest,
+            show.link_tag,
+        );
+        let proof_body = proof_body_from_combined(&show.proof, SHOW_PUBLIC_INPUT_COUNT);
+        show.proof = combine_with_public_inputs(show_public_inputs, &proof_body);
+    }
+
     fn scoped_fixture() -> (OpenAcPrepareArtifact, OpenAcShowPresentation, OpenAcPolicy) {
         let sod_hash = sample_hash(11);
         let mrz_hash = sample_hash(22);
@@ -201,6 +341,17 @@ mod tests {
         let link_scope = sample_hash(55);
         let challenge_digest = compute_challenge_digest(challenge, prepare_commitment, epoch);
         let link_tag = compute_scoped_link_tag(prepare_commitment, link_scope, epoch);
+        let prepare_vk = vec![4, 5, 6];
+        let show_vk = vec![10, 11, 12];
+        let prepare_public_inputs = encode_prepare_public_inputs(prepare_commitment);
+        let show_public_inputs = encode_show_public_inputs(
+            true,
+            link_scope,
+            epoch,
+            prepare_commitment,
+            challenge_digest,
+            link_tag,
+        );
 
         let prepare = OpenAcPrepareArtifact {
             created_at_unix: 100,
@@ -208,8 +359,8 @@ mod tests {
             sod_hash,
             mrz_hash,
             prepare_commitment,
-            proof: vec![1, 2, 3],
-            vk: vec![4, 5, 6],
+            proof: combine_with_public_inputs(prepare_public_inputs, &[1, 2, 3]),
+            vk: prepare_vk.clone(),
         };
 
         let show = OpenAcShowPresentation {
@@ -219,8 +370,8 @@ mod tests {
             challenge,
             challenge_digest,
             link_tag,
-            proof: vec![7, 8, 9],
-            vk: vec![10, 11, 12],
+            proof: combine_with_public_inputs(show_public_inputs, &[7, 8, 9]),
+            vk: show_vk.clone(),
         };
 
         let policy = OpenAcPolicy {
@@ -228,6 +379,9 @@ mod tests {
             link_scope: Some(link_scope),
             epoch,
             now_unix: 150,
+            expected_challenge: challenge,
+            prepare_vk_hash: hash_bytes(&prepare_vk),
+            show_vk_hash: hash_bytes(&show_vk),
         };
 
         (prepare, show, policy)
@@ -249,6 +403,7 @@ mod tests {
     fn test_fails_when_prepare_commitment_mismatch() {
         let (prepare, mut show, policy) = scoped_fixture();
         show.prepare_commitment[0] ^= 0x01;
+        rewrite_show_proof_public_inputs(&mut show, &policy);
 
         let err = verify_openac_prepare_show_with_verifier(
             &prepare,
@@ -292,8 +447,9 @@ mod tests {
 
     #[test]
     fn test_fails_on_scope_policy_mismatch() {
-        let (prepare, show, mut policy) = scoped_fixture();
+        let (prepare, mut show, mut policy) = scoped_fixture();
         policy.link_scope = Some(sample_hash(99));
+        rewrite_show_proof_public_inputs(&mut show, &policy);
 
         let err = verify_openac_prepare_show_with_verifier(
             &prepare,
@@ -310,7 +466,7 @@ mod tests {
         let (prepare, show, policy) = scoped_fixture();
         let err =
             verify_openac_prepare_show_with_verifier(&prepare, &show, &policy, &|proof, _vk| {
-                Ok(proof != vec![1, 2, 3])
+                Ok(proof != prepare.proof)
             })
             .unwrap_err();
         assert!(err.to_string().contains("invalid_prepare_proof"));
@@ -321,7 +477,7 @@ mod tests {
         let (prepare, show, policy) = scoped_fixture();
         let err =
             verify_openac_prepare_show_with_verifier(&prepare, &show, &policy, &|proof, _vk| {
-                Ok(proof != vec![7, 8, 9])
+                Ok(proof != show.proof)
             })
             .unwrap_err();
         assert!(err.to_string().contains("invalid_show_proof"));
@@ -340,6 +496,54 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("empty_proof_bundle"));
+    }
+
+    #[test]
+    fn test_fails_when_challenge_not_from_verifier_policy() {
+        let (prepare, mut show, policy) = scoped_fixture();
+        show.challenge = sample_hash(200);
+        show.challenge_digest =
+            compute_challenge_digest(show.challenge, show.prepare_commitment, policy.epoch);
+        rewrite_show_proof_public_inputs(&mut show, &policy);
+
+        let err = verify_openac_prepare_show_with_verifier(
+            &prepare,
+            &show,
+            &policy,
+            &always_valid_verifier,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("invalid_challenge"));
+    }
+
+    #[test]
+    fn test_fails_when_prepare_vk_is_not_trusted() {
+        let (prepare, show, mut policy) = scoped_fixture();
+        policy.prepare_vk_hash = sample_hash(99);
+
+        let err = verify_openac_prepare_show_with_verifier(
+            &prepare,
+            &show,
+            &policy,
+            &always_valid_verifier,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("untrusted_prepare_vk"));
+    }
+
+    #[test]
+    fn test_fails_when_show_public_inputs_do_not_match_presentation() {
+        let (prepare, mut show, policy) = scoped_fixture();
+        show.proof[0] ^= 0x01;
+
+        let err = verify_openac_prepare_show_with_verifier(
+            &prepare,
+            &show,
+            &policy,
+            &always_valid_verifier,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("show_public_inputs_mismatch"));
     }
 
     #[test]

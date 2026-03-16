@@ -17,7 +17,7 @@ let package = Package(
         .target(
             name: "OpenPassportSwift",
             dependencies: [
-                .byName(name: "mopro", condition: .when(platforms: [.iOS]))
+                .byName(name: "moproPassport", condition: .when(platforms: [.iOS]))
             ],
             path: "Sources",
             exclude: [
@@ -27,7 +27,7 @@ let package = Package(
             ]
         ),
         .binaryTarget(
-            name: "mopro",
+            name: "moproPassport",
             path: "Sources/MoproiOSBindings/MoproBindings.xcframework"
         ),
         .testTarget(

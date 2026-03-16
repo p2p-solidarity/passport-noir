@@ -23,9 +23,12 @@ Passport → MRZ OCR → NFC chip read → CSCA passive auth → OpenPassport No
 circuits/                   # Noir workspace (Nargo.toml at root)
 ├── passport_verifier/      # RSA-SHA256 signature verification (DSC → SOD)
 ├── data_integrity/         # DG hash chain verification (SOD hash matching)
-└── disclosure/             # Selective disclosure (nationality, age, name from MRZ)
+├── disclosure/             # Selective disclosure (nationality, age, name from MRZ)
+├── prepare_link/           # OpenAC prepare-phase commitment (offline)
+└── show_link/              # OpenAC show-phase challenge binding + scoped linking (online)
 mopro-binding/              # Mobile prover integration via mopro (WIP)
 ├── src/bin/
+├── src/openac.rs           # Rust OpenAC verification layer
 └── test-vectors/noir/
 ```
 
@@ -81,6 +84,33 @@ Selective disclosure over MRZ data — proves nationality, age ≥ threshold, or
 - **Private inputs**: `mrz_data` (88-byte TD3 MRZ)
 - MRZ offsets: nationality at line2[10..12], DOB at line2[13..18] (YYMMDD), name at line1[5..43]
 - Uses `sha256::digest` to bind MRZ to data_integrity proof chain
+
+### prepare_link (OpenAC Prepare Phase)
+Computes a SHA256-based commitment binding sod_hash, mrz_hash, and link randomness. Run offline, once per credential session.
+- **Public inputs**: `out_prepare_commitment`
+- **Private inputs**: `sod_hash`, `mrz_hash`, `link_rand`
+- Commitment: `SHA256("openac.preparev1" || sod_hash || mrz_hash || link_rand)`
+- Uses `sha256::digest`
+
+### show_link (OpenAC Show Phase)
+Binds a verifier challenge to the prepare commitment and optionally computes a scoped link tag. Run online, per presentation.
+- **Public inputs**: `link_mode`, `link_scope`, `epoch`, `out_prepare_commitment`, `out_challenge_digest`, `out_link_tag`
+- **Private inputs**: `sod_hash`, `mrz_hash`, `link_rand`, `challenge`
+- Challenge digest: `SHA256("openac.show.v1" || challenge || prepare_commitment || epoch)`
+- Scoped link tag: `SHA256("openac.scope.v1" || prepare_commitment || link_scope || epoch)`
+- Unlinkable mode: `link_mode=false` → enforces zero link_scope and zero link_tag
+- Uses `sha256::digest`
+
+### OpenAC Flow (5-circuit composition)
+```
+passport_verifier ──(sod_hash)──► prepare_link ──(prepare_commitment)──► show_link
+data_integrity ──(mrz_hash)──┘                                              │
+       └──(mrz_hash)──► disclosure ◄── (challenge binding via main_with_challenge)
+```
+- **Paper reference**: OpenAC (zkID Team @ PSE, Nov 2025) — see `openAC.md` for full mapping
+- **Design**: Hash-based commitment (SHA256) instead of paper's Pedersen — pragmatic choice for Noir/mopro backend
+- **Device binding**: Planned v2 (out-of-band ECDSA, not in-circuit)
+- **Domain separation**: `openac.preparev1`, `openac.show.v1`, `openac.scope.v1` — consistent across Noir, Swift, Rust
 
 ## Conventions
 
