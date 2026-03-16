@@ -20,3 +20,4 @@ mopro-binding/test-vectors/
 
 # Swift Package build
 .build/
+Sources/MoproiOSBindings/MoproBindings.xcframework/**/*.a
