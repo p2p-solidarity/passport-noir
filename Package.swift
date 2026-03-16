@@ -21,7 +21,7 @@ let package = Package(
             ],
             path: "Sources",
             exclude: [
-                "MoproiOSBindings/",
+                "MoproiOSBindings/MoproBindings.xcframework",
             ]
         ),
         .binaryTarget(
