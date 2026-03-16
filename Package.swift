@@ -21,14 +21,13 @@ let package = Package(
             ],
             path: "Sources",
             exclude: [
-                "MoproiOSBindings/MoproBindings.xcframework/Info.plist",
-                "MoproiOSBindings/MoproBindings.xcframework/ios-arm64/libpassport_zk_mopro.a",
-                "MoproiOSBindings/MoproBindings.xcframework/ios-arm64-simulator/libpassport_zk_mopro.a",
+                "MoproiOSBindings/",
             ]
         ),
         .binaryTarget(
             name: "moproPassport",
-            path: "Sources/MoproiOSBindings/MoproBindings.xcframework"
+            url: "https://github.com/p2p-solidarity/passport-noir/releases/download/v0.1.0/MoproBindings.xcframework.zip",
+            checksum: "36baff6d45053d5765daeeb7622a9727ab121c6a9ce49afdba9e7bd03836fa9e"
         ),
         .testTarget(
             name: "OpenPassportSwiftTests",
