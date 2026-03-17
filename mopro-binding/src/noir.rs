@@ -4,18 +4,42 @@ use std::collections::HashMap;
 use noir_rs::native_types::WitnessMap;
 use noir_rs::FieldElement;
 
+const SUPPORTED_NOIR_VERSION_PREFIX: &str = "1.0.0-beta.8";
+
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct NoirProofResult {
     pub proof: Vec<u8>,
     pub vk: Vec<u8>,
 }
 
-/// Load circuit bytecode from a compiled Noir circuit JSON file.
-fn load_circuit_bytecode(circuit_path: &str) -> Result<String, MoproError> {
+fn load_circuit_json(circuit_path: &str) -> Result<serde_json::Value, MoproError> {
     let json_str = std::fs::read_to_string(circuit_path)
         .map_err(|e| MoproError::CircuitError(format!("Failed to read circuit file: {e}")))?;
-    let json: serde_json::Value = serde_json::from_str(&json_str)
-        .map_err(|e| MoproError::CircuitError(format!("Failed to parse circuit JSON: {e}")))?;
+    serde_json::from_str(&json_str)
+        .map_err(|e| MoproError::CircuitError(format!("Failed to parse circuit JSON: {e}")))
+}
+
+fn assert_supported_noir_version(circuit_json: &serde_json::Value) -> Result<(), MoproError> {
+    let noir_version = circuit_json
+        .get("noir_version")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            MoproError::CircuitError("Circuit JSON missing 'noir_version' field".into())
+        })?;
+
+    if !noir_version.starts_with(SUPPORTED_NOIR_VERSION_PREFIX) {
+        return Err(MoproError::CircuitError(format!(
+            "Incompatible noir_version '{noir_version}'. This binding supports '{SUPPORTED_NOIR_VERSION_PREFIX}.x' circuit artifacts (noir_rs v1.0.0-beta.8-3). Recompile circuits with matching toolchain or upgrade noir_rs/barretenberg."
+        )));
+    }
+
+    Ok(())
+}
+
+/// Load circuit bytecode from a compiled Noir circuit JSON file.
+fn load_circuit_bytecode(circuit_path: &str) -> Result<String, MoproError> {
+    let json = load_circuit_json(circuit_path)?;
+    assert_supported_noir_version(&json)?;
     json["bytecode"]
         .as_str()
         .map(|s| s.to_string())
@@ -34,6 +58,7 @@ fn build_witness_map(
         .map_err(|e| MoproError::InvalidInput(format!("Failed to read circuit file: {e}")))?;
     let json: serde_json::Value = serde_json::from_str(&json_str)
         .map_err(|e| MoproError::InvalidInput(format!("Failed to parse circuit JSON: {e}")))?;
+    assert_supported_noir_version(&json)?;
 
     // Extract ABI parameters to determine witness ordering
     let abi = json
@@ -177,6 +202,8 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::path::PathBuf;
+
+    const SMALL_BETA8_BYTECODE: &str = "H4sIAAAAAAAA/62QQQqAMAwErfigpEna5OZXLLb/f4KKLZbiTQdCQg7Dsm66mc9x00O717rhG9ico5cgMOfoMxJu4C2pAEsKioqisnslysoaLVkEQ6aMRYxKFc//ZYQr29L10XfhXv4jB52E+OpMAQAA";
 
     fn test_vectors_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-vectors/noir")
@@ -389,6 +416,33 @@ mod tests {
         );
         assert!(result.is_err(), "MP-5: Should error on invalid path");
         println!("MP-5 PASS: {:?}", result.unwrap_err());
+    }
+
+    // MP-5b: Version mismatch should fail gracefully (no native abort)
+    #[test]
+    fn test_incompatible_noir_version_is_rejected() {
+        let tmp_path = std::env::temp_dir().join(format!(
+            "mopro_incompatible_noir_{}.json",
+            std::process::id()
+        ));
+        let manifest = format!(
+            r#"{{"noir_version":"1.0.0-beta.19+test","bytecode":"{}"}}"#,
+            SMALL_BETA8_BYTECODE
+        );
+        std::fs::write(&tmp_path, manifest).expect("should write temp manifest");
+
+        let result = get_noir_verification_key(tmp_path.to_string_lossy().to_string(), None);
+        std::fs::remove_file(&tmp_path).ok();
+
+        match result {
+            Err(MoproError::CircuitError(message)) => {
+                assert!(
+                    message.contains("Incompatible noir_version"),
+                    "expected version mismatch message, got: {message}"
+                );
+            }
+            other => panic!("expected CircuitError for incompatible noir_version, got: {other:?}"),
+        }
     }
 
     // MP-6: Invalid input names
