@@ -17,7 +17,7 @@ let package = Package(
         .target(
             name: "OpenPassportSwift",
             dependencies: [
-                .byName(name: "moproPassport", condition: .when(platforms: [.iOS]))
+                .byName(name: "passportMoproBindings", condition: .when(platforms: [.iOS]))
             ],
             path: "Sources",
             exclude: [
@@ -25,9 +25,9 @@ let package = Package(
             ]
         ),
         .binaryTarget(
-            name: "moproPassport",
-            url: "https://github.com/p2p-solidarity/passport-noir/releases/download/v0.1.0/MoproBindings.xcframework.zip",
-            checksum: "36baff6d45053d5765daeeb7622a9727ab121c6a9ce49afdba9e7bd03836fa9e"
+            name: "passportMoproBindings",
+            url: "https://github.com/p2p-solidarity/passport-noir/releases/download/v0.1.0/PassportMoproBindings.xcframework.zip",
+            checksum: "d1404f10e33a6de113dc26d63b88587608b50fc761c021d312e802aa9cd9a56d"
         ),
         .testTarget(
             name: "OpenPassportSwiftTests",
