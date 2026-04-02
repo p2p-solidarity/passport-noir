@@ -31,3 +31,28 @@ show_link = 757
 passport_adapter = 25535
 openac_show = 1432
 device_binding = 162
+
+# Artifact sizes in bytes (warn if > 20% regression)
+# Measured: 2026-04-02, nargo 1.0.0-beta.19
+[artifact_bytes]
+passport_verifier = 632206
+data_integrity = 405348
+disclosure = 79310
+prepare_link = 58846
+show_link = 73761
+passport_adapter = 1017083
+openac_show = 132035
+device_binding = 5340
+total = 2403929
+
+# Bytes per gate (lower = more compact artifact representation)
+# Grade: A(≤10) B(≤30) C(≤60) D(≤100) F(>100)
+[bytes_per_gate]
+passport_verifier = 53
+data_integrity = 29
+disclosure = 162
+prepare_link = 207
+show_link = 97
+passport_adapter = 39
+openac_show = 92
+device_binding = 32

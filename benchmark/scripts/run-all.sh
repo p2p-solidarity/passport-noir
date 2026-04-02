@@ -122,6 +122,19 @@ stage_header "5" "Performance Metrics"
 pass "Performance metrics collected"
 
 # ──────────────────────────────────────────────────────────
+# Stage 6: Size & Compression Ratio
+# ──────────────────────────────────────────────────────────
+stage_header "6" "Size & Compression Ratio"
+
+SIZE_EXIT=0
+"$SCRIPT_DIR/size-bench.sh" "$PROJECT_DIR" || SIZE_EXIT=$?
+if [ "$SIZE_EXIT" -eq 0 ]; then
+  pass "Size analysis complete"
+else
+  warn "Size analysis exited with $SIZE_EXIT"
+fi
+
+# ──────────────────────────────────────────────────────────
 # Summary
 # ──────────────────────────────────────────────────────────
 echo ""
