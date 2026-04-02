@@ -1,19 +1,24 @@
-.PHONY: all circuits compile-circuits test-circuits verify-circuit-artifacts copy-circuit-artifacts build-ios sync-ios-bindings clean benchmark spec-check bench-report bench-update-baseline
+.PHONY: all circuits compile-circuits test-circuits verify-circuit-artifacts copy-circuit-artifacts \
+       build-ios sync-ios-bindings clean \
+       fmt fmt-check lint score benchmark spec-check bench-report bench-update-baseline \
+       install-hooks release-patch release-minor release-major
 
 CIRCUIT_DIR = circuits
 MOPRO_DIR = mopro-binding
 MOPRO_IOS_BINDINGS_DIR = $(MOPRO_DIR)/MoproiOSBindings
 SWIFT_PACKAGE_BINDINGS_DIR = Sources/MoproiOSBindings
-CIRCUIT_PACKAGES = passport_verifier data_integrity disclosure prepare_link show_link
-# iOS-only default: real device + Apple Silicon simulator.
-# Add x86_64-apple-ios if you need Intel Mac simulator support.
+CIRCUIT_PACKAGES = passport_verifier data_integrity disclosure prepare_link show_link passport_adapter openac_show device_binding
 IOS_ARCHS ?= aarch64-apple-ios,aarch64-apple-ios-sim
 
-# Build everything
-all: circuits build-ios
+# ──────────────────────────────────────────────────
+# Build (lint gate enforced)
+# ──────────────────────────────────────────────────
 
-# Compile all Noir circuits
-circuits: compile-circuits test-circuits
+# Build everything (lint → compile → test → iOS)
+all: lint circuits build-ios
+
+# Compile all Noir circuits (format check first)
+circuits: fmt-check compile-circuits test-circuits
 
 compile-circuits:
 	cd $(CIRCUIT_DIR) && nargo compile --workspace
@@ -55,30 +60,84 @@ sync-ios-bindings:
 	./scripts/patch_mopro_fallback.sh $(SWIFT_PACKAGE_BINDINGS_DIR)/mopro.swift
 
 # ──────────────────────────────────────────────────
+# Format & Lint
+# ──────────────────────────────────────────────────
+
+# Auto-format all Noir files
+fmt:
+	cd $(CIRCUIT_DIR) && nargo fmt --workspace
+
+# Check formatting (fails if unformatted)
+fmt-check:
+	@echo "Checking Noir formatting..."
+	@cd $(CIRCUIT_DIR) && nargo fmt --check --workspace
+
+# Full lint: format + 9-dimension quality score (must pass ≥ C)
+lint: fmt-check
+	@./benchmark/scripts/circuit-lint.sh .
+
+# Score only (no format gate, informational)
+score:
+	@./benchmark/scripts/circuit-lint.sh .
+
+# ──────────────────────────────────────────────────
 # Benchmark
 # ──────────────────────────────────────────────────
 
-# Full benchmark pipeline: TDD → Compile → Spec Check → Test → Metrics
+# Full benchmark pipeline
 benchmark:
 	@./benchmark/scripts/run-all.sh
 
-# Spec compliance check only (no compile/test)
+# Spec compliance check only
 spec-check:
 	@./benchmark/scripts/spec-check.sh .
 	@./benchmark/scripts/cross-circuit-check.sh .
 	@./benchmark/scripts/cross-layer-check.sh .
 
-# Performance metrics only (assumes already compiled)
+# Performance metrics only (assumes compiled)
 bench-report:
 	@./benchmark/scripts/perf-bench.sh . benchmark/reports/benchmark-$$(date +%Y%m%d-%H%M%S).json
 
-# Update baseline after confirmed improvements
+# Size analysis
+bench-size:
+	@./benchmark/scripts/size-bench.sh .
+
+# Update baseline
 bench-update-baseline:
 	@echo "Updating baseline from latest benchmark..."
 	@cp benchmark/reports/benchmark-latest.json benchmark/expected/latest-snapshot.json
 	@echo "Snapshot saved. Manually update baseline.toml with new values."
 
-# Clean build artifacts
+# ──────────────────────────────────────────────────
+# Release (auto-version + tag)
+# ──────────────────────────────────────────────────
+
+# Usage: make release-patch  (v0.1.0 → v0.1.1)
+#        make release-minor  (v0.1.0 → v0.2.0)
+#        make release-major  (v0.1.0 → v1.0.0)
+release-patch: lint
+	@./scripts/release.sh patch
+
+release-minor: lint
+	@./scripts/release.sh minor
+
+release-major: lint
+	@./scripts/release.sh major
+
+# ──────────────────────────────────────────────────
+# Git Hooks
+# ──────────────────────────────────────────────────
+
+install-hooks:
+	@echo "Installing git hooks..."
+	@cp scripts/pre-commit .git/hooks/pre-commit
+	@chmod +x .git/hooks/pre-commit
+	@echo "Pre-commit hook installed."
+
+# ──────────────────────────────────────────────────
+# Clean
+# ──────────────────────────────────────────────────
+
 clean:
 	cd $(CIRCUIT_DIR) && rm -rf target
 	cd $(MOPRO_DIR) && cargo clean

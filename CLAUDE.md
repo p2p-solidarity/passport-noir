@@ -24,12 +24,25 @@ circuits/                   # Noir workspace (Nargo.toml at root)
 ├── passport_verifier/      # RSA-SHA256 signature verification (DSC → SOD)
 ├── data_integrity/         # DG hash chain verification (SOD hash matching)
 ├── disclosure/             # Selective disclosure (nationality, age, name from MRZ)
-├── prepare_link/           # OpenAC prepare-phase commitment (offline)
-└── show_link/              # OpenAC show-phase challenge binding + scoped linking (online)
+├── prepare_link/           # OpenAC prepare-phase commitment (offline, v1 SHA256)
+├── show_link/              # OpenAC show-phase challenge binding (online, v1 SHA256)
+├── openac_core/            # Shared Pedersen commitment library (v2)
+├── passport_adapter/       # Passport → OpenAC adapter (v2 Pedersen)
+├── openac_show/            # Show-phase with Pedersen commitments (v2)
+├── device_binding/         # Device binding circuit (v2, planned)
+├── sdjwt_adapter/          # SD-JWT credential adapter
+└── target/                 # Compiled circuit JSON artifacts
 mopro-binding/              # Mobile prover integration via mopro (WIP)
 ├── src/bin/
 ├── src/openac.rs           # Rust OpenAC verification layer
+├── src/openac_v2.rs        # Rust OpenAC v2 (Pedersen) verification
 └── test-vectors/noir/
+benchmark/                  # Circuit benchmark & spec compliance suite
+├── agent.md                # Instructions for running benchmark pipeline
+├── spec.toml               # Machine-readable circuit spec definition
+├── expected/baseline.toml  # Gate count & test count baselines
+├── scripts/                # Benchmark & validation scripts
+└── reports/                # Generated reports (gitignored)
 ```
 
 ## Toolchain
@@ -42,26 +55,95 @@ mopro-binding/              # Mobile prover integration via mopro (WIP)
 ## Common Commands
 
 ```bash
-# All commands run from circuits/ directory
-cd circuits
+# Build (lint gate enforced: format → quality score → compile → test)
+make all
 
-# Build all circuits
-nargo compile --workspace
+# Format & lint
+make fmt              # Auto-format all Noir files
+make fmt-check        # Check formatting (CI uses this)
+make lint             # Format check + 9-dimension quality score (must pass ≥ C)
+make score            # Quality score only (informational, no gate)
 
-# Build a specific circuit
-nargo compile --package passport_verifier
-nargo compile --package data_integrity
+# Compile & test
+make circuits         # fmt-check → compile → test
+make compile-circuits # Compile only
+make test-circuits    # Test only
 
-# Run tests
-nargo test --workspace
-nargo test --package data_integrity
+# iOS build
+make build-ios        # Full pipeline: lint → circuits → mopro → xcframework
 
-# Generate proof (after building)
-nargo prove --package passport_verifier
+# Benchmark
+make benchmark        # Full pipeline: TDD → spec → cross-circuit → perf → size
+make spec-check       # Spec compliance only
+make bench-report     # Performance metrics (assumes compiled)
+make bench-size       # Artifact size & compression ratio
 
-# Check circuit compiles without running
-nargo check --workspace
+# Release (auto-version + tag → triggers GitHub Actions release)
+make release-patch    # v0.1.0 → v0.1.1
+make release-minor    # v0.1.0 → v0.2.0
+make release-major    # v0.1.0 → v1.0.0
+
+# Setup
+make install-hooks    # Install git pre-commit hook
+make clean            # Remove all build artifacts
 ```
+
+## Lint & Quality Scoring
+
+All builds (`make all`, `make circuits`) enforce lint as a gate. CI blocks PRs that fail lint.
+
+### 9 Scoring Dimensions (weighted)
+
+| Dim | Weight | What it checks |
+|-----|--------|---------------|
+| **Size** | 10% | Lines per source file (≤200=A, >1000=F) |
+| **Mod** | 10% | Function decomposition, imports, lines/fn ratio |
+| **Test** | 15% | Test:assertion ratio + negative test coverage |
+| **Gate** | 10% | Bytes/gate artifact efficiency |
+| **Fmt** | 10% | `nargo fmt --check` compliance |
+| **Name** | 5% | snake_case functions, naming conventions |
+| **Sec** | 20% | Assert messages present, no hardcoded secrets, safe patterns |
+| **Trans** | 10% | Domain separators, public input docs, spec.toml coverage |
+| **Spec** | 10% | TDD red/green discipline, spec.toml conformance |
+
+Grades: A(≥90) B(≥75) C(≥60) D(≥40) F(<40). Must pass ≥ C (60) to build.
+
+### Size & Compression Grades
+
+Each circuit is graded by **bytes/gate** (artifact bytes ÷ ACIR gate count).
+
+| Grade | B/gate | Meaning |
+|-------|--------|---------|
+| A | ≤ 10 | Excellent — minimal overhead |
+| B | ≤ 30 | Good — efficient representation |
+| C | ≤ 60 | Acceptable — room to optimize |
+| D | ≤ 100 | Bloated — review artifact structure |
+| F | > 100 | Critical — likely low gate count inflating ratio |
+
+Total artifact budget: ~2.3 MB (all 8 circuits). Passport_adapter is the largest at ~1 MB.
+
+## Benchmark
+
+```bash
+# Individual scripts (run from project root)
+bash benchmark/scripts/tdd-check.sh           # TDD coverage per circuit
+bash benchmark/scripts/spec-check.sh          # CLAUDE.md ↔ spec.toml consistency
+bash benchmark/scripts/cross-circuit-check.sh  # Hash chain linkage
+bash benchmark/scripts/cross-layer-check.sh    # Cross-layer integration
+bash benchmark/scripts/perf-bench.sh           # Gate count & compile time
+bash benchmark/scripts/size-bench.sh           # Artifact size & compression ratio
+bash benchmark/scripts/circuit-lint.sh         # 9-dimension quality lint
+```
+
+- **spec.toml** — Machine-readable circuit spec (public/private inputs, types, constants)
+- **expected/baseline.toml** — Gate count, test count, artifact size baselines; update after confirmed improvements
+- **reports/** — Generated JSON/text reports (gitignored)
+
+### Architecture Versions
+| Version | Commitment | Circuits |
+|---------|-----------|----------|
+| v1 | SHA256 | passport_verifier, data_integrity, disclosure, prepare_link, show_link |
+| v2 | Pedersen | openac_core, passport_adapter, openac_show, device_binding |
 
 ## Circuit Details
 

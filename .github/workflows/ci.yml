@@ -8,11 +8,12 @@ on:
 
 env:
   NARGO_VERSION: "1.0.0-beta.19"
-  NARGO_INTEGRATION_VERSION: "1.0.0-beta.8"
+  NARGO_MOPRO_VERSION: "1.0.0-beta.8"
 
 jobs:
-  noir-circuits:
-    name: Noir Circuit Tests
+  # ── Stage 1: Format + Lint (gate for all other jobs) ────
+  lint:
+    name: Format & Lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,17 +23,82 @@ jobs:
         with:
           toolchain: ${{ env.NARGO_VERSION }}
 
-      - name: Check circuits compile
+      - name: Check formatting
+        working-directory: circuits
+        run: nargo fmt --check --workspace
+
+      - name: Compile (required for gate efficiency scoring)
         working-directory: circuits
         run: nargo compile --workspace
 
-      - name: Run circuit tests
+      - name: Run circuit quality lint (9 dimensions)
+        run: bash benchmark/scripts/circuit-lint.sh .
+
+      - name: Run size analysis
+        run: bash benchmark/scripts/size-bench.sh .
+
+  # ── Stage 2: Build & test circuits ──────────────────────
+  noir-circuits:
+    name: Noir Circuit Tests
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nargo
+        uses: noir-lang/noirup@v0.1.4
+        with:
+          toolchain: ${{ env.NARGO_VERSION }}
+
+      - name: Compile workspace
+        working-directory: circuits
+        run: nargo compile --workspace
+
+      - name: Run tests
         working-directory: circuits
         run: nargo test --workspace
 
+      - name: Upload circuit artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: circuit-artifacts
+          path: circuits/target/*.json
+          retention-days: 3
+
+  # ── Stage 3: Spec & cross-circuit checks ────────────────
+  spec-check:
+    name: Spec & Cross-Circuit Verification
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nargo
+        uses: noir-lang/noirup@v0.1.4
+        with:
+          toolchain: ${{ env.NARGO_VERSION }}
+
+      - name: Compile (needed for spec checks)
+        working-directory: circuits
+        run: nargo compile --workspace
+
+      - name: TDD coverage check
+        run: bash benchmark/scripts/tdd-check.sh .
+
+      - name: Spec compliance check
+        run: bash benchmark/scripts/spec-check.sh .
+
+      - name: Cross-circuit hash chain
+        run: bash benchmark/scripts/cross-circuit-check.sh .
+
+      - name: Cross-layer check
+        run: bash benchmark/scripts/cross-layer-check.sh .
+
+  # ── Stage 4: Mopro Rust binding ─────────────────────────
   mopro-binding:
     name: Mopro Rust Binding
     runs-on: ubuntu-latest
+    needs: lint
     steps:
       - uses: actions/checkout@v4
 
@@ -46,17 +112,18 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             mopro-binding/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('mopro-binding/Cargo.lock', 'mopro-binding/Cargo.toml') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('mopro-binding/Cargo.toml') }}
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Build
         working-directory: mopro-binding
         run: cargo build
 
-      - name: Run tests (non-ignored)
+      - name: Run tests
         working-directory: mopro-binding
         run: cargo test -- --nocapture
 
+  # ── Stage 5: Integration (circuits + mopro) ─────────────
   integration:
     name: Integration (Compile + Prove)
     runs-on: ubuntu-latest
@@ -64,12 +131,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Nargo
+      - name: Install Nargo (mopro-compatible)
         uses: noir-lang/noirup@v0.1.4
         with:
-          # `mopro-binding` currently depends on `noir_rs` pinned to Noir beta.8.
-          # Compile only the disclosure artifact with the same version to avoid ABI mismatches.
-          toolchain: ${{ env.NARGO_INTEGRATION_VERSION }}
+          toolchain: ${{ env.NARGO_MOPRO_VERSION }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -81,7 +146,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             mopro-binding/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('mopro-binding/Cargo.lock', 'mopro-binding/Cargo.toml') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('mopro-binding/Cargo.toml') }}
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Compile disclosure circuit (integration artifact)

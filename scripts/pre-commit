@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Pre-commit hook: format check + quick lint on staged .nr files
+set -euo pipefail
+
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+NC='\033[0m'
+
+# Check if any .nr files are staged
+NR_STAGED=$(git diff --cached --name-only --diff-filter=ACM | grep '\.nr$' || true)
+
+if [ -z "$NR_STAGED" ]; then
+  exit 0
+fi
+
+echo -e "${GREEN}[pre-commit]${NC} Noir files staged — running checks..."
+
+# 1. Format check
+echo -n "  Checking formatting... "
+if cd circuits && nargo fmt --check --workspace >/dev/null 2>&1; then
+  echo -e "${GREEN}OK${NC}"
+  cd ..
+else
+  cd ..
+  echo -e "${RED}FAIL${NC}"
+  echo ""
+  echo "  Unformatted Noir files detected. Run: make fmt"
+  echo ""
+  exit 1
+fi
+
+# 2. Quick lint (informational — warn but don't block)
+echo -n "  Running quality score... "
+LINT_OUTPUT=$(./benchmark/scripts/circuit-lint.sh . 2>&1) || true
+OVERALL=$(echo "$LINT_OUTPUT" | grep 'LINT' | tail -1)
+echo -e "$OVERALL"
+
+# 3. Compile check (catch syntax errors before push)
+echo -n "  Compile check... "
+if cd circuits && nargo check --workspace >/dev/null 2>&1; then
+  echo -e "${GREEN}OK${NC}"
+  cd ..
+else
+  cd ..
+  echo -e "${RED}FAIL${NC}"
+  echo ""
+  echo "  Circuit compilation failed. Fix errors before committing."
+  echo ""
+  exit 1
+fi
+
+echo -e "${GREEN}[pre-commit]${NC} All checks passed."

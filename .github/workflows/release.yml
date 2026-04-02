@@ -1,0 +1,151 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.2.0)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  NARGO_VERSION: "1.0.0-beta.19"
+  NARGO_MOPRO_VERSION: "1.0.0-beta.8"
+
+jobs:
+  # ── Stage 1: Build & test circuits ──────────────────────
+  circuits:
+    name: Build Circuits
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nargo
+        uses: noir-lang/noirup@v0.1.4
+        with:
+          toolchain: ${{ env.NARGO_VERSION }}
+
+      - name: Compile workspace
+        working-directory: circuits
+        run: nargo compile --workspace
+
+      - name: Run tests
+        working-directory: circuits
+        run: nargo test --workspace
+
+      - name: Upload circuit artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: circuit-artifacts
+          path: circuits/target/*.json
+          retention-days: 1
+
+  # ── Stage 2: Build xcframework (macOS required) ─────────
+  xcframework:
+    name: Build xcframework
+    runs-on: macos-latest
+    needs: circuits
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nargo (mopro-compatible)
+        uses: noir-lang/noirup@v0.1.4
+        with:
+          toolchain: ${{ env.NARGO_MOPRO_VERSION }}
+
+      - name: Install Rust toolchain + iOS targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            mopro-binding/target
+          key: ${{ runner.os }}-release-cargo-${{ hashFiles('mopro-binding/Cargo.toml') }}
+          restore-keys: ${{ runner.os }}-release-cargo-
+
+      - name: Download circuit artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: circuit-artifacts
+          path: circuits/target
+
+      - name: Copy circuits to mopro test-vectors
+        run: |
+          mkdir -p mopro-binding/test-vectors/noir
+          cp circuits/target/*.json mopro-binding/test-vectors/noir/
+
+      - name: Build iOS bindings
+        working-directory: mopro-binding
+        run: |
+          IOS_ARCHS="aarch64-apple-ios,aarch64-apple-ios-sim" \
+          IPHONEOS_DEPLOYMENT_TARGET=15.0 \
+          CONFIGURATION=release \
+          cargo run --bin ios
+
+      - name: Sync and patch Swift bindings
+        run: make sync-ios-bindings
+
+      - name: Package xcframework
+        run: |
+          cd Sources/MoproiOSBindings
+          zip -r ../../PassportMoproBindings.xcframework.zip MoproBindings.xcframework
+          cd ../..
+          echo "CHECKSUM=$(shasum -a 256 PassportMoproBindings.xcframework.zip | awk '{print $1}')" >> "$GITHUB_ENV"
+
+      - name: Upload xcframework
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcframework
+          path: PassportMoproBindings.xcframework.zip
+          retention-days: 5
+
+    outputs:
+      checksum: ${{ env.CHECKSUM }}
+
+  # ── Stage 3: Create GitHub Release ──────────────────────
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: [circuits, xcframework]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download xcframework
+        uses: actions/download-artifact@v4
+        with:
+          name: xcframework
+
+      - name: Determine tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.tag.outputs.version }}" \
+            PassportMoproBindings.xcframework.zip \
+            --title "${{ steps.tag.outputs.version }}" \
+            --generate-notes
+
+      - name: Print Package.swift update instructions
+        run: |
+          echo "============================================"
+          echo "Update Package.swift with:"
+          echo "  url: https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.version }}/PassportMoproBindings.xcframework.zip"
+          echo "  checksum: ${{ needs.xcframework.outputs.checksum }}"
+          echo "============================================"

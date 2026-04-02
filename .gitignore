@@ -28,3 +28,6 @@ benchmark/reports/
 # Swift Package build
 .build/
 Sources/MoproiOSBindings/MoproBindings.xcframework/**/*.a
+
+# Ephemeral planning docs
+plan.md
