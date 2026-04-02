@@ -135,6 +135,19 @@ else
 fi
 
 # ──────────────────────────────────────────────────────────
+# Stage 7: Quality Lint (9 dimensions)
+# ──────────────────────────────────────────────────────────
+stage_header "7" "Quality Lint (9 dimensions)"
+
+LINT_EXIT=0
+"$SCRIPT_DIR/circuit-lint.sh" "$PROJECT_DIR" || LINT_EXIT=$?
+if [ "$LINT_EXIT" -eq 0 ]; then
+  pass "Quality lint passed"
+else
+  fail "Quality lint score below threshold"
+fi
+
+# ──────────────────────────────────────────────────────────
 # Summary
 # ──────────────────────────────────────────────────────────
 echo ""

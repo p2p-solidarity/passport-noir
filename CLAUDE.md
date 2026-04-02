@@ -38,11 +38,18 @@ mopro-binding/              # Mobile prover integration via mopro (WIP)
 ├── src/openac_v2.rs        # Rust OpenAC v2 (Pedersen) verification
 └── test-vectors/noir/
 benchmark/                  # Circuit benchmark & spec compliance suite
-├── agent.md                # Instructions for running benchmark pipeline
 ├── spec.toml               # Machine-readable circuit spec definition
-├── expected/baseline.toml  # Gate count & test count baselines
-├── scripts/                # Benchmark & validation scripts
+├── expected/baseline.toml  # Gate count, test count, artifact size baselines
+├── scripts/                # Benchmark, lint, size analysis scripts
 └── reports/                # Generated reports (gitignored)
+scripts/                    # Project tooling
+├── pre-commit              # Git pre-commit hook (install via: make install-hooks)
+├── release.sh              # Auto-version + tag creation
+└── patch_mopro_fallback.sh # Post-build Swift FFI wrapper
+.github/workflows/          # CI/CD
+├── ci.yml                  # Lint → test → spec → mopro → integration
+├── release.yml             # Tag → circuits → xcframework → GitHub Release
+└── swift.yml               # iOS Swift Package test
 ```
 
 ## Toolchain
@@ -144,6 +151,31 @@ bash benchmark/scripts/circuit-lint.sh         # 9-dimension quality lint
 |---------|-----------|----------|
 | v1 | SHA256 | passport_verifier, data_integrity, disclosure, prepare_link, show_link |
 | v2 | Pedersen | openac_core, passport_adapter, openac_show, device_binding |
+
+## CI / CD
+
+### GitHub Actions Pipelines
+
+| Workflow | Trigger | What it does |
+|----------|---------|-------------|
+| `ci.yml` | push/PR to main | lint gate → circuit tests → spec checks → mopro build → integration |
+| `release.yml` | `v*` tag push | circuits → mopro xcframework → GitHub Release + checksum |
+| `swift.yml` | push/PR to main | iOS Swift Package build & test |
+
+### CI Pipeline (ci.yml)
+```
+lint (format + 9-dim score) ──► noir-circuits (compile + test) ──► integration (circuits + mopro)
+                             ├► spec-check (TDD + cross-circuit)
+                             └► mopro-binding (cargo build + test)
+```
+Lint is a **hard gate** — all other jobs wait for it to pass.
+
+### Release Flow
+```bash
+make release-patch   # Bump version, create tag
+git push origin main --tags  # Trigger release workflow
+```
+Release workflow: compile circuits → build xcframework on macOS → zip + upload to GitHub Release → print Package.swift checksum.
 
 ## Circuit Details
 
