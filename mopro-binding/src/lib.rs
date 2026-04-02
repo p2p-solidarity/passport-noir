@@ -12,3 +12,9 @@ pub use openac::{
     verify_openac_prepare_show, OpenAcLinkMode, OpenAcPolicy, OpenAcPrepareArtifact,
     OpenAcShowPresentation,
 };
+
+pub mod openac_v2;
+pub use openac_v2::{
+    compute_challenge_digest_v2, verify_openac_v2, BatchEntry, LinkMode, PedersenPoint,
+    PolicyV2, PrepareArtifactV2, ShowPresentationV2,
+};

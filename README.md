@@ -7,6 +7,8 @@ OpenAC-mode additions are included:
 - `show_link` circuit for Show-phase challenge/scoped linking.
 - Swift helpers for OpenAC prepare/show/link verification.
 
+For a repo-level technical audit and manual verification guide, see [`NOIR_TECHNICAL_VERIFICATION.md`](NOIR_TECHNICAL_VERIFICATION.md).
+
 ## Repository Format
 
 ```text

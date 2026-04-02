@@ -1,0 +1,7 @@
+[package]
+name = "device_binding"
+type = "bin"
+authors = ["kidneyweakx"]
+description = "OpenAC device binding: ECDSA P-256 nonce signature verification in-circuit"
+
+[dependencies]

@@ -9,6 +9,9 @@ DerivedData/
 *.xcworkspace/xcuserdata/
 *.xcodeproj/xcuserdata/
 
+# Noir compiled artifacts (rebuild via: nargo compile --workspace)
+circuits/target/
+
 # Rust build artifacts
 mopro-binding/target/
 mopro-binding/build/
@@ -17,6 +20,10 @@ mopro-binding/MoproiOSBindings/
 
 # Local generated vectors
 mopro-binding/test-vectors/
+
+# Benchmark reports (generated)
+benchmark/reports/
+!benchmark/reports/.gitkeep
 
 # Swift Package build
 .build/

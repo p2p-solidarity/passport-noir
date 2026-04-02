@@ -5,5 +5,10 @@ members = [
     "disclosure",
     "prepare_link",
     "show_link",
+    "openac_core",
+    "passport_adapter",
+    "openac_show",
+    "device_binding",
+    "sdjwt_adapter",
 ]
 default-member = "passport_verifier"
