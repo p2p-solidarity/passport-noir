@@ -1,0 +1,33 @@
+# Benchmark Baseline
+# Generated: 2026-04-01
+# Update this after confirmed improvements via: make bench-update-baseline
+
+[meta]
+created = "2026-04-01"
+nargo_version = "1.0.0-beta.19"
+
+# Minimum test counts per circuit (fail if below)
+[tests]
+passport_verifier = { positive = 1, negative = 1, total = 9 }
+data_integrity = { positive = 11, negative = 8, total = 19 }
+disclosure = { positive = 15, negative = 3, total = 18 }
+prepare_link = { positive = 2, negative = 1, total = 3 }
+show_link = { positive = 4, negative = 1, total = 5 }
+openac_core = { positive = 19, negative = 2, total = 24 }
+openac_show = { positive = 3, negative = 1, total = 4 }
+device_binding = { positive = 0, negative = 1, total = 1 }
+
+[tests.total]
+minimum = 83
+
+# Gate count baselines (ACIR opcodes, warn if > 10% regression)
+# Measured: 2026-04-01, nargo 1.0.0-beta.19
+[gates]
+passport_verifier = 11736
+data_integrity = 13643
+disclosure = 487
+prepare_link = 283
+show_link = 757
+passport_adapter = 25535
+openac_show = 1432
+device_binding = 162
