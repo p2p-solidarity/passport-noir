@@ -109,14 +109,14 @@ check_assertions "passport_adapter" \
   "Commitment X mismatch" \
   "Commitment Y mismatch"
 
-# openac_show
+# openac_show (v3 Path A: "Age/Nationality not disclosed but output is ..."
+# assertions intentionally removed per spec.toml — when a disclosure flag
+# is false the corresponding output is left unconstrained to avoid leakage).
 check_assertions "openac_show" \
   "Commitment X mismatch" \
   "Commitment Y mismatch" \
   "Age predicate output mismatch" \
-  "Age not disclosed but output is true" \
-  "Nationality output mismatch" \
-  "Nationality not disclosed but output is non-zero"
+  "Nationality output mismatch"
 
 # device_binding
 check_assertions "device_binding" \
