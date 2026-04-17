@@ -125,8 +125,10 @@ else
   issue "passport_adapter missing assert_commitment_eq"
 fi
 
-# Check that openac_show re-computes commitment (not trusting external)
-if grep -qF "commit_attributes(" "$CIRCUIT_DIR/openac_show/src/main.nr" 2>/dev/null; then
+# Check that openac_show re-computes commitment (not trusting external).
+# v3 Path A migrated from `commit_attributes(` to `commit_attributes_v3(`;
+# accept either so the script works across the v2 -> v3 transition.
+if grep -qE "commit_attributes(_v3)?\(" "$CIRCUIT_DIR/openac_show/src/main.nr" 2>/dev/null; then
   ok "openac_show re-computes commitment (self-verifying)"
 else
   issue "openac_show does not re-compute commitment"
