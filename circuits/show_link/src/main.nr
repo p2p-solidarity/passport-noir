@@ -90,10 +90,7 @@ fn compute_scoped_link_tag(
     digest(preimage)
 }
 
-fn assert_hash_equals(
-    left: [u8; HASH_BYTES],
-    right: [u8; HASH_BYTES],
-) {
+fn assert_hash_equals(left: [u8; HASH_BYTES], right: [u8; HASH_BYTES]) {
     for i in 0..HASH_BYTES {
         assert(left[i] == right[i], "Hash mismatch");
     }

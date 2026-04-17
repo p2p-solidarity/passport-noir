@@ -14,17 +14,33 @@ workspace_members = [
   "passport_adapter",
   "openac_show",
   "device_binding",
+  "sdjwt_adapter",
+  "jwt_x5c_adapter",
+  "x509_show",
+  "composite_show",
 ]
 
 # ============================================================
 # Architecture Versions
 # ============================================================
 # v1: SHA256-based commitments (prepare_link, show_link)
-# v2: Pedersen-based commitments (openac_core, passport_adapter, openac_show)
+# v2: Pedersen-based commitments, arity 4 (legacy openac_core API — deprecated 2026-04-17)
+# v3: Pedersen-based commitments, arity 5 (+ pk_digest) — Path A target
+#     Affected: openac_core::commit_attributes_v3, passport_adapter, openac_show,
+#     sdjwt_adapter, jwt_x5c_adapter, x509_show, composite_show
 
 [versions]
 v1_circuits = ["passport_verifier", "data_integrity", "disclosure", "prepare_link", "show_link"]
-v2_circuits = ["openac_core", "passport_adapter", "openac_show", "device_binding"]
+v2_circuits = ["device_binding"]
+v3_circuits = [
+  "openac_core",
+  "passport_adapter",
+  "openac_show",
+  "sdjwt_adapter",
+  "jwt_x5c_adapter",
+  "x509_show",
+  "composite_show",
+]
 
 # ============================================================
 # Circuit: passport_verifier
@@ -240,21 +256,31 @@ min_positive_tests = 4
 min_negative_tests = 0
 
 # ============================================================
-# Circuit: passport_adapter (v2 — combined prepare)
+# Circuit: passport_adapter (v3 — Path A combined prepare)
 # ============================================================
 [circuits.passport_adapter]
 type = "bin"
-description = "Combined passport prepare: RSA verify + DG hash chain + Pedersen commitment"
+description = "Combined passport prepare (v3): RSA verify + DG hash chain + Pedersen commitment bound to enclave pk_digest"
 source = "circuits/passport_adapter/src/main.nr"
-version = "v2"
+version = "v3"
 
 public_inputs = ["modulus_limbs", "out_commitment_x", "out_commitment_y"]
 public_input_types = ["[u128; 18]", "Field", "Field"]
 
+# Note: enclave_pk_x / enclave_pk_y are PRIVATE witnesses in Path A; the
+# commitment binds `pk_digest = pedersen_hash(enclave_pk)` so the show phase
+# can re-derive it from an ECDSA proof over a fresh verifier nonce.
 private_inputs = [
   "sod_hash", "signature_limbs", "redc_limbs", "exponent",
   "dg_count", "dg_contents", "dg_lengths", "expected_dg_hashes",
   "link_rand",
+  "enclave_pk_x", "enclave_pk_y",
+]
+private_input_types = [
+  "[u8; 32]", "[u128; 18]", "[u128; 18]", "u32",
+  "u8", "[[u8; 512]; 4]", "[u32; 4]", "[[u8; 32]; 4]",
+  "Field",
+  "[u8; 32]", "[u8; 32]",
 ]
 
 assertions = [
@@ -270,8 +296,8 @@ assertions = [
 
 constants = { MAX_DG_COUNT = 4, MAX_DG_SIZE = 512 }
 
-min_positive_tests = 0  # Integration circuit — tested through openac_show
-min_negative_tests = 0
+min_positive_tests = 3  # v3 covers commitment equality + pk_digest binding
+min_negative_tests = 2
 
 exports = { out_commitment_x = "Field", out_commitment_y = "Field" }
 
@@ -282,15 +308,16 @@ sha256 = "v0.3.0"
 openac_core = "path"
 
 # ============================================================
-# Circuit: openac_show (v2 — generic show)
+# Circuit: openac_show (v3 — Path A generic show with in-circuit ECDSA)
 # ============================================================
 [circuits.openac_show]
 type = "bin"
-description = "Generic OpenAC show: commitment re-verify + challenge binding + predicates"
+description = "Generic OpenAC show (v3): in-circuit ECDSA-P256 device binding + v3 commitment re-open + challenge binding + predicates"
 source = "circuits/openac_show/src/main.nr"
-version = "v2"
+version = "v3"
 
 public_inputs = [
+  "nonce_hash",
   "link_mode", "link_scope", "epoch", "epoch_field",
   "current_year", "current_month", "current_day", "age_threshold",
   "disclose_nationality", "disclose_age",
@@ -299,6 +326,7 @@ public_inputs = [
   "out_is_older", "out_nationality",
 ]
 public_input_types = [
+  "[u8; 32]",
   "bool", "Field", "[u8; 4]", "Field",
   "u32", "u32", "u32", "u32",
   "bool", "bool",
@@ -307,11 +335,26 @@ public_input_types = [
   "bool", "[u8; 3]",
 ]
 
+# v3 adds `enclave_pk_x`, `enclave_pk_y`, `signature` as private witnesses so
+# the circuit can run `verify_device_binding` in-circuit against `nonce_hash`.
+# `pk_digest` derived from that ECDSA feeds into `commit_attributes_v3`.
+# Note (2026-04-17 Path A): `Age not disclosed ... / Nationality not disclosed
+# ...` assertions from v2 are intentionally removed — when a disclosure flag
+# is false, the corresponding output is unconstrained to prevent leakage.
+# `verify_show` (openac_core::show) handles hash + link-tag assertions.
 private_inputs = [
   "credential_type", "attr_hash_hi", "attr_hash_lo", "link_rand",
+  "enclave_pk_x", "enclave_pk_y", "signature",
   "challenge",
   "birth_year", "birth_month", "birth_day",
   "nationality",
+]
+private_input_types = [
+  "Field", "Field", "Field", "Field",
+  "[u8; 32]", "[u8; 32]", "[u8; 64]",
+  "[u8; 32]",
+  "u32", "u32", "u32",
+  "[u8; 3]",
 ]
 
 assertions = [
@@ -322,13 +365,11 @@ assertions = [
   "Unlinkable mode requires zero scope",
   "Unlinkable mode requires zero tag",
   "Age predicate output mismatch",
-  "Age not disclosed but output is true",
   "Nationality output mismatch",
-  "Nationality not disclosed but output is non-zero",
 ]
 
-min_positive_tests = 2
-min_negative_tests = 1
+min_positive_tests = 4
+min_negative_tests = 3
 
 imports = { out_commitment_x = "passport_adapter", out_commitment_y = "passport_adapter" }
 
@@ -355,8 +396,242 @@ assertions = [
   "Device binding ECDSA P-256 verification failed",
 ]
 
-min_positive_tests = 0  # Requires valid P-256 test vectors
+min_positive_tests = 1
 min_negative_tests = 1
+
+# ============================================================
+# Circuit: sdjwt_adapter (v3 — Path A SD-JWT prepare)
+# ============================================================
+[circuits.sdjwt_adapter]
+type = "bin"
+description = "OpenAC SD-JWT adapter (v3): ES256 issuer ECDSA + disclosure hash chain + Pedersen v3 commitment bound to enclave pk_digest"
+source = "circuits/sdjwt_adapter/src/main.nr"
+version = "v3"
+
+public_inputs = ["issuer_pk_x", "issuer_pk_y", "out_commitment_x", "out_commitment_y"]
+public_input_types = ["[u8; 32]", "[u8; 32]", "Field", "Field"]
+
+# v3 adds `enclave_pk_x`, `enclave_pk_y` as private witnesses so the
+# commitment binds `pk_digest`. The show phase re-derives pk_digest via
+# in-circuit ECDSA against a fresh nonce.
+private_inputs = [
+  "jwt_payload_hash", "signature",
+  "disclosure_count", "disclosure_salts", "claim_values", "claim_lengths", "expected_disclosure_hashes",
+  "link_rand",
+  "enclave_pk_x", "enclave_pk_y",
+]
+private_input_types = [
+  "[u8; 32]", "[u8; 64]",
+  "u8", "[[u8; 16]; 8]", "[[u8; 64]; 8]", "[u32; 8]", "[[u8; 32]; 8]",
+  "Field",
+  "[u8; 32]", "[u8; 32]",
+]
+
+assertions = [
+  "SD-JWT ES256 signature verification failed",
+  "Too many disclosures",
+  "Claim length exceeds maximum",
+  "SD-JWT disclosure hash mismatch",
+  "Commitment X mismatch",
+  "Commitment Y mismatch",
+]
+
+constants = { MAX_DISCLOSURES = 8, MAX_CLAIM_SIZE = 64, SALT_SIZE = 16 }
+
+min_positive_tests = 5
+min_negative_tests = 2
+
+exports = { out_commitment_x = "Field", out_commitment_y = "Field" }
+
+# ============================================================
+# Circuit: jwt_x5c_adapter (v3 — Path A X.509 / OIDC RS256 prepare)
+# ============================================================
+[circuits.jwt_x5c_adapter]
+type = "bin"
+description = "X.509 x5c JWT prepare adapter (v3, RSA variant): RSA cert chain verification + SMT non-membership + RSA JWT signature + Pedersen v3 commitment bound to enclave pk_digest"
+source = "circuits/jwt_x5c_adapter/src/main.nr"
+version = "v3"
+
+# Budget status (2026-04-17): 384,147 ACIR opcodes vs 65,000 target
+# (spec/x509-benchmark.md §3). Path A Phase 3 ships this circuit with a
+# 5.9x overshoot as a known deficit; optimization candidates tracked in
+# spec/x509-benchmark.md §7.
+known_deficit = true
+gate_budget = 65000
+gate_budget_status = "overshoot"
+
+public_inputs = [
+  "jwt_payload_b64h", "jwt_signed_hash",
+  "issuer_modulus",
+  "smt_root",
+  "out_commitment_x", "out_commitment_y",
+]
+public_input_types = [
+  "[u8; 32]", "[u8; 32]",
+  "[u128; 18]",
+  "Field",
+  "Field", "Field",
+]
+
+private_inputs = [
+  "leaf_tbs", "issuer_tbs",
+  "leaf_sig", "issuer_sig",
+  "serial_number",
+  "smt_siblings", "smt_old_key", "smt_old_value", "smt_is_old0",
+  "jwt_payload_norm", "jwt_sig",
+  "jwt_modulus_limbs", "jwt_redc_limbs", "issuer_redc_limbs",
+  "link_rand_p",
+  "enclave_pk_x", "enclave_pk_y",
+]
+private_input_types = [
+  "[u8; 1536]", "[u8; 1536]",
+  "[u128; 18]", "[u128; 18]",
+  "[u8; 20]",
+  "[Field; 128]", "Field", "Field", "bool",
+  "[u8; 4096]", "[u128; 18]",
+  "[u128; 18]", "[u128; 18]", "[u128; 18]",
+  "Field",
+  "[u8; 32]", "[u8; 32]",
+]
+
+assertions = [
+  "Leaf certificate signature verification failed",
+  "Issuer certificate signature verification failed",
+  "Leaf cert JWT modulus mismatch",
+  "Revocation witness matches blocked serial",
+  "Revocation SMT root mismatch",
+  "Normalized JWT payload missing email_domain",
+  "Normalized JWT domain missing value",
+  "JWT payload hash mismatch",
+  "JWT signature verification failed",
+  "Commitment X mismatch",
+  "Commitment Y mismatch",
+]
+
+constants = { CERT_TBS_LEN = 1536, JWT_PAYLOAD_LEN = 4096, LIMB_COUNT = 18, SMT_DEPTH = 128, RSA_EXPONENT = 65537 }
+
+min_positive_tests = 3
+min_negative_tests = 3
+
+exports = { out_commitment_x = "Field", out_commitment_y = "Field" }
+
+[circuits.jwt_x5c_adapter.dependencies]
+noir_rsa = "v0.10.0"
+bignum = "v0.9.2"
+sha256 = "v0.3.0"
+openac_core = "path"
+
+# ============================================================
+# Circuit: x509_show (v3 — Path A X.509 show)
+# ============================================================
+[circuits.x509_show]
+type = "bin"
+description = "X.509 show (v3): in-circuit ECDSA-P256 device binding + v3 commitment re-open + domain predicate + scoped link tag"
+source = "circuits/x509_show/src/main.nr"
+version = "v3"
+
+gate_budget = 5000
+
+public_inputs = [
+  "in_commitment_x509_x", "in_commitment_x509_y",
+  "nonce_hash",
+  "target_domain_hash",
+  "out_link_tag", "out_domain_match", "out_challenge_digest",
+]
+public_input_types = [
+  "Field", "Field",
+  "[u8; 32]",
+  "Field",
+  "Field", "Field", "Field",
+]
+
+private_inputs = [
+  "attr_hi", "attr_lo", "link_rand_x",
+  "enclave_pk_x", "enclave_pk_y", "signature",
+  "scope", "epoch",
+]
+private_input_types = [
+  "Field", "Field", "Field",
+  "[u8; 32]", "[u8; 32]", "[u8; 64]",
+  "Field", "Field",
+]
+
+assertions = [
+  "Commitment X mismatch",
+  "Commitment Y mismatch",
+  "Domain match predicate mismatch",
+  "Domain match must be boolean (0 or 1)",
+  "Link tag mismatch",
+  "Challenge digest mismatch",
+]
+
+min_positive_tests = 3
+min_negative_tests = 2
+
+imports = { in_commitment_x509_x = "jwt_x5c_adapter", in_commitment_x509_y = "jwt_x5c_adapter" }
+
+[circuits.x509_show.dependencies]
+openac_core = "path"
+
+# ============================================================
+# Circuit: composite_show (v3 — Path A passport + X.509 bundle show)
+# ============================================================
+[circuits.composite_show]
+type = "bin"
+description = "Composite show (v3): single ECDSA-P256 verify + re-open passport & X.509 commitments sharing the same pk_digest + age predicate + domain predicate + scoped link tag"
+source = "circuits/composite_show/src/main.nr"
+version = "v3"
+
+gate_budget = 8000
+
+public_inputs = [
+  "in_commitment_passport_x", "in_commitment_passport_y",
+  "in_commitment_x509_x", "in_commitment_x509_y",
+  "nonce_hash",
+  "age_threshold",
+  "target_domain_hash",
+  "out_link_tag", "out_is_older", "out_domain_match", "out_challenge_digest",
+]
+public_input_types = [
+  "Field", "Field",
+  "Field", "Field",
+  "[u8; 32]",
+  "Field",
+  "Field",
+  "Field", "Field", "Field", "Field",
+]
+
+private_inputs = [
+  "p_attr_hi", "p_attr_lo", "link_rand_p",
+  "x_attr_hi", "x_attr_lo",
+  "enclave_pk_x", "enclave_pk_y", "signature",
+  "scope", "epoch",
+]
+private_input_types = [
+  "Field", "Field", "Field",
+  "Field", "Field",
+  "[u8; 32]", "[u8; 32]", "[u8; 64]",
+  "Field", "Field",
+]
+
+assertions = [
+  "Commitment X mismatch",
+  "Commitment Y mismatch",
+  "Age predicate mismatch",
+  "out_is_older must be boolean (0 or 1)",
+  "Domain match predicate mismatch",
+  "out_domain_match must be boolean (0 or 1)",
+  "Link tag mismatch",
+  "Challenge digest mismatch",
+]
+
+min_positive_tests = 1
+min_negative_tests = 3
+
+imports = { in_commitment_passport_x = "passport_adapter", in_commitment_passport_y = "passport_adapter", in_commitment_x509_x = "jwt_x5c_adapter", in_commitment_x509_y = "jwt_x5c_adapter" }
+
+[circuits.composite_show.dependencies]
+openac_core = "path"
 
 # ============================================================
 # Cross-Circuit Hash Chain (v1 flow)
@@ -395,19 +670,70 @@ via = "out_prepare_commitment"
 type = "[u8; 32]"
 
 # ============================================================
-# Cross-Circuit Commitment Chain (v2 flow)
+# Cross-Circuit Commitment Chain (v3 flow — Path A)
 # ============================================================
-[cross_circuit.v2_commitment_chain]
-description = "Pedersen-based commitment chain linking v2 circuits"
+# passport_adapter v3 and openac_show v3 now share a v3 (arity-5) Pedersen
+# commitment that binds `pk_digest = pedersen_hash(enclave_pk)`. x509 /
+# composite flows share the same pk_digest across multiple credentials.
+[cross_circuit.v3_commitment_chain]
+description = "Pedersen v3 (arity-5, pk_digest-bound) commitment chain linking Path A circuits"
 
-[[cross_circuit.v2_commitment_chain.links]]
+[[cross_circuit.v3_commitment_chain.links]]
 from = "passport_adapter"
 to = "openac_show"
 via = "out_commitment_x"
 type = "Field"
 
-[[cross_circuit.v2_commitment_chain.links]]
+[[cross_circuit.v3_commitment_chain.links]]
 from = "passport_adapter"
+to = "openac_show"
+via = "out_commitment_y"
+type = "Field"
+
+[[cross_circuit.v3_commitment_chain.links]]
+from = "passport_adapter"
+to = "composite_show"
+via = "out_commitment_x"
+type = "Field"
+
+[[cross_circuit.v3_commitment_chain.links]]
+from = "passport_adapter"
+to = "composite_show"
+via = "out_commitment_y"
+type = "Field"
+
+[[cross_circuit.v3_commitment_chain.links]]
+from = "jwt_x5c_adapter"
+to = "x509_show"
+via = "out_commitment_x"
+type = "Field"
+
+[[cross_circuit.v3_commitment_chain.links]]
+from = "jwt_x5c_adapter"
+to = "x509_show"
+via = "out_commitment_y"
+type = "Field"
+
+[[cross_circuit.v3_commitment_chain.links]]
+from = "jwt_x5c_adapter"
+to = "composite_show"
+via = "out_commitment_x"
+type = "Field"
+
+[[cross_circuit.v3_commitment_chain.links]]
+from = "jwt_x5c_adapter"
+to = "composite_show"
+via = "out_commitment_y"
+type = "Field"
+
+[[cross_circuit.v3_commitment_chain.links]]
+from = "sdjwt_adapter"
+to = "openac_show"
+via = "out_commitment_x"
+type = "Field"
+
+[[cross_circuit.v3_commitment_chain.links]]
+from = "sdjwt_adapter"
 to = "openac_show"
 via = "out_commitment_y"
 type = "Field"

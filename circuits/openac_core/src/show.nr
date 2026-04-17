@@ -5,7 +5,8 @@ use std::hash::pedersen_hash;
 // "openac.show.v2" (v2 = Pedersen-based)
 global SHOW_DOMAIN: [u8; 14] = [111, 112, 101, 110, 97, 99, 46, 115, 104, 111, 119, 46, 118, 50];
 // "openac.scope.v2"
-global SCOPE_DOMAIN: [u8; 15] = [111, 112, 101, 110, 97, 99, 46, 115, 99, 111, 112, 101, 46, 118, 50];
+global SCOPE_DOMAIN: [u8; 15] =
+    [111, 112, 101, 110, 97, 99, 46, 115, 99, 111, 112, 101, 46, 118, 50];
 
 pub global HASH_LEN: u32 = 32;
 global SHOW_DOMAIN_LEN: u32 = 14;
@@ -156,21 +157,21 @@ fn test_challenge_digest_changes_with_commitment() {
 fn test_link_tag_deterministic() {
     let t1 = compute_link_tag(10, 20, 30, 40);
     let t2 = compute_link_tag(10, 20, 30, 40);
-    assert(t1 == t2);
+    assert(t1 == t2, "Link tag should be deterministic");
 }
 
 #[test]
 fn test_link_tag_differs_across_scope() {
     let t1 = compute_link_tag(10, 20, 30, 40);
     let t2 = compute_link_tag(10, 20, 31, 40);
-    assert(t1 != t2);
+    assert(t1 != t2, "Different scope must produce different tag");
 }
 
 #[test]
 fn test_link_tag_differs_across_epoch() {
     let t1 = compute_link_tag(10, 20, 30, 40);
     let t2 = compute_link_tag(10, 20, 30, 41);
-    assert(t1 != t2);
+    assert(t1 != t2, "Different epoch must produce different tag");
 }
 
 #[test]
@@ -185,7 +186,17 @@ fn test_verify_show_linkable_mode() {
     let digest = compute_challenge_digest(cx, cy, challenge, epoch);
     let tag = compute_link_tag(cx, cy, scope, epoch_field);
 
-    verify_show(cx, cy, challenge, epoch, epoch_field, true, scope, digest, tag);
+    verify_show(
+        cx,
+        cy,
+        challenge,
+        epoch,
+        epoch_field,
+        true,
+        scope,
+        digest,
+        tag,
+    );
 }
 
 #[test]
@@ -217,5 +228,53 @@ fn test_verify_show_fails_on_tampered_challenge() {
     let mut bad_challenge = challenge;
     bad_challenge[0] = bad_challenge[0] ^ 0xFF;
 
-    verify_show(cx, cy, bad_challenge, epoch, epoch_field, true, scope, digest, tag);
+    verify_show(
+        cx,
+        cy,
+        bad_challenge,
+        epoch,
+        epoch_field,
+        true,
+        scope,
+        digest,
+        tag,
+    );
+}
+
+#[test(should_fail)]
+fn test_verify_show_fails_on_epoch_mismatch() {
+    let cx: Field = 555;
+    let cy: Field = 666;
+    let challenge = sample_challenge();
+    let epoch = sample_epoch();
+    let epoch_field: Field = 0x20260401;
+
+    let digest = compute_challenge_digest(cx, cy, challenge, epoch);
+
+    // epoch_field doesn't match epoch bytes
+    verify_show(
+        cx,
+        cy,
+        challenge,
+        epoch,
+        epoch_field + 1,
+        false,
+        0,
+        digest,
+        0,
+    );
+}
+
+#[test(should_fail)]
+fn test_verify_show_fails_linkable_with_zero_scope() {
+    let cx: Field = 555;
+    let cy: Field = 666;
+    let challenge = sample_challenge();
+    let epoch = sample_epoch();
+    let epoch_field: Field = 0x20260401;
+
+    let digest = compute_challenge_digest(cx, cy, challenge, epoch);
+
+    // unlinkable mode requires zero scope - non-zero scope should fail
+    verify_show(cx, cy, challenge, epoch, epoch_field, false, 42, digest, 0);
 }

@@ -1,0 +1,8 @@
+[package]
+name = "composite_show"
+type = "bin"
+authors = ["kidneyweakx"]
+description = "OpenAC Path A composite show: passport + X.509 commitments sharing one pk_digest"
+
+[dependencies]
+openac_core = { path = "../openac_core" }

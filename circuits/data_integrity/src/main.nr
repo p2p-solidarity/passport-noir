@@ -50,10 +50,7 @@ fn main(
 
             // Compare with the expected hash from SOD
             for k in 0..32 {
-                assert(
-                    computed_hash[k] == expected_dg_hashes[i][k],
-                    "Data group hash mismatch",
-                );
+                assert(computed_hash[k] == expected_dg_hashes[i][k], "Data group hash mismatch");
             }
 
             // Accumulate into combined preimage for SOD hash
@@ -66,10 +63,7 @@ fn main(
     // Verify combined hash matches the SOD hash
     let computed_sod_hash: [u8; 32] = digest(combined_preimage);
     for i in 0..32 {
-        assert(
-            computed_sod_hash[i] == sod_hash[i],
-            "SOD combined hash mismatch",
-        );
+        assert(computed_sod_hash[i] == sod_hash[i], "SOD combined hash mismatch");
     }
 }
 
@@ -78,7 +72,7 @@ fn test_single_dg() {
     // Test with a single data group
     let mut dg_contents: [[u8; MAX_DG_SIZE]; MAX_DG_COUNT] = [[0; MAX_DG_SIZE]; MAX_DG_COUNT];
     // Simple test data: "Hello"
-    dg_contents[0][0] = 72;  // H
+    dg_contents[0][0] = 72; // H
     dg_contents[0][1] = 101; // e
     dg_contents[0][2] = 108; // l
     dg_contents[0][3] = 108; // l
@@ -114,12 +108,7 @@ fn make_dg_padded(content: [u8; MAX_DG_SIZE]) -> [u8; 32] {
 }
 
 // Helper: compute sod_hash from 4 DG hashes
-fn compute_sod_hash(
-    h0: [u8; 32],
-    h1: [u8; 32],
-    h2: [u8; 32],
-    h3: [u8; 32],
-) -> [u8; 32] {
+fn compute_sod_hash(h0: [u8; 32], h1: [u8; 32], h2: [u8; 32], h3: [u8; 32]) -> [u8; 32] {
     let mut combined: [u8; MAX_DG_COUNT * 32] = [0; MAX_DG_COUNT * 32];
     for i in 0..32 {
         combined[i] = h0[i];
@@ -135,11 +124,17 @@ fn compute_sod_hash(
 fn test_two_dgs() {
     let mut dg_contents: [[u8; MAX_DG_SIZE]; MAX_DG_COUNT] = [[0; MAX_DG_SIZE]; MAX_DG_COUNT];
     // DG0: "Hello"
-    dg_contents[0][0] = 72; dg_contents[0][1] = 101; dg_contents[0][2] = 108;
-    dg_contents[0][3] = 108; dg_contents[0][4] = 111;
+    dg_contents[0][0] = 72;
+    dg_contents[0][1] = 101;
+    dg_contents[0][2] = 108;
+    dg_contents[0][3] = 108;
+    dg_contents[0][4] = 111;
     // DG1: "World"
-    dg_contents[1][0] = 87; dg_contents[1][1] = 111; dg_contents[1][2] = 114;
-    dg_contents[1][3] = 108; dg_contents[1][4] = 100;
+    dg_contents[1][0] = 87;
+    dg_contents[1][1] = 111;
+    dg_contents[1][2] = 114;
+    dg_contents[1][3] = 108;
+    dg_contents[1][4] = 100;
 
     let dg_lengths: [u32; MAX_DG_COUNT] = [5, 5, 0, 0];
 
@@ -171,7 +166,9 @@ fn test_three_dgs() {
     let zero: [u8; 32] = [0; 32];
 
     let mut expected: [[u8; 32]; MAX_DG_COUNT] = [[0; 32]; MAX_DG_COUNT];
-    expected[0] = h0; expected[1] = h1; expected[2] = h2;
+    expected[0] = h0;
+    expected[1] = h1;
+    expected[2] = h2;
 
     let sod_hash = compute_sod_hash(h0, h1, h2, zero);
     main(3, dg_contents, dg_lengths, expected, sod_hash);
@@ -194,7 +191,10 @@ fn test_max_four_dgs() {
     let h3 = make_dg_padded(dg_contents[3]);
 
     let mut expected: [[u8; 32]; MAX_DG_COUNT] = [[0; 32]; MAX_DG_COUNT];
-    expected[0] = h0; expected[1] = h1; expected[2] = h2; expected[3] = h3;
+    expected[0] = h0;
+    expected[1] = h1;
+    expected[2] = h2;
+    expected[3] = h3;
 
     let sod_hash = compute_sod_hash(h0, h1, h2, h3);
     main(4, dg_contents, dg_lengths, expected, sod_hash);
@@ -248,7 +248,10 @@ fn test_various_dg_lengths() {
     let h3 = make_dg_padded(dg_contents[3]);
 
     let mut expected: [[u8; 32]; MAX_DG_COUNT] = [[0; 32]; MAX_DG_COUNT];
-    expected[0] = h0; expected[1] = h1; expected[2] = h2; expected[3] = h3;
+    expected[0] = h0;
+    expected[1] = h1;
+    expected[2] = h2;
+    expected[3] = h3;
 
     let sod_hash = compute_sod_hash(h0, h1, h2, h3);
     main(4, dg_contents, dg_lengths, expected, sod_hash);
@@ -258,8 +261,11 @@ fn test_various_dg_lengths() {
 #[test(should_fail)]
 fn test_wrong_expected_hash_fails() {
     let mut dg_contents: [[u8; MAX_DG_SIZE]; MAX_DG_COUNT] = [[0; MAX_DG_SIZE]; MAX_DG_COUNT];
-    dg_contents[0][0] = 72; dg_contents[0][1] = 101; dg_contents[0][2] = 108;
-    dg_contents[0][3] = 108; dg_contents[0][4] = 111;
+    dg_contents[0][0] = 72;
+    dg_contents[0][1] = 101;
+    dg_contents[0][2] = 108;
+    dg_contents[0][3] = 108;
+    dg_contents[0][4] = 111;
 
     let dg_lengths: [u32; MAX_DG_COUNT] = [5, 0, 0, 0];
 
@@ -281,8 +287,11 @@ fn test_wrong_expected_hash_fails() {
 #[test(should_fail)]
 fn test_wrong_sod_hash_fails() {
     let mut dg_contents: [[u8; MAX_DG_SIZE]; MAX_DG_COUNT] = [[0; MAX_DG_SIZE]; MAX_DG_COUNT];
-    dg_contents[0][0] = 72; dg_contents[0][1] = 101; dg_contents[0][2] = 108;
-    dg_contents[0][3] = 108; dg_contents[0][4] = 111;
+    dg_contents[0][0] = 72;
+    dg_contents[0][1] = 101;
+    dg_contents[0][2] = 108;
+    dg_contents[0][3] = 108;
+    dg_contents[0][4] = 111;
 
     let dg_lengths: [u32; MAX_DG_COUNT] = [5, 0, 0, 0];
     let h0 = make_dg_padded(dg_contents[0]);
@@ -299,8 +308,11 @@ fn test_wrong_sod_hash_fails() {
 #[test(should_fail)]
 fn test_tampered_dg_content_fails() {
     let mut dg_contents: [[u8; MAX_DG_SIZE]; MAX_DG_COUNT] = [[0; MAX_DG_SIZE]; MAX_DG_COUNT];
-    dg_contents[0][0] = 72; dg_contents[0][1] = 101; dg_contents[0][2] = 108;
-    dg_contents[0][3] = 108; dg_contents[0][4] = 111;
+    dg_contents[0][0] = 72;
+    dg_contents[0][1] = 101;
+    dg_contents[0][2] = 108;
+    dg_contents[0][3] = 108;
+    dg_contents[0][4] = 111;
 
     // Compute hash of ORIGINAL content
     let h0 = make_dg_padded(dg_contents[0]);
@@ -352,15 +364,13 @@ fn test_realistic_dg1_mrz_data() {
     // TD3 MRZ: "P<UTODOE<<JOHN<<<<<<<<<<<<<<<<<<<<<<<<<<<L898902C36UTO9001014M2610154<<<<<<<<<<<<<<<8"
     // Line 1 (44 bytes):
     let line1: [u8; 44] = [
-        80, 60, 85, 84, 79, 68, 79, 69, 60, 60, 74, 79, 72, 78,
-        60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60,
-        60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60,
+        80, 60, 85, 84, 79, 68, 79, 69, 60, 60, 74, 79, 72, 78, 60, 60, 60, 60, 60, 60, 60, 60, 60,
+        60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60,
     ];
     // Line 2 (44 bytes):
     let line2: [u8; 44] = [
-        76, 56, 57, 56, 57, 48, 50, 67, 51, 54, 85, 84, 79, 57,
-        48, 48, 49, 48, 49, 52, 77, 50, 54, 49, 48, 49, 53, 52,
-        60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 56,
+        76, 56, 57, 56, 57, 48, 50, 67, 51, 54, 85, 84, 79, 57, 48, 48, 49, 48, 49, 52, 77, 50, 54,
+        49, 48, 49, 53, 52, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 56,
     ];
     for i in 0..44 {
         dg_contents[0][i] = line1[i];
@@ -419,11 +429,23 @@ fn test_data_integrity_to_disclosure_mrz_link() {
 
     // DG1 = MRZ data (88 bytes TD3 format, padded to 512)
     let mut mrz: [u8; 88] = [60; 88];
-    mrz[0] = 80; mrz[1] = 60; mrz[2] = 85; mrz[3] = 84; mrz[4] = 79; // P<UTO
-    mrz[5] = 68; mrz[6] = 79; mrz[7] = 69; // DOE
-    mrz[54] = 85; mrz[55] = 84; mrz[56] = 79; // nationality UTO
-    mrz[57] = 48; mrz[58] = 48; mrz[59] = 48; // DOB 000315
-    mrz[60] = 51; mrz[61] = 49; mrz[62] = 53;
+    mrz[0] = 80;
+    mrz[1] = 60;
+    mrz[2] = 85;
+    mrz[3] = 84;
+    mrz[4] = 79; // P<UTO
+    mrz[5] = 68;
+    mrz[6] = 79;
+    mrz[7] = 69; // DOE
+    mrz[54] = 85;
+    mrz[55] = 84;
+    mrz[56] = 79; // nationality UTO
+    mrz[57] = 48;
+    mrz[58] = 48;
+    mrz[59] = 48; // DOB 000315
+    mrz[60] = 51;
+    mrz[61] = 49;
+    mrz[62] = 53;
 
     for i in 0..88 {
         dg_contents[0][i] = mrz[i];
@@ -454,12 +476,29 @@ fn test_full_pipeline_hash_consistency() {
 
     // MRZ data (88 bytes): P<UTODOE<<JOHN with nationality UTO, DOB 000315
     let mut mrz: [u8; 88] = [60; 88];
-    mrz[0] = 80; mrz[1] = 60; mrz[2] = 85; mrz[3] = 84; mrz[4] = 79;
-    mrz[5] = 68; mrz[6] = 79; mrz[7] = 69; mrz[8] = 60; mrz[9] = 60;
-    mrz[10] = 74; mrz[11] = 79; mrz[12] = 72; mrz[13] = 78;
-    mrz[54] = 85; mrz[55] = 84; mrz[56] = 79;
-    mrz[57] = 48; mrz[58] = 48; mrz[59] = 48;
-    mrz[60] = 51; mrz[61] = 49; mrz[62] = 53;
+    mrz[0] = 80;
+    mrz[1] = 60;
+    mrz[2] = 85;
+    mrz[3] = 84;
+    mrz[4] = 79;
+    mrz[5] = 68;
+    mrz[6] = 79;
+    mrz[7] = 69;
+    mrz[8] = 60;
+    mrz[9] = 60;
+    mrz[10] = 74;
+    mrz[11] = 79;
+    mrz[12] = 72;
+    mrz[13] = 78;
+    mrz[54] = 85;
+    mrz[55] = 84;
+    mrz[56] = 79;
+    mrz[57] = 48;
+    mrz[58] = 48;
+    mrz[59] = 48;
+    mrz[60] = 51;
+    mrz[61] = 49;
+    mrz[62] = 53;
 
     // DG1 = MRZ padded to 512
     for i in 0..88 {
@@ -492,8 +531,14 @@ fn test_pipeline_tampered_dg1_breaks_chain() {
 
     // Original MRZ
     let mut mrz: [u8; 88] = [60; 88];
-    mrz[0] = 80; mrz[1] = 60; mrz[2] = 85; mrz[3] = 84; mrz[4] = 79;
-    mrz[54] = 85; mrz[55] = 84; mrz[56] = 79;
+    mrz[0] = 80;
+    mrz[1] = 60;
+    mrz[2] = 85;
+    mrz[3] = 84;
+    mrz[4] = 79;
+    mrz[54] = 85;
+    mrz[55] = 84;
+    mrz[56] = 79;
 
     for i in 0..88 {
         dg_contents[0][i] = mrz[i];
@@ -518,7 +563,8 @@ fn test_pipeline_tampered_dg1_breaks_chain() {
 #[test(should_fail)]
 fn test_pipeline_wrong_sod_breaks_chain() {
     let mut dg_contents: [[u8; MAX_DG_SIZE]; MAX_DG_COUNT] = [[0; MAX_DG_SIZE]; MAX_DG_COUNT];
-    dg_contents[0][0] = 80; dg_contents[0][1] = 65;
+    dg_contents[0][0] = 80;
+    dg_contents[0][1] = 65;
 
     let h0 = make_dg_padded(dg_contents[0]);
     let zero: [u8; 32] = [0; 32];
@@ -538,10 +584,7 @@ fn test_pipeline_wrong_sod_breaks_chain() {
 // OpenAC extension: explicit DG1(MRZ) hash link for disclosure
 // ============================================================
 
-fn derive_td3_mrz_hash(
-    dg1_content: [u8; MAX_DG_SIZE],
-    dg1_length: u32,
-) -> [u8; 32] {
+fn derive_td3_mrz_hash(dg1_content: [u8; MAX_DG_SIZE], dg1_length: u32) -> [u8; 32] {
     assert(dg1_length >= 88, "DG1 length too short for TD3 MRZ");
 
     let mut mrz_data: [u8; 88] = [0; 88];
@@ -560,14 +603,17 @@ fn main_with_mrz_link(
     sod_hash: [u8; 32],
     mrz_hash: [u8; 32],
 ) {
-    main(dg_count, dg_contents, dg_lengths, expected_dg_hashes, sod_hash);
+    main(
+        dg_count,
+        dg_contents,
+        dg_lengths,
+        expected_dg_hashes,
+        sod_hash,
+    );
 
     let computed_mrz_hash = derive_td3_mrz_hash(dg_contents[0], dg_lengths[0]);
     for i in 0..32 {
-        assert(
-            computed_mrz_hash[i] == mrz_hash[i],
-            "MRZ hash link mismatch",
-        );
+        assert(computed_mrz_hash[i] == mrz_hash[i], "MRZ hash link mismatch");
     }
 }
 
@@ -577,12 +623,29 @@ fn test_dg1_mrz_hash_output_matches_disclosure_input() {
     let mut mrz: [u8; 88] = [60; 88];
 
     // TD3-style MRZ prefix
-    mrz[0] = 80; mrz[1] = 60; mrz[2] = 85; mrz[3] = 84; mrz[4] = 79;
-    mrz[5] = 68; mrz[6] = 79; mrz[7] = 69; mrz[8] = 60; mrz[9] = 60;
-    mrz[10] = 74; mrz[11] = 79; mrz[12] = 72; mrz[13] = 78;
-    mrz[54] = 85; mrz[55] = 84; mrz[56] = 79;
-    mrz[57] = 48; mrz[58] = 48; mrz[59] = 48;
-    mrz[60] = 51; mrz[61] = 49; mrz[62] = 53;
+    mrz[0] = 80;
+    mrz[1] = 60;
+    mrz[2] = 85;
+    mrz[3] = 84;
+    mrz[4] = 79;
+    mrz[5] = 68;
+    mrz[6] = 79;
+    mrz[7] = 69;
+    mrz[8] = 60;
+    mrz[9] = 60;
+    mrz[10] = 74;
+    mrz[11] = 79;
+    mrz[12] = 72;
+    mrz[13] = 78;
+    mrz[54] = 85;
+    mrz[55] = 84;
+    mrz[56] = 79;
+    mrz[57] = 48;
+    mrz[58] = 48;
+    mrz[59] = 48;
+    mrz[60] = 51;
+    mrz[61] = 49;
+    mrz[62] = 53;
 
     for i in 0..88 {
         dg_contents[0][i] = mrz[i];
@@ -605,9 +668,20 @@ fn test_tampered_mrz_hash_link_fails() {
     let mut dg_contents: [[u8; MAX_DG_SIZE]; MAX_DG_COUNT] = [[0; MAX_DG_SIZE]; MAX_DG_COUNT];
     let mut mrz: [u8; 88] = [60; 88];
 
-    mrz[0] = 80; mrz[1] = 60; mrz[2] = 85; mrz[3] = 84; mrz[4] = 79;
-    mrz[54] = 85; mrz[55] = 84; mrz[56] = 79;
-    mrz[57] = 48; mrz[58] = 48; mrz[59] = 48; mrz[60] = 51; mrz[61] = 49; mrz[62] = 53;
+    mrz[0] = 80;
+    mrz[1] = 60;
+    mrz[2] = 85;
+    mrz[3] = 84;
+    mrz[4] = 79;
+    mrz[54] = 85;
+    mrz[55] = 84;
+    mrz[56] = 79;
+    mrz[57] = 48;
+    mrz[58] = 48;
+    mrz[59] = 48;
+    mrz[60] = 51;
+    mrz[61] = 49;
+    mrz[62] = 53;
 
     for i in 0..88 {
         dg_contents[0][i] = mrz[i];

@@ -1,58 +1,80 @@
 # Benchmark Baseline
-# Generated: 2026-04-01
+# Generated: 2026-04-01; refreshed 2026-04-17 for Path A v3 migration.
 # Update this after confirmed improvements via: make bench-update-baseline
 
 [meta]
 created = "2026-04-01"
+updated = "2026-04-17"
 nargo_version = "1.0.0-beta.19"
 
 # Minimum test counts per circuit (fail if below)
 [tests]
-passport_verifier = { positive = 1, negative = 1, total = 9 }
+passport_verifier = { positive = 1, negative = 8, total = 9 }
 data_integrity = { positive = 11, negative = 8, total = 19 }
-disclosure = { positive = 15, negative = 3, total = 18 }
+disclosure = { positive = 13, negative = 5, total = 18 }
 prepare_link = { positive = 2, negative = 1, total = 3 }
 show_link = { positive = 4, negative = 1, total = 5 }
-openac_core = { positive = 19, negative = 2, total = 24 }
-openac_show = { positive = 3, negative = 1, total = 4 }
-device_binding = { positive = 0, negative = 1, total = 1 }
+openac_core = { positive = 46, negative = 9, total = 55 }
+openac_show = { positive = 6, negative = 4, total = 10 }
+passport_adapter = { positive = 8, negative = 2, total = 10 }
+device_binding = { positive = 1, negative = 3, total = 4 }
+sdjwt_adapter = { positive = 6, negative = 2, total = 8 }
+# Path A v3 additions (2026-04-17)
+jwt_x5c_adapter = { positive = 5, negative = 3, total = 8 }
+x509_show = { positive = 3, negative = 2, total = 5 }
+composite_show = { positive = 1, negative = 3, total = 4 }
 
 [tests.total]
-minimum = 83
+minimum = 158
 
 # Gate count baselines (ACIR opcodes, warn if > 10% regression)
-# Measured: 2026-04-01, nargo 1.0.0-beta.19
+# Measured: 2026-04-17, nargo 1.0.0-beta.19
+# Method: `nargo info --package <name>` (captured raw main.ACIR column).
 [gates]
 passport_verifier = 11736
 data_integrity = 13643
 disclosure = 487
 prepare_link = 283
 show_link = 757
-passport_adapter = 25535
-openac_show = 1432
+passport_adapter = 25725   # was 25535 (+190, Path A v3 adds pk_digest binding + pack_passport_profile)
+openac_show = 1752         # was 1432 (+320, in-circuit ECDSA-P256 device binding for show phase)
 device_binding = 162
+sdjwt_adapter = 5807       # new baseline (first Pedersen v3 adapter measurement; no prior entry)
+# Path A v3 additions (2026-04-17)
+jwt_x5c_adapter = 384147   # NEW — 5.9x over 65,000 spec budget; see spec/x509-benchmark.md §7
+x509_show = 549            # NEW — within 5,000 spec budget
+composite_show = 684       # NEW — within 8,000 spec budget
 
 # Artifact sizes in bytes (warn if > 20% regression)
-# Measured: 2026-04-02, nargo 1.0.0-beta.19
+# Measured: 2026-04-17, nargo 1.0.0-beta.19
 [artifact_bytes]
-passport_verifier = 632206
-data_integrity = 405348
-disclosure = 79310
-prepare_link = 58846
-show_link = 73761
-passport_adapter = 1017083
-openac_show = 132035
-device_binding = 5340
-total = 2403929
+passport_verifier = 653652
+data_integrity = 405646
+disclosure = 79661
+prepare_link = 58832
+show_link = 73746
+passport_adapter = 1056890
+openac_show = 167332
+device_binding = 7351
+sdjwt_adapter = 217422
+# Path A v3 additions (2026-04-17)
+jwt_x5c_adapter = 8034760   # ~7.7 MB — dominated by RSA x2 + SMT depth 128
+x509_show = 102038
+composite_show = 117812
+total = 10975169
 
 # Bytes per gate (lower = more compact artifact representation)
 # Grade: A(≤10) B(≤30) C(≤60) D(≤100) F(>100)
 [bytes_per_gate]
-passport_verifier = 53
+passport_verifier = 55
 data_integrity = 29
-disclosure = 162
+disclosure = 163
 prepare_link = 207
 show_link = 97
-passport_adapter = 39
-openac_show = 92
-device_binding = 32
+passport_adapter = 41
+openac_show = 95
+device_binding = 45
+sdjwt_adapter = 37
+jwt_x5c_adapter = 20
+x509_show = 185
+composite_show = 172

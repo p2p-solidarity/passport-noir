@@ -10,9 +10,13 @@
 
 /// Pedersen commitment on Grumpkin curve.
 /// Paper: Com(m; r) = product(g_i^{m_i}) * h^r
-/// Provides: commit_attributes, commit_attributes_extended, assert_commitment_eq
+/// Provides: commit_attributes, commit_attributes_v3, commit_attributes_extended, assert_commitment_eq
 /// Domain constants: DOMAIN_PASSPORT, DOMAIN_SDJWT, DOMAIN_MDL
 pub mod commit;
+
+/// Path A in-circuit device binding helpers.
+/// Provides: verify_device_binding (ECDSA-P256 + pk_digest), pk_digest_from_bytes.
+pub mod device;
 
 /// Show-phase operations: challenge binding and scoped linking.
 /// Paper: C2 show relation -- binds verifier challenge and optional scope.
@@ -23,3 +27,7 @@ pub mod show;
 /// Paper: f_i(m_1, ..., m_n) = p_i
 /// Provides: check_age_above, check_bytes3_eq, two_digit_year_to_four
 pub mod predicate;
+
+/// Shared profile encodings and device-link derivations for multi-credential flows.
+/// Provides: passport/x509 packing, device-link derivation, link tag helpers.
+pub mod profile;

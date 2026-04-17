@@ -10,5 +10,8 @@ members = [
     "openac_show",
     "device_binding",
     "sdjwt_adapter",
+    "jwt_x5c_adapter",
+    "x509_show",
+    "composite_show",
 ]
 default-member = "passport_verifier"

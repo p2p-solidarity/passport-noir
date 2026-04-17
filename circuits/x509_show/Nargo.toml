@@ -1,0 +1,8 @@
+[package]
+name = "x509_show"
+type = "bin"
+authors = ["kidneyweakx"]
+description = "OpenAC Path A X.509-only show: ECDSA-P256 device binding + v3 commitment re-open + domain predicate"
+
+[dependencies]
+openac_core = { path = "../openac_core" }

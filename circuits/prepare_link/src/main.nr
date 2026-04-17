@@ -29,10 +29,7 @@ fn compute_prepare_commitment(
     digest(preimage)
 }
 
-fn assert_hash_equals(
-    left: [u8; HASH_BYTES],
-    right: [u8; HASH_BYTES],
-) {
+fn assert_hash_equals(left: [u8; HASH_BYTES], right: [u8; HASH_BYTES]) {
     for i in 0..HASH_BYTES {
         assert(left[i] == right[i], "Hash mismatch");
     }
