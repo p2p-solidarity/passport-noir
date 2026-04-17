@@ -117,10 +117,16 @@ jobs:
 
       - name: Build
         working-directory: mopro-binding
+        # See release.yml comment: `protoc-prebuilt` build script in `acir` needs
+        # an authenticated GitHub API token to avoid anonymous rate limits.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: cargo build
 
       - name: Run tests
         working-directory: mopro-binding
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: cargo test -- --nocapture
 
   # ── Stage 5: Integration (circuits + mopro) ─────────────
@@ -160,5 +166,7 @@ jobs:
 
       - name: Run integration tests (with circuit artifacts)
         working-directory: mopro-binding
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: cargo test -- --ignored --nocapture --test-threads=1
         timeout-minutes: 30

@@ -85,6 +85,13 @@ jobs:
 
       - name: Build iOS bindings
         working-directory: mopro-binding
+        # GITHUB_TOKEN lets `protoc-prebuilt` (transitive build-dep of the
+        # `acir` crate pulled in from noir-lang/noir) authenticate its release
+        # download against the GitHub API; without it the anonymous rate limit
+        # of ~60 req/hr / IP is exceeded on shared CI runners and the build
+        # script panics with a 403. See failure on run 24566150525.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           IOS_ARCHS="aarch64-apple-ios,aarch64-apple-ios-sim" \
           IPHONEOS_DEPLOYMENT_TARGET=15.0 \
