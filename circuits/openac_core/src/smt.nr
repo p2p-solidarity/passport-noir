@@ -114,7 +114,14 @@ fn test_root() -> Field {
 
 #[test]
 fn test_non_membership_passes_for_valid_witness() {
-    verify_non_membership(test_serial_number(), test_siblings(), 0, 0, true, test_root());
+    verify_non_membership(
+        test_serial_number(),
+        test_siblings(),
+        0,
+        0,
+        true,
+        test_root(),
+    );
 }
 
 #[test]
@@ -136,5 +143,12 @@ fn test_non_membership_fails_on_wrong_root() {
 fn test_non_membership_rejects_matching_old_key() {
     let target_key = compute_serial_key(test_serial_number());
     // Supplying the target key as old_key with is_old0 = false must fail.
-    verify_non_membership(test_serial_number(), test_siblings(), target_key, 0, false, test_root());
+    verify_non_membership(
+        test_serial_number(),
+        test_siblings(),
+        target_key,
+        0,
+        false,
+        test_root(),
+    );
 }

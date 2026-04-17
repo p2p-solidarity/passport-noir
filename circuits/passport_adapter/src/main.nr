@@ -7,10 +7,10 @@ use openac_core::commit::{
     assert_commitment_eq, commit_attributes_v3, DOMAIN_CSCA_NODE, DOMAIN_PASSPORT,
 };
 use openac_core::device::pk_digest_from_bytes;
-use openac_core::merkle::{CSCA_MERKLE_DEPTH, compute_csca_leaf, verify_inclusion_depth_8};
+use openac_core::merkle::{compute_csca_leaf, CSCA_MERKLE_DEPTH, verify_inclusion_depth_8};
 use openac_core::predicate::two_digit_year_to_four;
 use openac_core::profile::pack_passport_profile;
-use openac_core::smt::{smt_fold, SMT_DEPTH, verify_non_membership};
+use openac_core::smt::{SMT_DEPTH, smt_fold, verify_non_membership};
 use std::embedded_curve_ops::EmbeddedCurvePoint;
 use std::hash::pedersen_hash;
 
@@ -150,7 +150,12 @@ fn verify_csca_chain(
 
     // 4. CSCA must appear in the Master List (ICAO snapshot).
     let csca_leaf = compute_csca_leaf(csca_modulus_limbs);
-    verify_inclusion_depth_8(csca_leaf, csca_merkle_index, csca_merkle_siblings, csca_root);
+    verify_inclusion_depth_8(
+        csca_leaf,
+        csca_merkle_index,
+        csca_merkle_siblings,
+        csca_root,
+    );
 }
 
 fn extract_passport_profile(dg1_content: [u8; MAX_DG_SIZE]) -> (u32, u32, u32, [u8; 3]) {
@@ -752,12 +757,5 @@ fn test_dsc_non_membership_passes_for_unrevoked_serial() {
 fn test_dsc_non_membership_fails_on_wrong_root() {
     let mut bad_root = dsc_smt_root_computed();
     bad_root += 1;
-    verify_non_membership(
-        dsc_serial(),
-        dsc_smt_siblings(),
-        0,
-        0,
-        true,
-        bad_root,
-    );
+    verify_non_membership(dsc_serial(), dsc_smt_siblings(), 0, 0, true, bad_root);
 }

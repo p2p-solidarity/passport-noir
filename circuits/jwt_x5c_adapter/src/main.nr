@@ -6,7 +6,7 @@ use sha256::digest;
 use openac_core::commit::{assert_commitment_eq, commit_attributes_v3, DOMAIN_X509};
 use openac_core::device::pk_digest_from_bytes;
 use openac_core::profile::{derive_x509_link_rand, MAX_DOMAIN_LEN, pack_x509_domain};
-use openac_core::smt::{smt_fold, SMT_DEPTH, verify_non_membership};
+use openac_core::smt::{SMT_DEPTH, smt_fold, verify_non_membership};
 use std::embedded_curve_ops::EmbeddedCurvePoint;
 
 global CERT_TBS_LEN: u32 = 1536;

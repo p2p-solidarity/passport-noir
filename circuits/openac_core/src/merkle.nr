@@ -96,7 +96,7 @@ fn test_csca_inclusion_passes_at_index_zero() {
 fn test_csca_inclusion_passes_at_other_index() {
     // Different path index must still verify when paired with its matching root.
     let leaf = compute_csca_leaf(test_modulus_limbs());
-    let index: u32 = 181;  // 0b1011_0101 path pattern
+    let index: u32 = 181; // 0b1011_0101 path pattern
     verify_inclusion_depth_8(leaf, index, test_siblings(), test_root_for_index(index));
 }
 
