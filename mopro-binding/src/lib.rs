@@ -18,3 +18,9 @@ pub use openac_v2::{
     compute_challenge_digest_v2, verify_openac_v2, BatchEntry, LinkMode, PedersenPoint,
     PolicyV2, PrepareArtifactV2, ShowPresentationV2,
 };
+
+pub mod openac_v3;
+pub use openac_v3::{
+    compute_challenge_digest_v3, verify_openac_v3, PolicyV3, PrepareArtifactV3,
+    ShowPresentationV3,
+};

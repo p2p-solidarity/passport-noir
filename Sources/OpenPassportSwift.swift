@@ -361,3 +361,198 @@ public func makeOpenACEnvelope(
         proofPayload: proofPayload
     )
 }
+
+// MARK: - OpenAC v3 (Path A: Pedersen + in-circuit ECDSA device binding)
+// Mirrors mopro-binding/src/openac_v3.rs. The show-phase SHA256 digest math is
+// unchanged from v2 (domain "openac.show.v2"); only the commitment pre-image
+// gained a pk_digest field, so a v2 artifact cannot be upgraded in place.
+
+public enum OpenACV3CredentialType: UInt8, Sendable {
+    case passport = 0x01
+    case x509 = 0x02
+    case sdjwt = 0x03
+    case mdl = 0x04
+}
+
+public struct OpenACV3PrepareArtifact: Equatable, Sendable {
+    public let createdAtUnix: UInt64
+    public let expiresAtUnix: UInt64
+    public let credentialType: OpenACV3CredentialType
+    public let commitmentX: Data
+    public let commitmentY: Data
+    public let pkDigest: Data
+    public let linkRand: Data
+
+    public init(
+        createdAtUnix: UInt64,
+        expiresAtUnix: UInt64,
+        credentialType: OpenACV3CredentialType,
+        commitmentX: Data,
+        commitmentY: Data,
+        pkDigest: Data,
+        linkRand: Data
+    ) {
+        self.createdAtUnix = createdAtUnix
+        self.expiresAtUnix = expiresAtUnix
+        self.credentialType = credentialType
+        self.commitmentX = commitmentX
+        self.commitmentY = commitmentY
+        self.pkDigest = pkDigest
+        self.linkRand = linkRand
+    }
+}
+
+public struct OpenACV3ShowPresentation: Equatable, Sendable {
+    public let commitmentX: Data
+    public let commitmentY: Data
+    public let pkDigest: Data
+    public let nonceHash: Data
+    public let challenge: Data
+    public let challengeDigest: Data
+    public let linkTag: Data
+
+    public init(
+        commitmentX: Data,
+        commitmentY: Data,
+        pkDigest: Data,
+        nonceHash: Data,
+        challenge: Data,
+        challengeDigest: Data,
+        linkTag: Data
+    ) {
+        self.commitmentX = commitmentX
+        self.commitmentY = commitmentY
+        self.pkDigest = pkDigest
+        self.nonceHash = nonceHash
+        self.challenge = challenge
+        self.challengeDigest = challengeDigest
+        self.linkTag = linkTag
+    }
+}
+
+public struct OpenACV3Policy: Equatable, Sendable {
+    public let linkMode: OpenACLinkMode
+    public let linkScope: Data?
+    public let epoch: Data
+    public let nowUnix: UInt64
+    public let expectedChallenge: Data
+    public let expectedNonceHash: Data
+
+    public init(
+        linkMode: OpenACLinkMode,
+        linkScope: Data?,
+        epoch: Data,
+        nowUnix: UInt64,
+        expectedChallenge: Data,
+        expectedNonceHash: Data
+    ) {
+        self.linkMode = linkMode
+        self.linkScope = linkScope
+        self.epoch = epoch
+        self.nowUnix = nowUnix
+        self.expectedChallenge = expectedChallenge
+        self.expectedNonceHash = expectedNonceHash
+    }
+}
+
+public enum OpenACV3Error: Error, Equatable {
+    case invalidLength(field: String, expected: Int, actual: Int)
+    case cryptoUnavailable
+    case prepareNotActive
+    case expiredPrepare
+    case commitmentMismatch
+    case pkDigestMismatch
+    case invalidChallenge
+    case invalidNonceHash
+    case invalidChallengeDigest
+    case scopeMismatch
+}
+
+private enum OpenACV3Domain {
+    // Shared with v2: v3 Path A kept the show-phase digest format unchanged.
+    static let show = Data("openac.show.v2".utf8)
+}
+
+public func computeOpenACv3ChallengeDigest(
+    commitmentX: Data,
+    commitmentY: Data,
+    challenge: Data,
+    epoch: Data
+) throws -> Data {
+    try requireLength(commitmentX, field: "commitmentX", expected: 32)
+    try requireLength(commitmentY, field: "commitmentY", expected: 32)
+    try requireLength(challenge, field: "challenge", expected: 32)
+    try requireLength(epoch, field: "epoch", expected: 4)
+    return try sha256([OpenACV3Domain.show, commitmentX, commitmentY, challenge, epoch])
+}
+
+@discardableResult
+public func verifyOpenAcV3Linking(
+    prepare: OpenACV3PrepareArtifact,
+    show: OpenACV3ShowPresentation,
+    policy: OpenACV3Policy
+) throws -> Bool {
+    try requireLength(prepare.commitmentX, field: "prepare.commitmentX", expected: 32)
+    try requireLength(prepare.commitmentY, field: "prepare.commitmentY", expected: 32)
+    try requireLength(prepare.pkDigest, field: "prepare.pkDigest", expected: 32)
+    try requireLength(show.commitmentX, field: "show.commitmentX", expected: 32)
+    try requireLength(show.commitmentY, field: "show.commitmentY", expected: 32)
+    try requireLength(show.pkDigest, field: "show.pkDigest", expected: 32)
+    try requireLength(show.nonceHash, field: "show.nonceHash", expected: 32)
+    try requireLength(show.challenge, field: "show.challenge", expected: 32)
+    try requireLength(show.challengeDigest, field: "show.challengeDigest", expected: 32)
+    try requireLength(show.linkTag, field: "show.linkTag", expected: 32)
+    try requireLength(policy.epoch, field: "policy.epoch", expected: 4)
+    try requireLength(policy.expectedChallenge, field: "policy.expectedChallenge", expected: 32)
+    try requireLength(policy.expectedNonceHash, field: "policy.expectedNonceHash", expected: 32)
+
+    if policy.nowUnix < prepare.createdAtUnix {
+        throw OpenACV3Error.prepareNotActive
+    }
+    if policy.nowUnix > prepare.expiresAtUnix {
+        throw OpenACV3Error.expiredPrepare
+    }
+
+    if prepare.commitmentX != show.commitmentX || prepare.commitmentY != show.commitmentY {
+        throw OpenACV3Error.commitmentMismatch
+    }
+
+    if prepare.pkDigest != show.pkDigest {
+        throw OpenACV3Error.pkDigestMismatch
+    }
+
+    if show.challenge != policy.expectedChallenge {
+        throw OpenACV3Error.invalidChallenge
+    }
+
+    if show.nonceHash != policy.expectedNonceHash {
+        throw OpenACV3Error.invalidNonceHash
+    }
+
+    let expectedDigest = try computeOpenACv3ChallengeDigest(
+        commitmentX: show.commitmentX,
+        commitmentY: show.commitmentY,
+        challenge: policy.expectedChallenge,
+        epoch: policy.epoch
+    )
+    if show.challengeDigest != expectedDigest {
+        throw OpenACV3Error.invalidChallengeDigest
+    }
+
+    let zero32 = Data(repeating: 0, count: 32)
+    switch policy.linkMode {
+    case .unlinkable:
+        if policy.linkScope != nil || show.linkTag != zero32 {
+            throw OpenACV3Error.scopeMismatch
+        }
+    case .scopedLinkable:
+        guard policy.linkScope != nil else {
+            throw OpenACV3Error.scopeMismatch
+        }
+        if show.linkTag == zero32 {
+            throw OpenACV3Error.scopeMismatch
+        }
+    }
+
+    return true
+}

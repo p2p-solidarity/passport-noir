@@ -21,6 +21,10 @@ crate-type = ["lib", "cdylib", "staticlib"]
 name = "ios"
 path = "src/bin/ios.rs"
 
+[[bin]]
+name = "gen_srs"
+path = "src/bin/gen_srs.rs"
+
 [features]
 default = ["uniffi"]
 uniffi = ["mopro-ffi/uniffi"]

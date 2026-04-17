@@ -1,5 +1,5 @@
 .PHONY: all circuits compile-circuits test-circuits verify-circuit-artifacts copy-circuit-artifacts \
-       build-ios sync-ios-bindings clean \
+       build-ios sync-ios-bindings gen-srs clean \
        fmt fmt-check lint score benchmark spec-check bench-report bench-update-baseline \
        install-hooks release-patch release-minor release-major
 
@@ -58,6 +58,15 @@ sync-ios-bindings:
 	mkdir -p Sources
 	cp -R $(MOPRO_IOS_BINDINGS_DIR) $(SWIFT_PACKAGE_BINDINGS_DIR)
 	./scripts/patch_mopro_fallback.sh $(SWIFT_PACKAGE_BINDINGS_DIR)/mopro.swift
+
+# Generate bundled SRS for every compiled circuit (internet required on first run).
+# Output goes to mopro-binding/test-vectors/srs/*.srs.bin so the iOS xcframework
+# build can bundle them alongside the circuit JSONs.
+gen-srs: copy-circuit-artifacts
+	@echo "Generating SRS for compiled circuits..."
+	cd $(MOPRO_DIR) && cargo run --bin gen_srs --release -- \
+		--circuits-dir test-vectors/noir \
+		--out-dir test-vectors/srs
 
 # ──────────────────────────────────────────────────
 # Format & Lint

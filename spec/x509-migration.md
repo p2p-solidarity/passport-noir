@@ -290,3 +290,34 @@ circuit / spec 範疇，但跨 repo 協調在此釘 SoT。
 - Toolchain split 可能造成 beta.19 compiled artifact 在 beta.8 prover 中無法解析 — 實測才知。
 - `openac_v2.rs::rerandomize_commitment` 是 `unimplemented!()` stub；v3 不繼承此路徑，不 block。
 - iOS app 需 airmeishi repo 同步 PR，本 repo 釘 v3.1 entry point 作 SoT；實際接線時以 airmeishi 為工作面。
+
+### 10.5 Progress log
+
+**2026-04-18 — PR-10a landed（openac_v3.rs）**
+
+- 新增 `mopro-binding/src/openac_v3.rs`（15 unit tests，全部 pass）
+  - `PrepareArtifactV3 { commitment, pk_digest, link_rand, ... }`
+  - `ShowPresentationV3 { commitment, pk_digest, nonce_hash, challenge_digest, link_tag, ... }`
+  - `PolicyV3 { expected_nonce_hash, ... }` + `verify_openac_v3()`
+  - Domain constants 對齊 Noir：`DOMAIN_PASSPORT=0x01, DOMAIN_X509=0x02, DOMAIN_SDJWT=0x03, DOMAIN_MDL=0x04`
+  - Challenge digest 使用與 v2 共用的 `openac.show.v2` domain（Path A 只改 commitment pre-image，show 階段 SHA256 數學不變，附 assertion 測試防止 drift）
+- 新增 `Sources/OpenPassportSwift.swift` v3 wrapper type + `verifyOpenAcV3Linking()`（8 new Swift tests, 全部 pass）
+- 新增 `mopro-binding/src/bin/gen_srs.rs` + `make gen-srs` target，批次產生 `test-vectors/srs/*.srs.bin`（供 iOS bundling 離線使用）
+
+**2026-04-18 — PR-10b partial**
+
+- `Makefile::copy-circuit-artifacts` 已同步 12 個 circuit JSON 到 `mopro-binding/test-vectors/noir/`（不是新增 work，是 §10.1 audit 的錯誤：Makefile 早就覆蓋全部，僅 `ci.yml::integration` 只複製 disclosure 作 minimal canary，刻意保留）
+- SRS 產生腳本到位，可在 release 流程呼叫 `make gen-srs` 組 bundle
+
+**noir-rs beta.19 upgrade — 建議分開 PR**
+
+- 2026-04-16 PR #37 (`zkmopro/noir-rs@upgrade-noir-beta19`) 已 merge 進 main (commit `0e4fdc9`)。
+- Breaking changes 需額外工作：
+  1. 新的 proof 格式 `[4-byte prefix][inputs][proof]` — `openac_v2.rs::verify_commitment_in_proof` 與 `openac_v3.rs::proof_contains_field`
+     目前都假設 public inputs 從 offset 0 開始對齊 32-byte；必須改為
+     跳過 4-byte prefix 再搜索。
+  2. SRS 初始化 API 多了 8× UltraHonk multiplier — `gen_srs.rs::get_subgroup_size`
+     call site 需重新對照新 signature。
+  3. `mopro-ffi = "0.3"` 是否相容 beta.19 noir-rs 需實測；可能要同步 bump 到 mopro-ffi 0.4。
+- 因此 v3.1 Rust + Swift + SRS generator 已完成並綠燈，noir-rs 升級
+  切出為 **PR-10d**，單獨 PR + 單獨 release tag，避免混在同一次改動。
