@@ -6,9 +6,9 @@
 | P0-B | `openac_show` / `composite_show` | predicates floating，未從 opened attr 派生 | predicate 函數吃 `attr_hi/lo`，不接受獨立 input | ✅ 2026-04-17 (x509-circuits §7/§8) |
 | P0-C | cross-link | Secure Enclave 與「device_sk 作 witness」互斥 | Path A：`pk_digest = Poseidon(enclave_pk_x, enclave_pk_y)` 進 commitment，in-circuit ECDSA 驗 nonce | ✅ 2026-04-17 (x509-design §D2/Changelog) |
 | P0-D | iOS flow | AIA fetch 供應鏈攻擊 | 改用 JWT header 的 x5c，不需 AIA fetch | ✅ 2026-04-17 (x509-ios.md) |
-| P0-E | `passport_adapter` | 護照無 revocation | 搬 zkID 的 SMTNonMembership（depth=128） | 待做（order of ship 見 x509-migration §Phase 4）|
+| P0-E | `passport_adapter` | 護照無 revocation + 無 CSCA 根信任 | CSCA→DSC RSA chain + Master List 深度 8 Merkle + DSC 吊銷 SMT depth 32（v3.1 統一 depth 與 jwt_x5c_adapter） | ✅ 2026-04-17 v3.1 landed（`circuits/passport_adapter`；共用 `openac_core::smt`、新增 `openac_core::merkle`；36,223 opcodes vs. 50k budget）|
 | P0-F | trust anchor | off-chain 驗 Mozilla Root，verifier 可能過時 | Mozilla Root snapshot shipping policy 寫入 `x509-contract.md §5`；v2 in-circuit Merkle root 歸為 research | ✅ contract 面定案 2026-04-17；in-circuit Merkle 待做 |
-| P0-G | JSON parsing | 固定 offset 在真實 issuer 爛掉 | v1：hardcoded-issuer-offset + `issuer_format_tag` public input；app 傳 raw payload bytes，circuit assert `SHA256(raw) == payload_b64_hash`；v2 in-circuit normalize 歸 research | ✅ 2026-04-17 (x509-design §D1) |
+| P0-G | JSON parsing | 固定 offset 在真實 issuer 爛掉 | v1：hardcoded-issuer-offset + `issuer_format_tag` public input；app 傳 raw payload bytes，circuit assert `SHA256(raw) == payload_b64_hash`；v2 in-circuit normalize 歸 research | ✅ 2026-04-17 spec 定案 + v3.1 實作 landed（`circuits/jwt_x5c_adapter` 已切換至固定偏移分派；舊 marker-scan 迴圈刪除） |
 
 ---
 
@@ -80,16 +80,22 @@ App：
   1. 從 id_token 取 base64url(payload)
   2. payload_b64_hash = SHA256(base64url(payload))           ← public input
   3. payload_raw = base64url_decode(base64url(payload))      ← circuit private witness
+     然後 canonicalize field order + zero-pad 到 JWT_PAYLOAD_LEN = 1024 bytes
 
 Circuit：
   1. assert SHA256(payload_raw) == payload_b64_hash           ← 綁住 app 沒偷天換日
   2. jwt_signed_hash = SHA256(header_b64 || "." || payload_b64)  ← public，ECDSA/RSA 驗簽對象
   3. 根據 issuer_format_tag 選 offset table：
-       - tag == 1 (GoogleOIDCv1): email 在 offset [A..B]、sub 在 [C..D]
-       - tag == 2 (UniversitySDJWTv1): ...
-       - 其他: assert false
-  4. ExtractField(payload_raw, offset) → attr bytes → Poseidon → (attr_hi, attr_lo)
+       - tag == 1 (GoogleOIDCv1): email_domain 在 offset 17（canonical form）
+       - tag == 其它: assert false (v3.1 目前只支援 GoogleOIDCv1)
+  4. ExtractField(payload_raw, offset) → attr bytes → pack_x509_domain → (attr_hi, attr_lo)
 ```
+
+### v3.1 實作位置
+
+- 常數：`circuits/jwt_x5c_adapter/src/main.nr::{ISSUER_FORMAT_GOOGLE_OIDC_V1, GOOGLE_OIDC_V1_EMAIL_DOMAIN_OFFSET}`
+- 分派函式：`extract_claim_by_tag(payload, issuer_format_tag)`
+- Negative test：`test_extract_claim_by_tag_rejects_unknown_issuer` (tag = 2 → assert false)
 
 **不做** base64 decode in-circuit；由 app 做 decode 再用 hash binding 確保忠實。
 因為 `SHA256(base64url_decode(x))` 與 `SHA256(x)` 都是電路內可算的 hash，

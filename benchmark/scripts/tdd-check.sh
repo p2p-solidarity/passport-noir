@@ -16,7 +16,7 @@ ISSUES=0
 echo "  Checking TDD coverage..."
 
 # All workspace bin circuits
-BIN_CIRCUITS=(passport_verifier data_integrity disclosure prepare_link show_link passport_adapter openac_show device_binding)
+BIN_CIRCUITS=(passport_verifier data_integrity disclosure prepare_link show_link passport_adapter openac_show device_binding sdjwt_adapter jwt_x5c_adapter x509_show composite_show)
 # Library modules
 LIB_MODULES=(openac_core/src/commit.nr openac_core/src/show.nr openac_core/src/predicate.nr)
 

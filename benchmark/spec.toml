@@ -256,28 +256,42 @@ min_positive_tests = 4
 min_negative_tests = 0
 
 # ============================================================
-# Circuit: passport_adapter (v3 — Path A combined prepare)
+# Circuit: passport_adapter (v3.1 — Path A combined prepare with CSCA chain)
 # ============================================================
 [circuits.passport_adapter]
 type = "bin"
-description = "Combined passport prepare (v3): RSA verify + DG hash chain + Pedersen commitment bound to enclave pk_digest"
+description = "Combined passport prepare (v3.1): DSC->SOD RSA verify + CSCA->DSC RSA chain + depth-8 Master List Merkle inclusion + depth-32 DSC revocation SMT + DG hash chain + Pedersen v3 commitment bound to enclave pk_digest"
 source = "circuits/passport_adapter/src/main.nr"
-version = "v3"
+version = "v3.1"
 
-public_inputs = ["modulus_limbs", "out_commitment_x", "out_commitment_y"]
-public_input_types = ["[u128; 18]", "Field", "Field"]
+gate_budget = 50000  # v3.1 measured 36,223 opcodes; ~28% headroom
 
-# Note: enclave_pk_x / enclave_pk_y are PRIVATE witnesses in Path A; the
-# commitment binds `pk_digest = pedersen_hash(enclave_pk)` so the show phase
-# can re-derive it from an ECDSA proof over a fresh verifier nonce.
+# v3.1 promotes the trust anchor model: `csca_root` (ICAO Master List snapshot)
+# and `dsc_smt_root` (DSC revocation list) are the only non-commitment public
+# inputs. The DSC RSA modulus is now a private witness because CSCA + Merkle
+# inclusion proves its legitimacy.
+public_inputs = [
+  "csca_root", "dsc_smt_root",
+  "out_commitment_x", "out_commitment_y",
+]
+public_input_types = ["Field", "Field", "Field", "Field"]
+
 private_inputs = [
-  "sod_hash", "signature_limbs", "redc_limbs", "exponent",
+  "sod_hash", "signature_limbs", "modulus_limbs", "redc_limbs", "exponent",
+  "csca_modulus_limbs", "csca_redc_limbs",
+  "dsc_tbs", "dsc_cert_sig_limbs",
+  "csca_merkle_index", "csca_merkle_siblings",
+  "dsc_serial", "smt_siblings", "smt_old_key", "smt_old_value", "smt_is_old0",
   "dg_count", "dg_contents", "dg_lengths", "expected_dg_hashes",
   "link_rand",
   "enclave_pk_x", "enclave_pk_y",
 ]
 private_input_types = [
-  "[u8; 32]", "[u128; 18]", "[u128; 18]", "u32",
+  "[u8; 32]", "[u128; 18]", "[u128; 18]", "[u128; 18]", "u32",
+  "[u128; 18]", "[u128; 18]",
+  "[u8; 1536]", "[u128; 18]",
+  "u32", "[Field; 8]",
+  "[u8; 20]", "[Field; 32]", "Field", "Field", "bool",
   "u8", "[[u8; 512]; 4]", "[u32; 4]", "[[u8; 32]; 4]",
   "Field",
   "[u8; 32]", "[u8; 32]",
@@ -285,6 +299,11 @@ private_input_types = [
 
 assertions = [
   "Passport DSC signature verification failed",
+  "CSCA signature over DSC TBS failed verification",
+  "DSC modulus mismatch with CSCA-signed TBS",
+  "CSCA Merkle root mismatch",
+  "Revocation witness matches blocked serial",
+  "Revocation SMT root mismatch",
   "Too many data groups",
   "Must have at least one data group",
   "DG length exceeds maximum",
@@ -294,10 +313,10 @@ assertions = [
   "Commitment Y mismatch",
 ]
 
-constants = { MAX_DG_COUNT = 4, MAX_DG_SIZE = 512 }
+constants = { MAX_DG_COUNT = 4, MAX_DG_SIZE = 512, DSC_TBS_LEN = 1536, CSCA_MERKLE_DEPTH = 8, SMT_DEPTH = 32, CSCA_RSA_EXPONENT = 65537 }
 
-min_positive_tests = 3  # v3 covers commitment equality + pk_digest binding
-min_negative_tests = 2
+min_positive_tests = 7   # v3.1 unit tests: DG chain + commitment + DSC extract + revocation
+min_negative_tests = 4
 
 exports = { out_commitment_x = "Field", out_commitment_y = "Field" }
 
@@ -444,31 +463,33 @@ min_negative_tests = 2
 exports = { out_commitment_x = "Field", out_commitment_y = "Field" }
 
 # ============================================================
-# Circuit: jwt_x5c_adapter (v3 — Path A X.509 / OIDC RS256 prepare)
+# Circuit: jwt_x5c_adapter (v3.1 — Path A X.509 / OIDC RS256 prepare)
 # ============================================================
 [circuits.jwt_x5c_adapter]
 type = "bin"
-description = "X.509 x5c JWT prepare adapter (v3, RSA variant): RSA cert chain verification + SMT non-membership + RSA JWT signature + Pedersen v3 commitment bound to enclave pk_digest"
+description = "X.509 x5c JWT prepare adapter (v3.1, RSA variant): RSA cert chain verification + Pedersen-SMT non-membership (depth 32) + RSA JWT signature + fixed-offset issuer claim extraction + Pedersen v3 commitment bound to enclave pk_digest"
 source = "circuits/jwt_x5c_adapter/src/main.nr"
-version = "v3"
+version = "v3.1"
 
-# Budget status (2026-04-17): 384,147 ACIR opcodes vs 65,000 target
-# (spec/x509-benchmark.md §3). Path A Phase 3 ships this circuit with a
-# 5.9x overshoot as a known deficit; optimization candidates tracked in
-# spec/x509-benchmark.md §7.
-known_deficit = true
+# v3.1 (2026-04-17): 20,784 ACIR opcodes vs 65,000 target -- 94.6% reduction
+# from v3.0's 384,147. Optimizations: SMT SHA256 -> pedersen_hash with
+# DOMAIN_SMT_NODE, SMT_DEPTH 128 -> 32, JWT_PAYLOAD_LEN 4096 -> 1024,
+# fixed-offset issuer claim extraction dispatched by `issuer_format_tag`.
+# See spec/x509-benchmark.md sec. 3 / sec. 9 and spec/x509-migration.md sec. 9.
 gate_budget = 65000
-gate_budget_status = "overshoot"
+gate_budget_status = "within_budget"
 
 public_inputs = [
   "jwt_payload_b64h", "jwt_signed_hash",
   "issuer_modulus",
   "smt_root",
+  "issuer_format_tag",
   "out_commitment_x", "out_commitment_y",
 ]
 public_input_types = [
   "[u8; 32]", "[u8; 32]",
   "[u128; 18]",
+  "Field",
   "Field",
   "Field", "Field",
 ]
@@ -487,8 +508,8 @@ private_input_types = [
   "[u8; 1536]", "[u8; 1536]",
   "[u128; 18]", "[u128; 18]",
   "[u8; 20]",
-  "[Field; 128]", "Field", "Field", "bool",
-  "[u8; 4096]", "[u128; 18]",
+  "[Field; 32]", "Field", "Field", "bool",
+  "[u8; 1024]", "[u128; 18]",
   "[u128; 18]", "[u128; 18]", "[u128; 18]",
   "Field",
   "[u8; 32]", "[u8; 32]",
@@ -500,7 +521,7 @@ assertions = [
   "Leaf cert JWT modulus mismatch",
   "Revocation witness matches blocked serial",
   "Revocation SMT root mismatch",
-  "Normalized JWT payload missing email_domain",
+  "Unsupported issuer_format_tag (v1 only accepts GoogleOIDCv1 = 1)",
   "Normalized JWT domain missing value",
   "JWT payload hash mismatch",
   "JWT signature verification failed",
@@ -508,10 +529,10 @@ assertions = [
   "Commitment Y mismatch",
 ]
 
-constants = { CERT_TBS_LEN = 1536, JWT_PAYLOAD_LEN = 4096, LIMB_COUNT = 18, SMT_DEPTH = 128, RSA_EXPONENT = 65537 }
+constants = { CERT_TBS_LEN = 1536, JWT_PAYLOAD_LEN = 1024, LIMB_COUNT = 18, SMT_DEPTH = 32, RSA_EXPONENT = 65537, ISSUER_FORMAT_GOOGLE_OIDC_V1 = 1, ISSUER_FORMAT_APPLE_ID_V1 = 2, ISSUER_FORMAT_MICROSOFT_ENTRA_V1 = 3, GOOGLE_OIDC_V1_EMAIL_DOMAIN_OFFSET = 17, APPLE_ID_V1_EMAIL_DOMAIN_OFFSET = 16, MICROSOFT_ENTRA_V1_EMAIL_DOMAIN_OFFSET = 15 }
 
-min_positive_tests = 3
-min_negative_tests = 3
+min_positive_tests = 7
+min_negative_tests = 4
 
 exports = { out_commitment_x = "Field", out_commitment_y = "Field" }
 

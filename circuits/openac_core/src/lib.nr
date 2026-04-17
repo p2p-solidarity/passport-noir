@@ -10,7 +10,7 @@
 
 /// Pedersen commitment on Grumpkin curve.
 /// Paper: Com(m; r) = product(g_i^{m_i}) * h^r
-/// Provides: commit_attributes, commit_attributes_v3, commit_attributes_extended, assert_commitment_eq
+/// Provides: commit_attributes, commit_attributes_v3, assert_commitment_eq
 /// Domain constants: DOMAIN_PASSPORT, DOMAIN_SDJWT, DOMAIN_MDL
 pub mod commit;
 
@@ -31,3 +31,12 @@ pub mod predicate;
 /// Shared profile encodings and device-link derivations for multi-credential flows.
 /// Provides: passport/x509 packing, device-link derivation, link tag helpers.
 pub mod profile;
+
+/// Revocation Sparse Merkle Tree primitive shared across issuer adapters.
+/// Provides: verify_non_membership, compute_serial_key, hash_field_pair,
+/// smt_fold, SMT_DEPTH, SERIAL_KEY_BYTES.
+pub mod smt;
+
+/// Fixed-depth Merkle inclusion primitive for CSCA Master List anchors.
+/// Provides: verify_inclusion_depth_8, compute_csca_leaf.
+pub mod merkle;

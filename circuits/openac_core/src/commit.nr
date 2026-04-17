@@ -8,6 +8,22 @@ pub global DOMAIN_X509: Field = 0x02;
 pub global DOMAIN_SDJWT: Field = 0x03;
 pub global DOMAIN_MDL: Field = 0x04;
 
+// Domain separator for SMT internal-node pedersen_hash folds. ASCII "smt1".
+// Required so that arity-3 pedersen_hash([DOMAIN_SMT_NODE, left, right]) used by
+// revocation SMT verifiers cannot collide with other pedersen_hash outputs in the
+// same constraint system (e.g. DOMAIN_PK_DIGEST in device.nr). Follows the same
+// explicit-domain pattern used elsewhere in this library.
+pub global DOMAIN_SMT_NODE: Field = 0x736d7431;
+
+// CSCA Master List Merkle tree domain separators. ASCII "cscn" / "cscl".
+// Internal-node hash uses DOMAIN_CSCA_NODE (arity-3). Leaf pre-image uses
+// DOMAIN_CSCA_LEAF with the 18 RSA modulus limbs to derive a single Field
+// leaf_hash. Separate from DOMAIN_SMT_NODE so that the CSCA inclusion tree and
+// the revocation SMT cannot share nodes even if a future variant uses the same
+// depth / arity.
+pub global DOMAIN_CSCA_NODE: Field = 0x6373636e;
+pub global DOMAIN_CSCA_LEAF: Field = 0x6373636c;
+
 // Paper: Com(m; r) = product(g_i^{m_i}) * h^r
 // Noir: pedersen_commitment([domain, attrs..., r]) -> EmbeddedCurvePoint (Grumpkin)
 //
@@ -53,31 +69,6 @@ pub fn commit_attributes_v3(
     pedersen_commitment(
         [credential_type, attr_hash_hi, attr_hash_lo, pk_digest, link_rand],
     )
-}
-
-/// Extended commitment that includes additional attribute fields.
-/// Used when the show circuit needs to bind predicates to specific attributes
-/// beyond the 256-bit hash (e.g., individual claim fields for SD-JWT).
-pub fn commit_attributes_extended(
-    credential_type: Field,
-    attr_hash_hi: Field,
-    attr_hash_lo: Field,
-    extra_0: Field,
-    extra_1: Field,
-    extra_2: Field,
-    extra_3: Field,
-    link_rand: Field,
-) -> EmbeddedCurvePoint {
-    pedersen_commitment([
-        credential_type,
-        attr_hash_hi,
-        attr_hash_lo,
-        extra_0,
-        extra_1,
-        extra_2,
-        extra_3,
-        link_rand,
-    ])
 }
 
 /// Assert that a computed commitment matches the expected public output coordinates.
@@ -157,21 +148,6 @@ fn test_assert_commitment_eq_fails_on_x_mismatch() {
 fn test_assert_commitment_eq_fails_on_y_mismatch() {
     let c = commit_attributes(DOMAIN_PASSPORT, 10, 20, 30);
     assert_commitment_eq(c, c.x, c.y + 1);
-}
-
-#[test]
-fn test_extended_commit_deterministic() {
-    let c1 = commit_attributes_extended(DOMAIN_SDJWT, 1, 2, 3, 4, 5, 6, 99);
-    let c2 = commit_attributes_extended(DOMAIN_SDJWT, 1, 2, 3, 4, 5, 6, 99);
-    assert(c1.x == c2.x, "Extended commitment X should be deterministic");
-    assert(c1.y == c2.y, "Extended commitment Y should be deterministic");
-}
-
-#[test]
-fn test_extended_commit_differs_from_basic() {
-    let c_basic = commit_attributes(DOMAIN_SDJWT, 1, 2, 99);
-    let c_ext = commit_attributes_extended(DOMAIN_SDJWT, 1, 2, 3, 4, 5, 6, 99);
-    assert(c_basic.x != c_ext.x, "Extended and basic commitments must differ");
 }
 
 #[test]

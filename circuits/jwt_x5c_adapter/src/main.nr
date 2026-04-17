@@ -6,19 +6,39 @@ use sha256::digest;
 use openac_core::commit::{assert_commitment_eq, commit_attributes_v3, DOMAIN_X509};
 use openac_core::device::pk_digest_from_bytes;
 use openac_core::profile::{derive_x509_link_rand, MAX_DOMAIN_LEN, pack_x509_domain};
+use openac_core::smt::{smt_fold, SMT_DEPTH, verify_non_membership};
 use std::embedded_curve_ops::EmbeddedCurvePoint;
 
 global CERT_TBS_LEN: u32 = 1536;
-global JWT_PAYLOAD_LEN: u32 = 4096;
+// Shrunk from 4096 in v3.1: Google OIDC id_token payloads are <1KB; university
+// SD-JWT payloads live in sdjwt_adapter, not here. App must zero-pad the
+// base64url-decoded payload to exactly this length before prove.
+global JWT_PAYLOAD_LEN: u32 = 1024;
 global LIMB_COUNT: u32 = 18;
 global LIMB_BYTES: u32 = 16;
 global LEAF_MODULUS_BYTES: u32 = LIMB_COUNT * LIMB_BYTES;
-global SMT_DEPTH: u32 = 128;
 global RSA_EXPONENT: u32 = 65537;
 
-global EMAIL_DOMAIN_MARKER_LEN: u32 = 16;
-global EMAIL_DOMAIN_MARKER: [u8; EMAIL_DOMAIN_MARKER_LEN] =
-    [34, 101, 109, 97, 105, 108, 95, 100, 111, 109, 97, 105, 110, 34, 58, 34];
+// Issuer format tags for the fixed-offset claim extractor (spec/x509-issues.md P0-G).
+// Each tag corresponds to an app-layer canonical payload layout; the app
+// normalises the raw JWT payload into this form before proving so the byte
+// offset of the email_domain claim is stable. Adding a new issuer is a
+// three-step change: (1) append a new tag constant here, (2) append its offset
+// constant, (3) extend the `extract_claim_by_tag` dispatch branch.
+global ISSUER_FORMAT_GOOGLE_OIDC_V1: Field = 1;
+global ISSUER_FORMAT_APPLE_ID_V1: Field = 2;
+global ISSUER_FORMAT_MICROSOFT_ENTRA_V1: Field = 3;
+
+// Canonical byte offsets of the email_domain / upn claim value within each
+// normalised payload layout. Derived from the app-layer JSON template; if the
+// app team adjusts the canonical form, update these constants in lock-step.
+//
+//   - Google OIDC v1   layout: `{"email_domain":"..."` -> offset 17
+//   - Apple ID   v1   layout: `{"apple_email":"..."`  -> offset 16
+//   - MS Entra   v1   layout: `{"upn_domain":"..."`   -> offset 15
+global GOOGLE_OIDC_V1_EMAIL_DOMAIN_OFFSET: u32 = 17;
+global APPLE_ID_V1_EMAIL_DOMAIN_OFFSET: u32 = 16;
+global MICROSOFT_ENTRA_V1_EMAIL_DOMAIN_OFFSET: u32 = 15;
 
 fn build_runtime_signature(
     signature_limbs: [u128; LIMB_COUNT],
@@ -27,14 +47,6 @@ fn build_runtime_signature(
 ) -> RuntimeBigNum<18, 2048> {
     let params: BigNumParams<18, 2048> = BigNumParams::new(false, modulus_limbs, redc_limbs);
     RuntimeBigNum { params, limbs: signature_limbs }
-}
-
-fn bytes32_to_field(value: [u8; 32]) -> Field {
-    let mut out: Field = 0;
-    for i in 0..32 {
-        out = out * 256 + value[i] as Field;
-    }
-    out
 }
 
 fn bytes16_to_u128_at(data: [u8; CERT_TBS_LEN], start: u32) -> u128 {
@@ -53,82 +65,41 @@ fn extract_leaf_modulus_limbs(leaf_tbs: [u8; CERT_TBS_LEN]) -> [u128; LIMB_COUNT
     limbs
 }
 
-fn hash_field_pair(left: Field, right: Field) -> Field {
-    let left_bytes = left.to_be_bytes::<32>();
-    let right_bytes = right.to_be_bytes::<32>();
-    let mut preimage: [u8; 64] = [0; 64];
+// SMT primitives moved to `openac_core::smt` in v3.1 so that `passport_adapter`
+// (DSC revocation) can share the same implementation. Import above.
 
-    for i in 0..32 {
-        preimage[i] = left_bytes[i];
-        preimage[32 + i] = right_bytes[i];
-    }
+/// v3.1 replaces the v3.0 marker-search loop with a fixed-offset dispatch keyed
+/// by `issuer_format_tag`. See `spec/x509-issues.md P0-G` and
+/// `spec/x509-circuits.md sec. 4`. The app layer canonicalizes the JWT payload to a
+/// known per-issuer field order before passing into the circuit, so the claim
+/// byte offset is stable and no scanning is required. Savings: ~10k ACIR opcodes
+/// versus the full-payload marker scan.
+fn extract_claim_by_tag(
+    payload: [u8; JWT_PAYLOAD_LEN],
+    issuer_format_tag: Field,
+) -> ([u8; MAX_DOMAIN_LEN], u8) {
+    let is_google = issuer_format_tag == ISSUER_FORMAT_GOOGLE_OIDC_V1;
+    let is_apple = issuer_format_tag == ISSUER_FORMAT_APPLE_ID_V1;
+    let is_microsoft = issuer_format_tag == ISSUER_FORMAT_MICROSOFT_ENTRA_V1;
+    assert(
+        is_google | is_apple | is_microsoft,
+        "Unsupported issuer_format_tag (accepted: 1=GoogleOIDCv1, 2=AppleIDv1, 3=MicrosoftEntraV1)",
+    );
 
-    bytes32_to_field(digest(preimage))
-}
-
-fn serial_key(serial_number: [u8; 20]) -> Field {
-    let mut key: Field = 0;
-    for i in 0..16 {
-        key = key * 256 + serial_number[i] as Field;
-    }
-    key
-}
-
-fn smt_fold(node: Field, sibling: Field, go_right: bool) -> Field {
-    let left = if go_right { sibling } else { node };
-    let right = if go_right { node } else { sibling };
-    hash_field_pair(left, right)
-}
-
-fn verify_serial_non_membership(
-    serial_number: [u8; 20],
-    smt_siblings: [Field; SMT_DEPTH],
-    smt_old_key: Field,
-    smt_old_value: Field,
-    smt_is_old0: bool,
-    smt_root: Field,
-) {
-    let target_key = serial_key(serial_number);
-    let mut node: Field = 0;
-
-    if !smt_is_old0 {
-        assert(smt_old_key != target_key, "Revocation witness matches blocked serial");
-        node = hash_field_pair(smt_old_key, smt_old_value);
-    }
-
-    for depth in 0..SMT_DEPTH {
-        let byte = serial_number[depth / 8];
-        let shift: u8 = 7 - ((depth % 8) as u8);
-        let go_right = ((byte >> shift) & 1) == 1;
-        node = smt_fold(node, smt_siblings[depth], go_right);
-    }
-
-    assert(node == smt_root, "Revocation SMT root mismatch");
-}
-
-fn extract_email_domain(payload: [u8; JWT_PAYLOAD_LEN]) -> ([u8; MAX_DOMAIN_LEN], u8) {
-    let mut start: u32 = JWT_PAYLOAD_LEN;
-
-    for i in 0..(JWT_PAYLOAD_LEN - EMAIL_DOMAIN_MARKER_LEN) {
-        let mut matched = true;
-        for j in 0..EMAIL_DOMAIN_MARKER_LEN {
-            if payload[i + j] != EMAIL_DOMAIN_MARKER[j] {
-                matched = false;
-            }
-        }
-        if matched & (start == JWT_PAYLOAD_LEN) {
-            start = i + EMAIL_DOMAIN_MARKER_LEN;
-        }
-    }
-
-    assert(start != JWT_PAYLOAD_LEN, "Normalized JWT payload missing email_domain");
+    let offset = if is_google {
+        GOOGLE_OIDC_V1_EMAIL_DOMAIN_OFFSET
+    } else if is_apple {
+        APPLE_ID_V1_EMAIL_DOMAIN_OFFSET
+    } else {
+        MICROSOFT_ENTRA_V1_EMAIL_DOMAIN_OFFSET
+    };
 
     let mut domain: [u8; MAX_DOMAIN_LEN] = [0; MAX_DOMAIN_LEN];
     let mut length: u8 = 0;
     let mut closed = false;
 
     for i in 0..MAX_DOMAIN_LEN {
-        let value = payload[start + i];
+        let value = payload[offset + i];
         if !closed & (value != 34) & (value != 0) {
             domain[i] = value;
             length += 1;
@@ -163,6 +134,7 @@ fn main(
     jwt_signed_hash: pub [u8; 32],
     issuer_modulus: pub [u128; LIMB_COUNT],
     smt_root: pub Field,
+    issuer_format_tag: pub Field,
     out_commitment_x: pub Field,
     out_commitment_y: pub Field,
 ) {
@@ -186,7 +158,7 @@ fn main(
         assert(extracted_modulus[i] == jwt_modulus_limbs[i], "Leaf cert JWT modulus mismatch");
     }
 
-    verify_serial_non_membership(
+    verify_non_membership(
         serial_number,
         smt_siblings,
         smt_old_key,
@@ -206,8 +178,13 @@ fn main(
         "JWT signature verification failed",
     );
 
-    let commitment =
-        compute_jwt_x5c_commitment(jwt_payload_norm, link_rand_p, enclave_pk_x, enclave_pk_y);
+    let commitment = compute_jwt_x5c_commitment(
+        jwt_payload_norm,
+        issuer_format_tag,
+        link_rand_p,
+        enclave_pk_x,
+        enclave_pk_y,
+    );
     assert_commitment_eq(commitment, out_commitment_x, out_commitment_y);
 }
 
@@ -216,11 +193,12 @@ fn main(
 /// generating a valid RSA-2048 fixture for every run.
 fn compute_jwt_x5c_commitment(
     jwt_payload_norm: [u8; JWT_PAYLOAD_LEN],
+    issuer_format_tag: Field,
     link_rand_p: Field,
     enclave_pk_x: [u8; 32],
     enclave_pk_y: [u8; 32],
 ) -> EmbeddedCurvePoint {
-    let (domain_bytes, domain_len) = extract_email_domain(jwt_payload_norm);
+    let (domain_bytes, domain_len) = extract_claim_by_tag(jwt_payload_norm, issuer_format_tag);
     let (attr_hi, attr_lo) = pack_x509_domain(domain_bytes, domain_len);
     let link_rand_x = derive_x509_link_rand(link_rand_p);
     let pk_digest = pk_digest_from_bytes(enclave_pk_x, enclave_pk_y);
@@ -456,6 +434,36 @@ fn build_payload() -> [u8; JWT_PAYLOAD_LEN] {
     out
 }
 
+/// Apple ID v1 canonical payload: `{"apple_email":"apple.example"}`. The value
+/// starts at offset 16 (after the 16-byte `{"apple_email":"` prefix).
+fn build_apple_payload() -> [u8; JWT_PAYLOAD_LEN] {
+    // { " a p p l e _ e m a i l " : " a p p l e . e x a m p l e " }
+    let text: [u8; 31] = [
+        123, 34, 97, 112, 112, 108, 101, 95, 101, 109, 97, 105, 108, 34, 58, 34, 97, 112, 112, 108,
+        101, 46, 101, 120, 97, 109, 112, 108, 101, 34, 125,
+    ];
+    let mut out: [u8; JWT_PAYLOAD_LEN] = [0; JWT_PAYLOAD_LEN];
+    for i in 0..31 {
+        out[i] = text[i];
+    }
+    out
+}
+
+/// Microsoft Entra v1 canonical payload: `{"upn_domain":"microsoft.com"}`. The
+/// value starts at offset 15 (after the 15-byte `{"upn_domain":"` prefix).
+fn build_microsoft_payload() -> [u8; JWT_PAYLOAD_LEN] {
+    // { " u p n _ d o m a i n " : " m i c r o s o f t . c o m " }
+    let text: [u8; 30] = [
+        123, 34, 117, 112, 110, 95, 100, 111, 109, 97, 105, 110, 34, 58, 34, 109, 105, 99, 114, 111,
+        115, 111, 102, 116, 46, 99, 111, 109, 34, 125,
+    ];
+    let mut out: [u8; JWT_PAYLOAD_LEN] = [0; JWT_PAYLOAD_LEN];
+    for i in 0..30 {
+        out[i] = text[i];
+    }
+    out
+}
+
 fn jwt_signed_hash() -> [u8; 32] {
     [
         171, 249, 242, 56, 8, 23, 222, 134, 192, 138, 52, 138, 58, 234, 101, 61, 204, 9, 99, 12,
@@ -463,11 +471,12 @@ fn jwt_signed_hash() -> [u8; 32] {
     ]
 }
 
+/// Dynamically derive the payload hash fixture so it automatically tracks any
+/// change to `JWT_PAYLOAD_LEN` or `build_payload()` contents. Previous versions
+/// hardcoded the SHA256 of a 4096-byte zero-padded buffer, which would silently
+/// desync after the v3.1 payload shrink.
 fn jwt_payload_hash() -> [u8; 32] {
-    [
-        182, 208, 29, 10, 28, 108, 129, 81, 251, 225, 140, 249, 160, 226, 16, 194, 8, 120, 133, 71,
-        12, 77, 224, 44, 236, 7, 141, 207, 170, 141, 14, 26,
-    ]
+    digest(build_payload())
 }
 
 fn serial_number() -> [u8; 20] {
@@ -529,11 +538,35 @@ fn test_extract_leaf_modulus_roundtrip() {
 }
 
 #[test]
-fn test_extract_email_domain_from_payload() {
-    let (domain, len) = extract_email_domain(build_payload());
+fn test_extract_claim_by_tag_from_payload() {
+    let (domain, len) = extract_claim_by_tag(build_payload(), ISSUER_FORMAT_GOOGLE_OIDC_V1);
     assert(len == 15, "email_domain should be extracted from the normalized payload");
     assert(domain[0] == 99, "Domain extraction should keep leading bytes");
     assert(domain[14] == 119, "Domain extraction should keep trailing bytes");
+}
+
+#[test]
+fn test_extract_claim_by_tag_apple_id() {
+    let (domain, len) = extract_claim_by_tag(build_apple_payload(), ISSUER_FORMAT_APPLE_ID_V1);
+    assert(len == 13, "apple_email value 'apple.example' should extract (13 chars)");
+    assert(domain[0] == 97, "Apple payload first byte should be 'a'");
+    assert(domain[12] == 101, "Apple payload last byte should be 'e'");
+}
+
+#[test]
+fn test_extract_claim_by_tag_microsoft_entra() {
+    let (domain, len) =
+        extract_claim_by_tag(build_microsoft_payload(), ISSUER_FORMAT_MICROSOFT_ENTRA_V1);
+    assert(len == 13, "upn_domain value 'microsoft.com' should extract (13 chars)");
+    assert(domain[0] == 109, "MS payload first byte should be 'm'");
+    assert(domain[12] == 109, "MS payload last byte should be 'm'");
+}
+
+#[test(should_fail)]
+fn test_extract_claim_by_tag_rejects_unknown_issuer() {
+    // v3.1 accepts tag in {1, 2, 3}. Anything else must fail-closed; do not
+    // silently fall back to any known issuer's offset.
+    let _ = extract_claim_by_tag(build_payload(), 999);
 }
 
 #[test]
@@ -544,7 +577,7 @@ fn test_jwt_x5c_commitment_matches_manual_derivation() {
     // x509 packing, link_rand derivation, pk_digest, commit_attributes_v3)
     // without depending on a valid RSA-2048 fixture for the cert / JWT chain.
     let payload = build_payload();
-    let (domain, domain_len) = extract_email_domain(payload);
+    let (domain, domain_len) = extract_claim_by_tag(payload, ISSUER_FORMAT_GOOGLE_OIDC_V1);
     let (attr_hi, attr_lo) = pack_x509_domain(domain, domain_len);
     let link_rand_p: Field = 424242;
     let link_rand_x = derive_x509_link_rand(link_rand_p);
@@ -553,6 +586,7 @@ fn test_jwt_x5c_commitment_matches_manual_derivation() {
 
     let actual = compute_jwt_x5c_commitment(
         payload,
+        ISSUER_FORMAT_GOOGLE_OIDC_V1,
         link_rand_p,
         test_enclave_pk_x(),
         test_enclave_pk_y(),
@@ -569,6 +603,7 @@ fn test_jwt_x5c_commitment_binds_enclave_pk() {
     let link_rand_p: Field = 424242;
     let c_a = compute_jwt_x5c_commitment(
         payload,
+        ISSUER_FORMAT_GOOGLE_OIDC_V1,
         link_rand_p,
         test_enclave_pk_x(),
         test_enclave_pk_y(),
@@ -576,7 +611,13 @@ fn test_jwt_x5c_commitment_binds_enclave_pk() {
 
     let mut tampered_x = test_enclave_pk_x();
     tampered_x[0] ^= 0xFF;
-    let c_b = compute_jwt_x5c_commitment(payload, link_rand_p, tampered_x, test_enclave_pk_y());
+    let c_b = compute_jwt_x5c_commitment(
+        payload,
+        ISSUER_FORMAT_GOOGLE_OIDC_V1,
+        link_rand_p,
+        tampered_x,
+        test_enclave_pk_y(),
+    );
 
     assert(c_a.x != c_b.x, "Different enclave pk_x must yield a different v3 commitment");
 }
@@ -585,15 +626,27 @@ fn test_jwt_x5c_commitment_binds_enclave_pk() {
 fn test_jwt_x5c_commitment_binds_link_rand() {
     // Rerandomisation check: changing only link_rand_p must change the commitment.
     let payload = build_payload();
-    let c_a = compute_jwt_x5c_commitment(payload, 424242, test_enclave_pk_x(), test_enclave_pk_y());
-    let c_b = compute_jwt_x5c_commitment(payload, 424243, test_enclave_pk_x(), test_enclave_pk_y());
+    let c_a = compute_jwt_x5c_commitment(
+        payload,
+        ISSUER_FORMAT_GOOGLE_OIDC_V1,
+        424242,
+        test_enclave_pk_x(),
+        test_enclave_pk_y(),
+    );
+    let c_b = compute_jwt_x5c_commitment(
+        payload,
+        ISSUER_FORMAT_GOOGLE_OIDC_V1,
+        424243,
+        test_enclave_pk_x(),
+        test_enclave_pk_y(),
+    );
     assert(c_a.x != c_b.x, "Different link_rand_p must yield a different v3 commitment");
 }
 
 #[test(should_fail)]
 fn test_jwt_x5c_adapter_rejects_wrong_payload_hash() {
     let payload = build_payload();
-    let (domain, domain_len) = extract_email_domain(payload);
+    let (domain, domain_len) = extract_claim_by_tag(payload, ISSUER_FORMAT_GOOGLE_OIDC_V1);
     let (attr_hi, attr_lo) = pack_x509_domain(domain, domain_len);
     let link_rand_p: Field = 424242;
     let link_rand_x = derive_x509_link_rand(link_rand_p);
@@ -624,6 +677,7 @@ fn test_jwt_x5c_adapter_rejects_wrong_payload_hash() {
         jwt_signed_hash(),
         issuer_modulus_limbs(),
         smt_root(),
+        ISSUER_FORMAT_GOOGLE_OIDC_V1,
         commitment.x,
         commitment.y,
     );
@@ -634,7 +688,7 @@ fn test_jwt_x5c_adapter_rejects_wrong_enclave_pk() {
     // Path A: commitment binds pk_digest. Supplying a different enclave key
     // than the one committed must produce a commitment mismatch.
     let payload = build_payload();
-    let (domain, domain_len) = extract_email_domain(payload);
+    let (domain, domain_len) = extract_claim_by_tag(payload, ISSUER_FORMAT_GOOGLE_OIDC_V1);
     let (attr_hi, attr_lo) = pack_x509_domain(domain, domain_len);
     let link_rand_p: Field = 424242;
     let link_rand_x = derive_x509_link_rand(link_rand_p);
@@ -666,6 +720,7 @@ fn test_jwt_x5c_adapter_rejects_wrong_enclave_pk() {
         jwt_signed_hash(),
         issuer_modulus_limbs(),
         smt_root(),
+        ISSUER_FORMAT_GOOGLE_OIDC_V1,
         commitment.x,
         commitment.y,
     );
@@ -674,7 +729,7 @@ fn test_jwt_x5c_adapter_rejects_wrong_enclave_pk() {
 #[test(should_fail)]
 fn test_jwt_x5c_adapter_rejects_wrong_commitment() {
     let payload = build_payload();
-    let (domain, domain_len) = extract_email_domain(payload);
+    let (domain, domain_len) = extract_claim_by_tag(payload, ISSUER_FORMAT_GOOGLE_OIDC_V1);
     let (attr_hi, attr_lo) = pack_x509_domain(domain, domain_len);
     let link_rand_p: Field = 424242;
     let link_rand_x = derive_x509_link_rand(link_rand_p);
@@ -703,6 +758,7 @@ fn test_jwt_x5c_adapter_rejects_wrong_commitment() {
         jwt_signed_hash(),
         issuer_modulus_limbs(),
         smt_root(),
+        ISSUER_FORMAT_GOOGLE_OIDC_V1,
         commitment.x + 1,
         commitment.y,
     );

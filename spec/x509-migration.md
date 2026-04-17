@@ -82,16 +82,18 @@ UI 顯示 banner：「已有 N 筆憑證需更新加密格式 → [更新]」
 - 保留 v2 circuit 原檔案 `passport_adapter/` 為 v2 + 新建 `passport_adapter_v3/` 或以 feature flag 切換（由實作者決定；spec 僅要求 artifact 命名 `passport_adapter_v3.json` 區分）
 - `openac_show v3` 同步升級
 
-### Phase 3 — `x509_show` v1 + `jwt_x5c_adapter_rsa_v1`
+### Phase 3 — `x509_show` v1 + `jwt_x5c_adapter_rsa_v1` (v3.1)
 
-- 最小可用：支援 Google OIDC RS256
-- SMT witness 可先用 static root（P0-E 的 v1）
+- 最小可用：支援 Google OIDC RS256（`issuer_format_tag = 1`）
+- SMT witness 可先用 static root（P0-E 的 v1）；SMT_DEPTH = 32 使用 `serial_number[0..4]`
 - App 端同步加 OAuth ingestion + Keychain link_rand_p + Enclave key init
+- **2026-04-17 v3.1 優化 landed**：20,784 ACIR opcodes（對預算 32%）；原 v3.0 known-deficit 已解除
 
-### Phase 4 — `composite_show` v1
+### Phase 4 — `composite_show` v1 + `passport_adapter` v3.1 CSCA/revocation
 
 - passport + X.509 共享 `pk_digest` 的 composite predicate
 - 單一 ECDSA verify（gate budget 關鍵）
+- **2026-04-17 `passport_adapter` v3.1 landed**：CSCA→DSC RSA chain + depth-8 ICAO Master List Merkle inclusion + depth-32 DSC revocation SMT。新公開輸入 `csca_root` + `dsc_smt_root`；DSC modulus 降為 private witness；36,223 ACIR opcodes（50k budget 內）
 
 ### Phase 5 — `jwt_x5c_adapter_ecdsa_v1` + `sdjwt_adapter_v1`
 
@@ -221,17 +223,70 @@ app bundle:
 > 這一節記錄已知但未 block ship 的 gate/size/perf 缺口。實作 agent 在做 UX 測試、
 > release notes、downstream migration 規劃時必須覆蓋這些項目。
 
-### `jwt_x5c_adapter v1` — 6× gate budget 超標
+### `jwt_x5c_adapter` — ✅ v3.1 已修復（2026-04-17）
 
-- **量測（2026-04-17）**：384,147 ACIR opcodes vs. 65,000 target（`spec/x509-benchmark.md §3/§9`）。
-- **成因摘要**：`SMT_DEPTH = 128` 主導（~66% 的 opcodes 來自逐 bit SHA256 pair hash）；
-  RSA-2048 × 3（leaf、issuer、JWT）各約 25k；JWT payload SHA256 ~40k。
-- **UX 風險**：UltraHonk proving time 預估 iPhone 15 Pro 30–60 s / Pixel 8 Pro 60–120 s，
-  超過 Prepare Hard Limit（30 s / 60 s）。**flag for UX tests on iPhone 15 Pro 和 Pixel 8 Pro**，
-  實測後決定：
-  1. 若 < Hard Limit × 1.5：加 onboarding loading state，照 v3.0 ship。
-  2. 若 ≥ Hard Limit × 1.5：跳過 v3.0 Phase 3 release，先跑 v3.1 的 `SMT_DEPTH 128 → 32` 優化。
-- **v3.1 規劃**：把 SMT depth 降到 32（4,294,967,296 個序號足夠 Google OIDC / university issuer），
-  預期 opcodes 降回 ~100k；proving time 應進入 Hard Limit 內。
-- **Release notes 必須註明**：「Google OIDC credential 建立時間較長；過程會有 loading 畫面，
-  完成後不會重跑」。
+- **v3.0 量測**：384,147 ACIR opcodes vs. 65,000 target（5.9× 超標）
+- **v3.1 量測（2026-04-17 landed）**：**20,784 ACIR opcodes**（對 65,000 預算 ~32% 使用率）
+- **v3.0 → v3.1 降幅**：**94.6%**
+- **套用優化**：
+  1. SMT 內部節點 hash：`SHA256(left_bytes || right_bytes)` → `pedersen_hash([DOMAIN_SMT_NODE, left, right])`
+  2. `SMT_DEPTH` 128 → 32（`serial_number[0..4]` 作 key；4.3B keyspace 夠用）
+  3. `JWT_PAYLOAD_LEN` 4096 → 1024（Google OIDC id_token < 1KB）
+  4. email_domain 解析：4080×16 marker loop → `issuer_format_tag` 固定偏移分派（P0-G v1 設計）
+- **同步更新**：`benchmark/expected/baseline.toml`、`benchmark/spec.toml::circuits.jwt_x5c_adapter`
+  （已清除 `known_deficit` flag、`gate_budget_status = "within_budget"`）；
+  詳細設計記錄於 `spec/x509-benchmark.md §9`、`spec/x509-circuits.md §4 / §11`、
+  `spec/x509-contract.md §5.2.1`。
+- **Release notes 建議**：「Google OIDC credential 建立時間 ≤10 s（iPhone 15 Pro）；
+  無需特殊 loading 文案」。
+- **Follow-up tasks**（非 blocking）：
+  - 跨 repo 協調：v2 CRL aggregator tooling 必須採用相同 Pedersen + `DOMAIN_SMT_NODE`
+  - ~~benchmark scripts 仍硬編 v2 circuit list~~ ✅ 2026-04-17 Phase A cleanup 完成；`Makefile::CIRCUIT_PACKAGES`、`benchmark/scripts/{circuit-lint,tdd-check,perf-bench,spec-check,size-bench}.sh` 已更新納入 `sdjwt_adapter`、`jwt_x5c_adapter`、`x509_show`、`composite_show`
+
+---
+
+## 10. mopro-binding v3.1 FFI integration plan（roadmap）
+
+本節記錄 mopro-binding / iOS 端的 v3.1 對接計畫。程式碼改動不在本 repo 的
+circuit / spec 範疇，但跨 repo 協調在此釘 SoT。
+
+### 10.1 現況（2026-04-17 audit）
+
+- `mopro-binding/src/openac.rs` (v1 SHA256) + `openac_v2.rs` (Pedersen arity-4) 存在；無 `openac_v3.rs`。
+- `MoproiOSBindings/mopro.swift` 暴露 `generateNoirProof`, `verifyNoirProof`, `verify_openac_v2`；無 v3 entry point。
+- `mopro-binding/test-vectors/noir/` 僅含 `disclosure.json`；缺少 `passport_adapter`, `sdjwt_adapter`, `jwt_x5c_adapter` 編譯產物。
+- iOS `MoproProofService.swift` 因此 fallback 到 Semaphore → SD-JWT，等於真 ZK 護照 pipeline 不可用。
+- Toolchain 不一致：circuits 用 nargo 1.0.0-beta.19，mopro-binding 用 1.0.0-beta.8，release.yml 兩者都執行。
+
+### 10.2 Target PR 切分
+
+**PR-10a：v3.1 Rust layer (`openac_v3.rs`)**
+- 新增 `src/openac_v3.rs`：`PrepareArtifactV3 { commitment: PedersenPoint, pk_digest: [u8; 32] }`、`verify_openac_v3()`、domain constants 與 Noir 對齊。
+- `lib.rs` 加 `pub mod openac_v3; pub use openac_v3::*;`。
+- 保留 v1/v2 模組（90 天 grace period）。
+- 預估：~400 LOC + 單元測試。
+
+**PR-10b：v3.1 test vectors + build 同步**
+- `make copy-circuit-artifacts` 擴充 `test-vectors/noir/` 納入 `passport_adapter.json`、`sdjwt_adapter.json`、`jwt_x5c_adapter.json`、`openac_show.json`、`x509_show.json`、`composite_show.json`。
+- `cargo run --bin ios` 重跑 XCFramework；`patch_mopro_fallback.sh` 包住新 Swift entry point。
+- 解決 nargo beta.19 vs beta.8 toolchain 差異（優先升級 mopro-binding 的 nargo）。
+
+**PR-10c：iOS MoproProofService 對接**
+- `MoproProofService.swift::generateWithMopro()` 改呼叫 `verify_openac_v3()` 與新 `passport_adapter` prepare entry。
+- Bundle `csca_root` + `dsc_smt_root` 作為公開 input；fixture 從 resource 讀。
+- Trust badge 在 v3.1 proof 成功時升 🟢，失敗則降 🔵/⚪ 按 `spec/x509-contract.md §6` 規則。
+
+### 10.3 預估工作量
+
+| PR | 天數估計 | 依賴 |
+|---|---|---|
+| 10a | 0.5 – 1 | 無 |
+| 10b | 0.5 | 10a |
+| 10c | 1 – 2 | 10a, 10b；需 airmeishi repo PR |
+| **Total** | **2 – 3.5 工作天** | — |
+
+### 10.4 風險 / Open question
+
+- Toolchain split 可能造成 beta.19 compiled artifact 在 beta.8 prover 中無法解析 — 實測才知。
+- `openac_v2.rs::rerandomize_commitment` 是 `unimplemented!()` stub；v3 不繼承此路徑，不 block。
+- iOS app 需 airmeishi repo 同步 PR，本 repo 釘 v3.1 entry point 作 SoT；實際接線時以 airmeishi 為工作面。

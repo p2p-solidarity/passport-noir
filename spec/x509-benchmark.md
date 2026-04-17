@@ -22,6 +22,7 @@
 ### Current measurement (2026-04-17, nargo 1.0.0-beta.19)
 
 Measured by `nargo info --package <name>` after Path A v3 migration landed.
+`jwt_x5c_adapter` re-measured 2026-04-17 after v3.1 optimisation pass.
 
 | Circuit | ACIR Opcodes | Brillig | 對照預算 / 備註 |
 |---|---|---|---|
@@ -30,10 +31,10 @@ Measured by `nargo info --package <name>` after Path A v3 migration landed.
 | disclosure | 487 | 331 | unchanged (v1 legacy) |
 | prepare_link | 283 | 338 | unchanged (v1 legacy) |
 | show_link | 757 | 921 | unchanged (v1 legacy) |
-| passport_adapter (v3) | **25,725** | 4,202 | budget ≤ 26,200 ✅ (+190 vs v2) |
+| **passport_adapter (v3.1)** | **36,223** | 5,947 | budget ≤ 50,000 ✅ (+10,498 vs v3.0; CSCA chain + revocation SMT) |
 | openac_show (v3) | **1,752** | 420 | budget ≤ 3,000 ✅ (+320 vs v2, in-circuit ECDSA) |
 | sdjwt_adapter (v3) | **5,807** | 855 | budget ≤ 40,000 ✅ (first measurement, no prior) |
-| **jwt_x5c_adapter (v3)** | **384,147** | 9,466 | budget ≤ 65,000 ❌ **5.9× over target, optimization required** |
+| **jwt_x5c_adapter (v3.1)** | **20,859** | 6,122 | budget ≤ 65,000 ✅ (+75 vs single-issuer; multi-issuer dispatch) |
 | x509_show (v3) | **549** | 72 | budget ≤ 5,000 ✅ |
 | composite_show (v3) | **684** | 97 | budget ≤ 8,000 ✅ |
 | device_binding | 162 | 0 | unchanged (standalone unit baseline) |
@@ -56,7 +57,7 @@ UltraHonk proof size 較小（O(log n)），proving time 在同 gate 下比 Spar
 
 | Circuit | Gate 預算 | 預估依據 |
 |---|---|---|
-| `passport_adapter` (v3) | ≤ 26,200 | v2 25,535 + Poseidon pk_digest (~240) + Pedersen 5-arity (~500) |
+| `passport_adapter` (v3.1) | ≤ 50,000 | v3 25,725 + CSCA→DSC RSA (~8k) + Master List Merkle depth-8 (~1.5k) + DSC SMT (~1k); measured 36,223 |
 | `jwt_x5c_adapter` (Prepare, RSA variant) | ≤ 65,000 | RSA×2 (~25k×2) + SMT (~8k) + SHA256(payload) + Poseidon + Pedersen |
 | `jwt_x5c_adapter` (Prepare, ECDSA variant) | ≤ 45,000 | RSA cert×2 + ES256 JWT verify + SHA256 + Poseidon + Pedersen |
 | `sdjwt_adapter` (Prepare) | ≤ 40,000 | ECDSA issuer + SHA256×（1+MAX_DISC）+ MerkleRoot(depth=5) + Poseidon + Pedersen |
@@ -222,48 +223,58 @@ composite_show_v1 = { positive = 4, negative = 3, total = 7 }
 
 ---
 
-## 9. Path A known-deficit — `jwt_x5c_adapter`
+## 9. `jwt_x5c_adapter` v3.1 優化（landed 2026-04-17）
 
-**當前量測（2026-04-17）：384,147 ACIR opcodes，對 §3 預算 65,000 為 5.9× 超標。**
-記錄於 `benchmark/expected/baseline.toml::gates.jwt_x5c_adapter`，並在
-`benchmark/spec.toml::circuits.jwt_x5c_adapter` 以 `known_deficit = true` +
-`gate_budget_status = "overshoot"` 明確標註。
+**v3.1 量測：20,784 ACIR opcodes，對 §3 預算 65,000 為 ~32% 使用率 ✅。**
+相較 v3.0 的 384,147 opcodes，**降幅 94.6%**。
+記錄於 `benchmark/expected/baseline.toml::gates.jwt_x5c_adapter = 20784`，
+`benchmark/spec.toml::circuits.jwt_x5c_adapter` 的 `gate_budget_status = "within_budget"`，
+`known_deficit` flag 已移除。
 
-### Overshoot 來源（粗估）
+### v3.0 → v3.1 改動
+
+| 優化 | v3.0 | v3.1 | 效果 |
+|---|---|---|---|
+| SMT 節點雜湊 | `SHA256(left_bytes \|\| right_bytes)` → 64-byte block | `pedersen_hash([DOMAIN_SMT_NODE, left, right])` | **最大宗節省**：每節點 ~1.7k → ~300 opcodes |
+| `SMT_DEPTH` | 128 (逐 byte path) | 32 (serial_number[0..4] 4-byte key) | 4.3B keyspace 對 Google OIDC + university issuers 足夠 |
+| `JWT_PAYLOAD_LEN` | 4096 bytes (64 SHA256 blocks) | 1024 bytes (16 SHA256 blocks) | Google id_token 實測 <1KB；硬斷言 ≤1024 |
+| email_domain 解析 | 4080 × 16-byte marker loop | `issuer_format_tag` 固定偏移分派（P0-G v1 設計） | 與 `spec/x509-issues.md §P0-G` 對齊 |
+| openac_core 常數 | — | 新增 `DOMAIN_SMT_NODE = 0x736d7431` (ASCII "smt1") | SMT arity-3 pedersen_hash 輸出空間與既有 arity-2/5 調用分離 |
+
+### 安全性考量（已評估）
+
+- **SMT 碰撞阻力**：Pedersen hash on bn254 為 ~127-bit DLP 硬度；SHA256 為 128-bit。
+  單 bit 差異在 depth-32 SMT 路徑偽造情境下無實際意義（需 32 次序列 second-preimage）。
+- **Domain separation**：`DOMAIN_SMT_NODE` 明確分隔 SMT 節點輸出與 `DOMAIN_PK_DIGEST`（`device.nr`）、
+  profile salts。任何未來新增的 arity-3 `pedersen_hash` 調用都必須選擇不同 domain constant。
+- **Off-circuit CRL tooling**：`smt_root` 作為 public input 由 app 從靜態 snapshot 提供。
+  若 v2 接實時 CRL aggregator，aggregator 的 tree-build 工具必須同步切 Grumpkin Pedersen
+  + `DOMAIN_SMT_NODE`；此為跨 repo 協調項（見 `spec/x509-contract.md §5.2`）。
+- **Fixed-offset 策略**：app 必須在 prepare 前 canonicalize JWT payload 到已知 field 順序。
+  `issuer_format_tag = 1` (GoogleOIDCv1) 對應 `email_domain` 值在 offset 17；
+  tag 不等於 1 的情況 circuit `assert false`，fail-closed。
+
+### 剩餘 gate 組成（v3.1）
 
 | 構成 | 估計 ACIR opcodes | 佔比 |
 |---|---|---|
-| RSA-2048 PKCS#1v1.5 leaf cert verify | ~25k | 6–7% |
-| RSA-2048 PKCS#1v1.5 issuer cert verify | ~25k | 6–7% |
-| RSA-2048 PKCS#1v1.5 JWT signature verify (RS256) | ~25k | 6–7% |
-| SMT non-membership, `SMT_DEPTH = 128` (逐 bit SHA256 pair hash) | ~255k | **66%** |
-| JWT payload SHA256（`JWT_PAYLOAD_LEN = 4096` bytes → 64 blocks） | ~40k | 10% |
-| email_domain 搜尋迴圈（4096 × 16-byte marker） | ~10k | 3% |
-| Pedersen v3 + pk_digest + boilerplate | < 5k | < 2% |
+| RSA-2048 PKCS#1v1.5 leaf cert verify | ~5–6k | ~25% |
+| RSA-2048 PKCS#1v1.5 issuer cert verify | ~5–6k | ~25% |
+| RSA-2048 PKCS#1v1.5 JWT signature verify | ~5–6k | ~25% |
+| SMT non-membership (depth 32, Pedersen) | ~1k | ~5% |
+| JWT payload SHA256 (1024 bytes = 16 blocks) | ~2–3k | ~10–15% |
+| Pedersen v3 + pk_digest + fixed-offset extract | < 2k | < 10% |
 
-結論：**SMT depth 128 的 JSON-like binary path hash 是主要爆量元兇**（SHA256 in-circuit × 128 次）。
-RSA × 3 加起來約 75k，實際上已經跟原始預算同量級；把 RSA 壓下去邊際效益有限。
+> 粗估：實際 `nargo info` 顯示 main ACIR = 20,784；上表各項需另跑 profiler 驗證。
 
-### Optimization paths for v3.1
+### 未來選項（非 blocking）
 
-1. **Reduce SMT depth（最有效）**
-   `SMT_DEPTH = 128 → 32`，用 serial number 前 4 bytes 作 key
-   （可涵蓋 4,294,967,296 個獨立序號；對 Google OIDC、university issuer 足夠）。
-   預期省 ~75%（~190k opcodes），降到 ~190k 總量。
-2. **Move issuer RSA verify off-circuit（信任換 gate）**
-   只驗 leaf cert 的 RSA 簽章；把 issuer 的真實性委託給 app-level Mozilla Root 檢查。
-   預期省 ~25k，但威脅模型要重審（見本文件 §7.2 和 `spec/x509-design.md`）。
-3. **Accept current number（維持正確性，改 UX 文案）**
-   Prepare 是 one-shot（每個 credential 只跑一次，結果快取），
-   在 iPhone 15 Pro 上的 UltraHonk proving time 預估 30–60 s；
-   可接受，但要在 onboarding UX 上明示「正在建立加密憑證，請稍候…」。
-4. **（研究選項）Poseidon vector commit 取代 SMT**
-   需要 Noir stdlib 支援 Poseidon in-circuit；nargo 1.0.0-beta.19 尚未提供。
-   Phase 7 research spike。
+1. **Move issuer RSA verify off-circuit** — 可省 ~5–6k，但威脅模型要重審（`spec/x509-contract.md §5.1`）
+2. **Poseidon vector commit 取代 Pedersen SMT** — 需 Noir stdlib 支援 Poseidon，nargo 1.0.0-beta.19 尚未提供
+3. **In-circuit base64 decode + JSON normalize** — 解除 fixed-offset 限制，P0-G v2 研究項
 
 ### Decision
 
-**Deferred to post-ship; current implementation is functionally correct.**
-v3.0 以 384,147 opcodes 交付，release notes 註明 proving time 風險；
-v3.1 規劃走 option #1（SMT depth 降階），目標把 opcode 壓回 <100k。
+**v3.1 達 spec 預算；不再視為 known deficit。**
+UltraHonk proving time 預估 iPhone 15 Pro ≤ 10 s，進入 Prepare target (15 s) 內。
 

@@ -90,34 +90,92 @@ pub fn pk_digest_from_bytes(
 
 ---
 
-## 3. passport_adapter (v3, Prepare)
+## 3. passport_adapter (v3.1, Prepare)
 
-### I/O
+> v3.1 (2026-04-17) 新增 CSCA→DSC 信任鏈 + DSC 吊銷 SMT；解決 P0-E。
+> DSC RSA modulus 由 public 降為 private witness（CSCA + Merkle inclusion 已證明其正當性）；
+> 公開輸入改為兩個 trust anchor（`csca_root` ICAO Master List、`dsc_smt_root` 吊銷表）+ commitment。
+
+### I/O (v3.1)
 
 ```
 PUBLIC inputs:
-  modulus_limbs:       [u128; 18]          // DSC RSA public key
+  csca_root:           Field             // ICAO Master List snapshot root (depth-8 Merkle)
+  dsc_smt_root:        Field             // DSC revocation SMT root (depth-32, shared with jwt_x5c_adapter)
   out_commitment_x:    Field
   out_commitment_y:    Field
 
 PRIVATE witness:
-  // RSA / DG chain (v2 既有)
-  sod_hash:            [u8; 32]
-  signature_limbs:     [u128; 18]
-  redc_limbs:          [u128; 18]
-  exponent:            u32
-  dg_count:            u8
-  dg_contents:         [[u8; 512]; 4]
-  dg_lengths:          [u32; 4]
-  expected_dg_hashes:  [[u8; 32]; 4]
-  link_rand_p:         Field
+  // DSC -> SOD (既有 v3)
+  sod_hash:              [u8; 32]
+  signature_limbs:       [u128; 18]
+  modulus_limbs:         [u128; 18]       // v3.1: now private
+  redc_limbs:            [u128; 18]
+  exponent:              u32
 
-  // Path A 新增
-  enclave_pk_x_field:  Field
-  enclave_pk_y_field:  Field
-  enclave_pk_x_bytes:  [u8; 32]
-  enclave_pk_y_bytes:  [u8; 32]
+  // CSCA -> DSC 新增 v3.1
+  csca_modulus_limbs:    [u128; 18]
+  csca_redc_limbs:       [u128; 18]
+  dsc_tbs:               [u8; 1536]
+  dsc_cert_sig_limbs:    [u128; 18]
+  csca_merkle_index:     u32              // 0..255 (depth 8 = 256 country capacity)
+  csca_merkle_siblings:  [Field; 8]
+
+  // DSC 吊銷 SMT 新增 v3.1
+  dsc_serial:            [u8; 20]
+  smt_siblings:          [Field; 32]
+  smt_old_key:           Field
+  smt_old_value:         Field
+  smt_is_old0:           bool
+
+  // DG chain (既有)
+  dg_count:              u8
+  dg_contents:           [[u8; 512]; 4]
+  dg_lengths:            [u32; 4]
+  expected_dg_hashes:    [[u8; 32]; 4]
+  link_rand:             Field
+
+  // Path A device binding (既有 v3)
+  enclave_pk_x:          [u8; 32]
+  enclave_pk_y:          [u8; 32]
 ```
+
+### 邏輯骨架 (v3.1)
+
+```noir
+fn main(/* inputs above */) {
+    // 1. Existing: DSC signs SOD.
+    verify_rsa(sod_hash, signature_limbs, modulus_limbs, redc_limbs, exponent);
+
+    // 2. NEW v3.1: CSCA signs DSC TBS; extract DSC modulus from TBS and
+    //    assert it equals the private `modulus_limbs` used in step 1.
+    //    Then verify CSCA in ICAO Master List (depth-8 Merkle inclusion).
+    verify_csca_chain(
+        csca_modulus_limbs, csca_redc_limbs,
+        dsc_tbs, dsc_cert_sig_limbs, modulus_limbs,
+        csca_merkle_index, csca_merkle_siblings, csca_root,
+    );
+
+    // 3. NEW v3.1: DSC serial must NOT appear in revocation SMT (same
+    //    primitive as jwt_x5c_adapter; see openac_core::smt).
+    verify_non_membership(
+        dsc_serial, smt_siblings, smt_old_key, smt_old_value, smt_is_old0, dsc_smt_root,
+    );
+
+    // 4..6. Existing: DG chain + pk_digest + Pedersen v3 commitment.
+    ...
+}
+```
+
+### Gate 成本實測
+
+| 構成 | 新增 opcodes | 累計 |
+|---|---|---|
+| v3.0 baseline (DSC->SOD + DG chain + Pedersen v3) | — | 25,725 |
+| + CSCA RSA verify + DSC modulus 提取+比對 | ~8,000 | ~33,700 |
+| + Depth-8 Merkle inclusion (Pedersen nodes) | ~1,500 | ~35,200 |
+| + Depth-32 SMT non-membership (shared primitive) | ~1,000 | ~36,200 |
+| **v3.1 measured (nargo info)** | — | **36,223** |
 
 ### 邏輯骨架
 
@@ -149,20 +207,22 @@ ECDSA 驗簽發生在 show。
 
 ---
 
-## 4. jwt_x5c_adapter (v1, Prepare)
+## 4. jwt_x5c_adapter (v3.1, Prepare)
 
-> JSON parsing 策略：hardcoded-issuer-offset（D1/P0-G）。
-> 不做 base64 decode in-circuit；app 傳 raw payload bytes，電路驗 hash 即可。
+> JSON parsing 策略：hardcoded-issuer-offset（D1/P0-G），由 `issuer_format_tag` public input 分派。
+> 不做 base64 decode in-circuit；app 傳 canonicalized raw payload bytes，電路驗 SHA256 hash 即可。
+> v3.1 (2026-04-17) 優化：SMT 改用 pedersen_hash、SMT_DEPTH 128→32、JWT_PAYLOAD_LEN 4096→1024、
+> 固定偏移 claim extractor。詳見 `x509-benchmark.md §9`。
 
-### I/O
+### I/O (v3.1)
 
 ```
 PUBLIC inputs:
   issuer_modulus:      [u128; 18]   // x5c leaf signer (Mozilla Root snapshot anchors)
-  smt_root:            Field        // revocation SMT root (stale-window policy — see contract.md)
+  smt_root:            Field        // revocation SMT root (Pedersen-hashed tree, see §11)
   jwt_signed_hash:     [u8; 32]     // SHA256(base64url(header) || "." || base64url(payload))
   jwt_payload_b64h:    [u8; 32]     // SHA256(base64url(payload)) — binds raw bytes
-  issuer_format_tag:   Field        // e.g. 1=GoogleOIDCv1 — selects fixed offset table
+  issuer_format_tag:   Field        // 1 = GoogleOIDCv1 (v1 支援；其他值 assert false)
   out_commitment_x:    Field
   out_commitment_y:    Field
 
@@ -173,47 +233,58 @@ PRIVATE witness:
   leaf_sig:            [u128; 18]
   issuer_sig:          [u128; 18]
   serial_number:       [u8; 20]
-  smt_siblings:        [Field; 128]
+  smt_siblings:        [Field; 32]     // v3.1: depth 32 (was 128)
   smt_old_key:         Field
   smt_old_value:       Field
   smt_is_old0:         bool
 
   // JWT bytes
-  jwt_payload_raw:     [u8; 4096]
-  jwt_sig:             [u128; 18]   // RSA variant (另有 ECDSA variant，見下)
+  jwt_payload_raw:     [u8; 1024]      // v3.1: was [u8; 4096]; app zero-pads to 1024
+  jwt_sig:             [u128; 18]      // RSA variant (另有 ECDSA variant，見下)
 
   // OpenAC binding
   link_rand_p:         Field
-  enclave_pk_x_field:  Field
-  enclave_pk_y_field:  Field
   enclave_pk_x_bytes:  [u8; 32]
   enclave_pk_y_bytes:  [u8; 32]
 ```
 
-### 邏輯骨架
+### v3.1 常數
+
+```noir
+global SMT_DEPTH: u32 = 32;                        // 4 bytes × 8 bits serial key
+global JWT_PAYLOAD_LEN: u32 = 1024;                // app-layer canonical + pad
+global ISSUER_FORMAT_GOOGLE_OIDC_V1: Field = 1;
+global GOOGLE_OIDC_V1_EMAIL_DOMAIN_OFFSET: u32 = 17;  // canonical payload offset
+```
+
+### 邏輯骨架 (v3.1)
 
 ```noir
 fn main(/* inputs above */) {
     // 1. Cert chain
     CertRSA256Verify(leaf_tbs, issuer_modulus, issuer_sig);
     CertRSA256Verify(issuer_tbs, issuer_modulus, leaf_sig);
+    // v3.1: depth-32 SMT with Pedersen internal-node hash (see §11).
     SMTNonMembership(serial_number, smt_root, smt_siblings, smt_old_key, smt_old_value, smt_is_old0);
 
     // 2. JWT signing key binding
     let jwt_key = ExtractModulus(leaf_tbs);
     RSAVerify(jwt_signed_hash, jwt_sig, jwt_key);
 
-    // 3. Payload hash binding (app passes raw bytes; circuit asserts hash match)
+    // 3. Payload hash binding (app passes canonicalized raw bytes; circuit asserts hash match)
     assert SHA256(jwt_payload_raw) == jwt_payload_b64h;
 
-    // 4. Fixed-offset claim extraction (per issuer_format_tag)
-    //    v1 支援 issuer_format_tag == 1 (GoogleOIDCv1)；
-    //    其它值 → assert false（不支援）。
-    let (attr_hi, attr_lo) = extract_jwt_claims_by_tag(jwt_payload_raw, issuer_format_tag);
+    // 4. Fixed-offset claim extraction dispatched by issuer_format_tag (P0-G v1 design).
+    //    v1 僅支援 issuer_format_tag == 1 (GoogleOIDCv1)；其它值 assert false。
+    //    App 負責在 prepare 前 canonicalize payload 到已知 key 順序，此偏移才穩定。
+    assert(issuer_format_tag == ISSUER_FORMAT_GOOGLE_OIDC_V1, "Unsupported issuer_format_tag");
+    let (domain_bytes, domain_len) = extract_claim_at_offset(
+        jwt_payload_raw, GOOGLE_OIDC_V1_EMAIL_DOMAIN_OFFSET);
+    let (attr_hi, attr_lo) = pack_x509_domain(domain_bytes, domain_len);
 
     // 5. pk_digest + commitment
-    let pk_digest = /* same as §2 */;
-    let link_rand_x = hash_2([link_rand_p, SALT_X509]);
+    let pk_digest = pk_digest_from_bytes(enclave_pk_x_bytes, enclave_pk_y_bytes);
+    let link_rand_x = derive_x509_link_rand(link_rand_p);
     let c = commit_attributes_v3(
         DOMAIN_X509, attr_hi, attr_lo, pk_digest, link_rand_x);
     assert_commitment_eq(c, out_commitment_x, out_commitment_y);
@@ -438,12 +509,23 @@ pub global DOMAIN_PASSPORT: Field = 0x01;
 pub global DOMAIN_X509:     Field = 0x02;
 pub global DOMAIN_SDJWT:    Field = 0x03;
 pub global DOMAIN_MDL:      Field = 0x04;
+// v3.1 新增：SMT 內部節點 pedersen_hash domain separator（ASCII "smt1"）
+pub global DOMAIN_SMT_NODE: Field = 0x736d7431;
 
-// openac_core/src/device.nr (新增)
+// openac_core/src/device.nr
+global DOMAIN_PK_DIGEST:    Field = 0x706b6467;    // "pkdg"（arity-5）
+
+// openac_core/src/profile.nr
 pub global SALT_X509:       Field = 0x78353039;    // "x509"
 pub global SALT_SDJWT:      Field = 0x73646a77;    // "sdjw"
 // SALT_LINK_RAND 刪除 — link_rand_p 不再由 device key 派生
 ```
+
+**Domain / arity 分離規則**：任何新增 `pedersen_hash` 調用必須選擇不同 (domain, arity) 組合，
+避免與現有輸出空間碰撞。現有使用：
+- arity 2：`derive_x509_link_rand` 等 `profile.nr` 調用（payload 自帶 SALT_*）
+- arity 3：SMT 節點折疊（固定第一 slot 為 `DOMAIN_SMT_NODE`）
+- arity 5：`pk_digest_from_bytes`（固定第一 slot 為 `DOMAIN_PK_DIGEST`）
 
 ---
 
@@ -462,3 +544,71 @@ pub global SALT_SDJWT:      Field = 0x73646a77;    // "sdjw"
 | `composite_show` | §7 |
 
 原 `circuits/device_binding` 保留為 **ECDSA 驗簽單元測試 benchmark**；不再作為 show 流程的一環。
+
+---
+
+## 11. SMT internal-node hash（v3.1）
+
+`jwt_x5c_adapter` 的 revocation SMT 在 v3.1 將內部節點 hash 從 SHA256 切換為
+domain-separated pedersen_hash：
+
+```noir
+fn hash_field_pair(left: Field, right: Field) -> Field {
+    pedersen_hash([DOMAIN_SMT_NODE, left, right])
+}
+```
+
+### 為何採用 Pedersen 而非 Poseidon
+
+- `nargo 1.0.0-beta.19` 不公開 Poseidon 高階 API（僅 `poseidon2_permutation` raw primitive）
+- Pedersen on bn254 / Grumpkin 為 native black-box，~300 ACIR opcodes / arity-3 調用
+- SHA256 對 64-byte preimage 約 ~2k opcodes，差距 ~1.7k per node × 33 nodes = ~56k opcodes 節省
+  （stacking 與 SMT_DEPTH 128→32 的效果後，總節省 ~360k）
+
+### Off-circuit 同步需求
+
+`smt_root` 作為 public input 由 app 從靜態 CRL snapshot 載入。
+對應的 tree-build tooling（目前不在本 repo）必須：
+1. 使用 Grumpkin Pedersen 計算節點 hash
+2. 套用相同 `DOMAIN_SMT_NODE = 0x736d7431` 常數
+3. 使用相同的 big-endian serial_number[0..4] 作 key（depth 32）
+
+參見 `spec/x509-contract.md §5.2` 的 snapshot shipping policy。
+`passport_adapter` v3.1 共用同一個 `openac_core::smt` primitive — DSC revocation
+與 X.509 cert revocation 使用同形狀的 witness / root (depth 32, Pedersen, same domain)；
+CRL aggregator 可輸出單一 tree 服務兩種 credential，或維護兩個 root 分別餵給對應電路。
+
+---
+
+## 12. CSCA Master List Merkle（v3.1）
+
+`passport_adapter` v3.1 以 depth-8 的 Merkle inclusion proof 驗證 CSCA 屬於
+ICAO Master List snapshot。256 個 leaf 容量超過全球約 150 個活躍 CSCA，
+預算充裕。
+
+### 常數（`openac_core::merkle` / `openac_core::commit`）
+
+```noir
+pub global CSCA_MERKLE_DEPTH: u32 = 8;
+pub global CSCA_MODULUS_LIMBS: u32 = 18;
+pub global DOMAIN_CSCA_LEAF: Field = 0x6373636c;  // "cscl"
+pub global DOMAIN_CSCA_NODE: Field = 0x6373636e;  // "cscn"
+```
+
+### Leaf 與節點雜湊
+
+```noir
+// Leaf: 將 18-limb RSA-2048 modulus 壓成單 Field
+leaf = pedersen_hash([DOMAIN_CSCA_LEAF, limb_0_as_field, ..., limb_17_as_field]);   // arity 19
+
+// 內部節點
+node = pedersen_hash([DOMAIN_CSCA_NODE, left, right]);                              // arity 3
+```
+
+### Off-circuit tooling 對齊
+
+CSCA snapshot builder（不在本 repo）必須：
+1. 以 arity-19 Pedersen + `DOMAIN_CSCA_LEAF` 產生每個 CSCA 的 leaf
+2. 以 arity-3 Pedersen + `DOMAIN_CSCA_NODE` 折疊至 root
+3. 每個 CSCA 至 `csca_merkle_index ∈ [0, 256)`，app 端傳入 prepare
+4. Snapshot 以 resource 形式 ship 進 `MoproNoir.xcframework`，與 Mozilla Root snapshot 共用 shipping policy（見 `spec/x509-contract.md §5.1 / §5.3`）

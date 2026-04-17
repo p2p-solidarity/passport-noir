@@ -14,18 +14,20 @@ data_integrity = { positive = 11, negative = 8, total = 19 }
 disclosure = { positive = 13, negative = 5, total = 18 }
 prepare_link = { positive = 2, negative = 1, total = 3 }
 show_link = { positive = 4, negative = 1, total = 5 }
-openac_core = { positive = 46, negative = 9, total = 55 }
+# openac_core: +4 smt module + +4 merkle module - 2 deleted commit_attributes_extended
+openac_core = { positive = 48, negative = 11, total = 59 }
 openac_show = { positive = 6, negative = 4, total = 10 }
-passport_adapter = { positive = 8, negative = 2, total = 10 }
+# passport_adapter v3.1: +CSCA chain tests (+1 pos +3 neg) + DSC revocation (+1 pos +1 neg)
+passport_adapter = { positive = 11, negative = 5, total = 16 }
 device_binding = { positive = 1, negative = 3, total = 4 }
 sdjwt_adapter = { positive = 6, negative = 2, total = 8 }
-# Path A v3 additions (2026-04-17)
-jwt_x5c_adapter = { positive = 5, negative = 3, total = 8 }
+# jwt_x5c_adapter v3.1 multi-issuer: +Apple + MS positive tests (v1 total 9 -> 11)
+jwt_x5c_adapter = { positive = 7, negative = 4, total = 11 }
 x509_show = { positive = 3, negative = 2, total = 5 }
 composite_show = { positive = 1, negative = 3, total = 4 }
 
 [tests.total]
-minimum = 158
+minimum = 171
 
 # Gate count baselines (ACIR opcodes, warn if > 10% regression)
 # Measured: 2026-04-17, nargo 1.0.0-beta.19
@@ -36,12 +38,12 @@ data_integrity = 13643
 disclosure = 487
 prepare_link = 283
 show_link = 757
-passport_adapter = 25725   # was 25535 (+190, Path A v3 adds pk_digest binding + pack_passport_profile)
+passport_adapter = 36223   # v3.1 (+10498): CSCA->DSC RSA chain + depth-8 Merkle inclusion + DSC revocation SMT
 openac_show = 1752         # was 1432 (+320, in-circuit ECDSA-P256 device binding for show phase)
 device_binding = 162
 sdjwt_adapter = 5807       # new baseline (first Pedersen v3 adapter measurement; no prior entry)
-# Path A v3 additions (2026-04-17)
-jwt_x5c_adapter = 384147   # NEW — 5.9x over 65,000 spec budget; see spec/x509-benchmark.md §7
+# Path A v3 additions (2026-04-17); jwt_x5c_adapter v3.1 optimisation 2026-04-17
+jwt_x5c_adapter = 20859    # v3.1 multi-issuer dispatch (+75 gates vs. 20784 single-issuer baseline)
 x509_show = 549            # NEW — within 5,000 spec budget
 composite_show = 684       # NEW — within 8,000 spec budget
 
@@ -53,15 +55,15 @@ data_integrity = 405646
 disclosure = 79661
 prepare_link = 58832
 show_link = 73746
-passport_adapter = 1056890
+passport_adapter = 1473390   # v3.1: CSCA chain + SMT added
 openac_show = 167332
 device_binding = 7351
 sdjwt_adapter = 217422
-# Path A v3 additions (2026-04-17)
-jwt_x5c_adapter = 8034760   # ~7.7 MB — dominated by RSA x2 + SMT depth 128
+# Path A v3 additions (2026-04-17); jwt_x5c_adapter v3.1 optimisation 2026-04-17
+jwt_x5c_adapter = 1312940   # v3.1 multi-issuer (+11575 bytes vs. single-issuer)
 x509_show = 102038
 composite_show = 117812
-total = 10975169
+total = 4669822
 
 # Bytes per gate (lower = more compact artifact representation)
 # Grade: A(≤10) B(≤30) C(≤60) D(≤100) F(>100)
@@ -71,10 +73,12 @@ data_integrity = 29
 disclosure = 163
 prepare_link = 207
 show_link = 97
-passport_adapter = 41
+passport_adapter = 41   # v3.1: 1473390/36223 = 40.7
 openac_show = 95
 device_binding = 45
 sdjwt_adapter = 37
-jwt_x5c_adapter = 20
+# v3.1: fewer gates -> artifact overhead dominates ratio; grade D acceptable
+# until further artifact trimming lands (e.g. strip debug symbols in release build).
+jwt_x5c_adapter = 63   # v3.1: 1312940/20859 = 62.9
 x509_show = 185
 composite_show = 172

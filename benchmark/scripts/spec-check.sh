@@ -41,7 +41,7 @@ check_pub_inputs() {
   fi
 }
 
-BIN_CIRCUITS=(passport_verifier data_integrity disclosure prepare_link show_link passport_adapter openac_show device_binding)
+BIN_CIRCUITS=(passport_verifier data_integrity disclosure prepare_link show_link passport_adapter openac_show device_binding sdjwt_adapter jwt_x5c_adapter x509_show composite_show)
 for circuit in "${BIN_CIRCUITS[@]}"; do
   check_pub_inputs "$circuit"
 done

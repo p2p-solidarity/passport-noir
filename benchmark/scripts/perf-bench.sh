@@ -16,7 +16,7 @@ TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 # Get nargo version
 NARGO_VERSION=$(nargo --version 2>/dev/null | head -1 || echo "unknown")
 
-ALL_CIRCUITS=(passport_verifier data_integrity disclosure prepare_link show_link passport_adapter openac_show device_binding)
+ALL_CIRCUITS=(passport_verifier data_integrity disclosure prepare_link show_link passport_adapter openac_show device_binding sdjwt_adapter jwt_x5c_adapter x509_show composite_show)
 LIB_CIRCUITS=(openac_core)
 
 echo "  Collecting metrics..."

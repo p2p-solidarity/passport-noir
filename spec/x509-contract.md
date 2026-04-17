@@ -165,7 +165,42 @@ Verifier（可以是 airmeishi 或 third-party verifier）必須：
 - **App 接受 staleness**：v1 不 enforce；v2 不超過 24 小時。
 - **Stale → fail-closed** + UI downgrade。
 
-### 5.3 VK Hash Pinning
+#### 5.2.1 SMT 結構（v3.1 定案 2026-04-17）
+
+- **Depth**：`SMT_DEPTH = 32`（`serial_number[0..4]` big-endian 作 key）
+- **Keyspace**：2^32 ≈ 4.3B unique serials，足夠 Google OIDC / university issuer
+- **Internal-node hash**：`pedersen_hash([DOMAIN_SMT_NODE, left, right])`
+  - `DOMAIN_SMT_NODE = 0x736d7431`（ASCII "smt1"）
+  - 在 bn254 / Grumpkin 上執行，非 SHA256
+- **Off-circuit tooling 要求**：任何計算 `smt_root` 的 CRL 工具（v1 snapshot builder / v2 aggregator）
+  必須使用與 circuit 相同的 Pedersen + domain 常數；否則 root mismatch、所有 proof 直接 reject
+- **Empty slot policy**：`smt_is_old0 = true` 代表 key 落在空 slot；
+  `smt_is_old0 = false` 時須附 (smt_old_key, smt_old_value) 作 range witness
+
+### 5.3 ICAO Master List snapshot（v3.1）
+
+- **Snapshot source**：`passport-noir` repo `assets/icao-masterlist-YYYY-MM.pem`（計畫中；v1 以合成 snapshot 搭配 Phase 4 demo 上線）。
+- **Merkle tree 結構**：`openac_core::merkle::verify_inclusion_depth_8`，depth 8（256 CSCA 容量）。
+- **Leaf / 節點 hash**：`DOMAIN_CSCA_LEAF` / `DOMAIN_CSCA_NODE` domain-separated pedersen_hash（見 `spec/x509-circuits.md §12`）。
+- **Builder 規範**：off-circuit tool 必須使用 Grumpkin Pedersen + 相同 domain constants；見 circuits.md §12。
+- **Rotation policy**：每 6 個月一次 (align with ICAO PKD 更新節奏)。env id 寫進 `trustAnchorSnapshotID` (envelope) — 新增 `icaoMasterlistSnapshotID` 命名 (同一欄位 serialised JSON)。
+- **Staleness**：snapshot 版本差距 ≤ 1 → warning；≥ 2 → reject（與 Mozilla Root 一致）。
+
+### 5.4 Multi-issuer format tags（v3.1）
+
+`jwt_x5c_adapter` 以 `issuer_format_tag: pub Field` 分派到固定偏移 claim extractor。
+
+| tag | 名稱 | 已 landed | Canonical layout (app 端 normalize 後) |
+|---|---|---|---|
+| 1 | GoogleOIDCv1 | ✅ | `{"email_domain":"..."}`（value 起於 offset 17）|
+| 2 | AppleIDv1 | ✅ | `{"apple_email":"..."}`（value 起於 offset 16）|
+| 3 | MicrosoftEntraV1 | ✅ | `{"upn_domain":"..."}`（value 起於 offset 15）|
+| 4+ | Reserved | — | 新增 issuer 走 v3.1 三步流程（見 `circuits/jwt_x5c_adapter/src/main.nr` 頂部註解）|
+
+App 層負責先 canonicalize 到 tag 對應的 layout，circuit 僅從 hardcoded offset 讀取。
+新增 issuer = 新增 (tag constant, offset constant, test fixture)，不動核心 dispatch 迴圈。
+
+### 5.5 VK Hash Pinning
 
 - 每個 `.vk` 檔在 release 時算 SHA256 並寫進 `manifest.json`。
 - App 的 Swift verifier 啟動時比對 bundle 內 vk hash 與遠端（optional signed metadata）是否一致。
