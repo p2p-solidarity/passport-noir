@@ -43,6 +43,15 @@ global DSC_TBS_LEN: u32 = 1536;
 global RSA_LIMB_COUNT: u32 = 18;
 global RSA_LIMB_BYTES: u32 = 16;
 global DSC_MODULUS_BYTES: u32 = RSA_LIMB_COUNT * RSA_LIMB_BYTES;
+
+// Canonical TBS offset for the 20-byte DSC serial number. The app layer
+// normalises the ICAO-signed DSC TBS into this layout (offset 352, right
+// after the 288-byte modulus + 33-byte meta envelope) before passing the
+// bytes to the circuit. Binding `dsc_serial` to these TBS bytes closes the
+// revocation-bypass gap where an attacker could hold a revoked DSC yet
+// supply a non-revoked serial to the SMT non-membership check.
+global DSC_SERIAL_OFFSET: u32 = 352;
+global DSC_SERIAL_LEN: u32 = 20;
 // CSCA -> DSC RSA signature uses RSA-2048 PKCS#1v1.5 with exponent 65537, per
 // ICAO 9303 conformance (same parameters as the DSC -> SOD signature).
 global CSCA_RSA_EXPONENT: u32 = 65537;
@@ -248,6 +257,17 @@ fn main(
     );
 
     // Step 3 (v3.1): DSC serial must NOT appear in the revocation SMT.
+    //
+    // Bind `dsc_serial` to the CSCA-signed TBS bytes before the non-membership
+    // check. Without this, the prover can hold a revoked DSC (serial X) yet
+    // pass a different non-revoked serial Y into `verify_non_membership` and
+    // smuggle a revoked credential past the CRL.
+    for i in 0..DSC_SERIAL_LEN {
+        assert(
+            dsc_serial[i] == dsc_tbs[DSC_SERIAL_OFFSET + i],
+            "dsc_serial must match the CSCA-signed TBS serial bytes",
+        );
+    }
     verify_non_membership(
         dsc_serial,
         smt_siblings,
@@ -608,11 +628,16 @@ fn dsc_modulus_bytes() -> [u8; DSC_MODULUS_BYTES] {
 
 fn build_dsc_tbs() -> [u8; DSC_TBS_LEN] {
     let modulus_bytes = dsc_modulus_bytes();
-    // Canonical TBS layout: 288 bytes of modulus then a marker tail for integrity.
+    // Canonical TBS layout:
+    //   [0..288)    : RSA-2048 modulus
+    //   [288..320)  : 32-byte meta envelope
+    //   [320]       : marker byte (54)
+    //   [352..372)  : 20-byte DSC serial (DSC_SERIAL_OFFSET..+LEN)
     let meta: [u8; 32] = [
         108, 101, 97, 102, 45, 99, 101, 114, 116, 58, 58, 115, 111, 108, 105, 100, 97, 114, 105,
         116, 121, 58, 58, 120, 53, 48, 57, 58, 58, 50, 48, 50,
     ];
+    let serial = dsc_serial();
     let mut out: [u8; DSC_TBS_LEN] = [0; DSC_TBS_LEN];
     for i in 0..DSC_MODULUS_BYTES {
         out[i] = modulus_bytes[i];
@@ -621,6 +646,9 @@ fn build_dsc_tbs() -> [u8; DSC_TBS_LEN] {
         out[DSC_MODULUS_BYTES + i] = meta[i];
     }
     out[DSC_MODULUS_BYTES + 32] = 54;
+    for i in 0..DSC_SERIAL_LEN {
+        out[DSC_SERIAL_OFFSET + i] = serial[i];
+    }
     out
 }
 
@@ -758,4 +786,37 @@ fn test_dsc_non_membership_fails_on_wrong_root() {
     let mut bad_root = dsc_smt_root_computed();
     bad_root += 1;
     verify_non_membership(dsc_serial(), dsc_smt_siblings(), 0, 0, true, bad_root);
+}
+
+#[test]
+fn test_dsc_serial_lives_at_canonical_tbs_offset() {
+    // Canonical layout contract: build_dsc_tbs() embeds the serial at offset
+    // DSC_SERIAL_OFFSET so main() can bind `dsc_serial` to the CSCA-signed
+    // TBS bytes. If this test ever drifts, the off-circuit TBS normaliser
+    // must be updated in lockstep.
+    let tbs = build_dsc_tbs();
+    let serial = dsc_serial();
+    for i in 0..DSC_SERIAL_LEN {
+        assert(tbs[DSC_SERIAL_OFFSET + i] == serial[i], "TBS fixture must embed dsc_serial at the canonical offset");
+    }
+}
+
+#[test(should_fail)]
+fn test_dsc_serial_binding_rejects_serial_not_in_tbs() {
+    // Core security property for issue #2: an attacker with a revoked DSC
+    // cannot pass a different (non-revoked) serial to the SMT check. The
+    // new binding assertion compares `dsc_serial` against the bytes at
+    // DSC_SERIAL_OFFSET of the CSCA-signed TBS and must reject any mismatch.
+    let tbs = build_dsc_tbs();
+    let mut forged_serial = dsc_serial();
+    forged_serial[0] ^= 0xFF; // prover lies about which serial they hold
+
+    // Reproduce the binding loop from main() so we can exercise it without
+    // a full RSA fixture. Matches the exact assertion text used in main().
+    for i in 0..DSC_SERIAL_LEN {
+        assert(
+            forged_serial[i] == tbs[DSC_SERIAL_OFFSET + i],
+            "dsc_serial must match the CSCA-signed TBS serial bytes",
+        );
+    }
 }
