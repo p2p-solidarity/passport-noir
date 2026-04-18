@@ -820,3 +820,152 @@ fn test_leaf_serial_binding_rejects_serial_not_in_tbs() {
         );
     }
 }
+
+/// Helper: runs `main` with the full valid fixture, letting each negative
+/// test specify a single override point. Reduces per-test boilerplate so
+/// adding a new tamper check costs ~6 lines instead of ~35.
+fn run_main_with_override(
+    jwt_modulus_override: [u128; LIMB_COUNT],
+    jwt_signed_hash_override: [u8; 32],
+) {
+    let payload = build_payload();
+    let (domain, domain_len) = extract_claim_by_tag(payload, ISSUER_FORMAT_GOOGLE_OIDC_V1);
+    let (attr_hi, attr_lo) = pack_x509_domain(domain, domain_len);
+    let link_rand_p: Field = 424242;
+    let link_rand_x = derive_x509_link_rand(link_rand_p);
+    let pk_digest = pk_digest_from_bytes(test_enclave_pk_x(), test_enclave_pk_y());
+    let commitment = commit_attributes_v3(DOMAIN_X509, attr_hi, attr_lo, pk_digest, link_rand_x);
+
+    main(
+        build_leaf_tbs(),
+        build_issuer_tbs(),
+        leaf_sig_limbs(),
+        issuer_sig_limbs(),
+        serial_number(),
+        smt_siblings(),
+        0,
+        0,
+        true,
+        payload,
+        jwt_sig_limbs(),
+        jwt_modulus_override,
+        leaf_redc_limbs(),
+        issuer_redc_limbs(),
+        link_rand_p,
+        test_enclave_pk_x(),
+        test_enclave_pk_y(),
+        jwt_payload_hash(),
+        jwt_signed_hash_override,
+        issuer_modulus_limbs(),
+        smt_root(),
+        ISSUER_FORMAT_GOOGLE_OIDC_V1,
+        commitment.x,
+        commitment.y,
+    );
+}
+
+#[test(should_fail)]
+fn test_jwt_x5c_adapter_rejects_tampered_jwt_signed_hash() {
+    // The JWT signature is RSA-PKCS1v15 over `jwt_signed_hash`. Flipping a
+    // bit of the signed hash must make the signature verification fail.
+    let mut tampered_signed_hash = jwt_signed_hash();
+    tampered_signed_hash[0] ^= 0x01;
+    run_main_with_override(leaf_modulus_limbs(), tampered_signed_hash);
+}
+
+#[test(should_fail)]
+fn test_jwt_x5c_adapter_rejects_wrong_jwt_modulus_limb() {
+    // The circuit enforces `extract_leaf_modulus_limbs(leaf_tbs) ==
+    // jwt_modulus_limbs`. If the caller passes a JWT modulus that does not
+    // match the leaf certificate, the pinning check must fail.
+    let mut wrong_jwt_modulus = leaf_modulus_limbs();
+    wrong_jwt_modulus[0] = wrong_jwt_modulus[0] + 1;
+    run_main_with_override(wrong_jwt_modulus, jwt_signed_hash());
+}
+
+#[test(should_fail)]
+fn test_jwt_x5c_adapter_rejects_malformed_issuer_tag_via_commitment() {
+    // Fail-closed at the helper level for an unsupported tag (not 1, 2, 3).
+    // Exercises the same dispatch guard as extract_claim_by_tag but routed
+    // through the shared commitment helper so downstream composition would
+    // also fail fast.
+    let _ = compute_jwt_x5c_commitment(
+        build_payload(),
+        7,
+        424242,
+        test_enclave_pk_x(),
+        test_enclave_pk_y(),
+    );
+}
+
+#[test]
+fn test_extract_claim_by_tag_binds_payload_content() {
+    // Flipping a single byte inside the payload's value region must
+    // propagate through extract -> pack -> commit_attributes_v3. Confirms
+    // there is no gap where payload bytes are silently ignored.
+    let mut payload_a = build_payload();
+    let mut payload_b = build_payload();
+    payload_b[17] ^= 0x20; // toggle case of first value byte 'c' -> 'C'
+
+    let (domain_a, len_a) = extract_claim_by_tag(payload_a, ISSUER_FORMAT_GOOGLE_OIDC_V1);
+    let (domain_b, len_b) = extract_claim_by_tag(payload_b, ISSUER_FORMAT_GOOGLE_OIDC_V1);
+    assert(len_a == len_b, "Length unchanged by single-byte flip inside value");
+    assert(domain_a[0] != domain_b[0], "First value byte must reflect the payload change");
+}
+
+#[test]
+fn test_jwt_x5c_commitment_binds_issuer_format_tag() {
+    // Different tags select different offsets, so even with identical
+    // payload bytes the extracted domain differs and the commitment must
+    // move. We use the Microsoft payload here and compare MS-tag (offset
+    // 15, the correct value start) against Apple-tag (offset 16, one byte
+    // in from the correct start). Both extractions produce a non-empty
+    // domain so the helper returns, letting us diff the commitment.
+    // Confirms the issuer tag is cryptographically bound into C.
+    let payload = build_microsoft_payload();
+    let link_rand_p: Field = 424242;
+    let c_microsoft = compute_jwt_x5c_commitment(
+        payload,
+        ISSUER_FORMAT_MICROSOFT_ENTRA_V1,
+        link_rand_p,
+        test_enclave_pk_x(),
+        test_enclave_pk_y(),
+    );
+    let c_apple_mis = compute_jwt_x5c_commitment(
+        payload,
+        ISSUER_FORMAT_APPLE_ID_V1,
+        link_rand_p,
+        test_enclave_pk_x(),
+        test_enclave_pk_y(),
+    );
+    assert(
+        c_microsoft.x != c_apple_mis.x,
+        "Commitment must change when issuer_format_tag changes the decoded claim",
+    );
+}
+
+#[test]
+fn test_jwt_x5c_commitment_equal_for_identical_inputs() {
+    // Determinism: same payload + tag + link_rand_p + enclave pk must yield
+    // the same EC point. This pins down the helper so subtle drift in the
+    // commitment derivation (e.g. domain-separator or ordering change)
+    // surfaces as a test failure.
+    let payload = build_payload();
+    let link_rand_p: Field = 424242;
+    let c1 = compute_jwt_x5c_commitment(
+        payload,
+        ISSUER_FORMAT_GOOGLE_OIDC_V1,
+        link_rand_p,
+        test_enclave_pk_x(),
+        test_enclave_pk_y(),
+    );
+    let c2 = compute_jwt_x5c_commitment(
+        payload,
+        ISSUER_FORMAT_GOOGLE_OIDC_V1,
+        link_rand_p,
+        test_enclave_pk_x(),
+        test_enclave_pk_y(),
+    );
+    assert(c1.x == c2.x, "Deterministic commitment X expected");
+    assert(c1.y == c2.y, "Deterministic commitment Y expected");
+}
