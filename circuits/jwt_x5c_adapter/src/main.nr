@@ -19,6 +19,15 @@ global LIMB_BYTES: u32 = 16;
 global LEAF_MODULUS_BYTES: u32 = LIMB_COUNT * LIMB_BYTES;
 global RSA_EXPONENT: u32 = 65537;
 
+// Canonical TBS offset for the 20-byte leaf serial number. The app layer
+// normalises the issuer-signed leaf TBS into this layout (offset 352, right
+// after the 288-byte modulus + 33-byte meta envelope) before passing the
+// bytes to the circuit. Binding `serial_number` to these TBS bytes closes
+// the revocation-bypass gap where an attacker could hold a revoked leaf
+// cert yet supply a different (non-revoked) serial to the SMT check.
+global LEAF_SERIAL_OFFSET: u32 = 352;
+global LEAF_SERIAL_LEN: u32 = 20;
+
 // Issuer format tags for the fixed-offset claim extractor (spec/x509-issues.md P0-G).
 // Each tag corresponds to an app-layer canonical payload layout; the app
 // normalises the raw JWT payload into this form before proving so the byte
@@ -158,6 +167,16 @@ fn main(
         assert(extracted_modulus[i] == jwt_modulus_limbs[i], "Leaf cert JWT modulus mismatch");
     }
 
+    // Bind `serial_number` to the issuer-signed leaf TBS bytes before the
+    // non-membership check. Without this, the prover can hold a revoked
+    // leaf cert (serial X) yet pass a different non-revoked serial Y into
+    // `verify_non_membership` and smuggle a revoked credential past the CRL.
+    for i in 0..LEAF_SERIAL_LEN {
+        assert(
+            serial_number[i] == leaf_tbs[LEAF_SERIAL_OFFSET + i],
+            "serial_number must match the issuer-signed leaf TBS serial bytes",
+        );
+    }
     verify_non_membership(
         serial_number,
         smt_siblings,
@@ -391,10 +410,16 @@ fn leaf_modulus_bytes() -> [u8; LEAF_MODULUS_BYTES] {
 
 fn build_leaf_tbs() -> [u8; CERT_TBS_LEN] {
     let modulus_bytes = leaf_modulus_bytes();
+    // Canonical TBS layout:
+    //   [0..288)    : RSA-2048 modulus
+    //   [288..320)  : 32-byte meta envelope
+    //   [320]       : marker byte (54)
+    //   [352..372)  : 20-byte leaf serial (LEAF_SERIAL_OFFSET..+LEN)
     let meta: [u8; 32] = [
         108, 101, 97, 102, 45, 99, 101, 114, 116, 58, 58, 115, 111, 108, 105, 100, 97, 114, 105,
         116, 121, 58, 58, 120, 53, 48, 57, 58, 58, 50, 48, 50,
     ];
+    let serial = serial_number();
 
     let mut out: [u8; CERT_TBS_LEN] = [0; CERT_TBS_LEN];
     for i in 0..LEAF_MODULUS_BYTES {
@@ -404,6 +429,9 @@ fn build_leaf_tbs() -> [u8; CERT_TBS_LEN] {
         out[LEAF_MODULUS_BYTES + i] = meta[i];
     }
     out[LEAF_MODULUS_BYTES + 32] = 54;
+    for i in 0..LEAF_SERIAL_LEN {
+        out[LEAF_SERIAL_OFFSET + i] = serial[i];
+    }
     out
 }
 
@@ -762,4 +790,33 @@ fn test_jwt_x5c_adapter_rejects_wrong_commitment() {
         commitment.x + 1,
         commitment.y,
     );
+}
+
+#[test]
+fn test_leaf_serial_lives_at_canonical_tbs_offset() {
+    // Layout contract: build_leaf_tbs() embeds the serial at LEAF_SERIAL_OFFSET
+    // so main() can bind `serial_number` to the issuer-signed TBS bytes.
+    // If the off-circuit TBS normaliser drifts, this test fires first.
+    let tbs = build_leaf_tbs();
+    let serial = serial_number();
+    for i in 0..LEAF_SERIAL_LEN {
+        assert(tbs[LEAF_SERIAL_OFFSET + i] == serial[i], "TBS fixture must embed serial at canonical offset");
+    }
+}
+
+#[test(should_fail)]
+fn test_leaf_serial_binding_rejects_serial_not_in_tbs() {
+    // Core security property for issue #2: prover with a revoked leaf cert
+    // cannot swap in a non-revoked serial for the SMT check. Reproduces
+    // the binding loop from main() so we can exercise it without a full
+    // RSA fixture.
+    let tbs = build_leaf_tbs();
+    let mut forged_serial = serial_number();
+    forged_serial[0] ^= 0xFF;
+    for i in 0..LEAF_SERIAL_LEN {
+        assert(
+            forged_serial[i] == tbs[LEAF_SERIAL_OFFSET + i],
+            "serial_number must match the issuer-signed leaf TBS serial bytes",
+        );
+    }
 }
