@@ -325,3 +325,86 @@ fn test_wrong_pk_sig() {
         digest,
     );
 }
+
+#[test(should_fail)]
+fn test_wrong_link_scope_breaks_link_tag() {
+    // Issue #5: scope is a public input bound into the link_tag. Tampering
+    // the public scope while keeping the original link_tag must be rejected,
+    // proving scope is enforced by the circuit (not advisory).
+    let attr_hi: Field = 1;
+    let attr_lo: Field = 2;
+    let link_rand_x: Field = 3;
+    let scope: Field = 4;
+    let epoch: Field = 5;
+
+    let pk_digest = verify_device_binding(
+        test_pub_key_x(),
+        test_pub_key_y(),
+        test_signature(),
+        test_message_hash(),
+    );
+    let c = commit_attributes_v3(DOMAIN_X509, attr_hi, attr_lo, pk_digest, link_rand_x);
+    let target = decode_domain(attr_hi, attr_lo);
+    let (nonce_hi, nonce_lo) = hash_to_fields(test_message_hash());
+    let tag = pedersen_hash([link_rand_x, scope, epoch]);
+    let digest = pedersen_hash([nonce_hi, nonce_lo, link_rand_x]);
+
+    main(
+        c.x,
+        c.y,
+        test_message_hash(),
+        target,
+        scope + 1, // TAMPERED scope without recomputing tag
+        epoch,
+        attr_hi,
+        attr_lo,
+        link_rand_x,
+        test_pub_key_x(),
+        test_pub_key_y(),
+        test_signature(),
+        tag,
+        1,
+        digest,
+    );
+}
+
+#[test(should_fail)]
+fn test_wrong_epoch_breaks_link_tag() {
+    // Issue #5 companion: epoch is public and also bound into the link_tag.
+    // Bumping epoch without recomputing the tag must fail.
+    let attr_hi: Field = 1;
+    let attr_lo: Field = 2;
+    let link_rand_x: Field = 3;
+    let scope: Field = 4;
+    let epoch: Field = 5;
+
+    let pk_digest = verify_device_binding(
+        test_pub_key_x(),
+        test_pub_key_y(),
+        test_signature(),
+        test_message_hash(),
+    );
+    let c = commit_attributes_v3(DOMAIN_X509, attr_hi, attr_lo, pk_digest, link_rand_x);
+    let target = decode_domain(attr_hi, attr_lo);
+    let (nonce_hi, nonce_lo) = hash_to_fields(test_message_hash());
+    let tag = pedersen_hash([link_rand_x, scope, epoch]);
+    let digest = pedersen_hash([nonce_hi, nonce_lo, link_rand_x]);
+
+    main(
+        c.x,
+        c.y,
+        test_message_hash(),
+        target,
+        scope,
+        epoch + 42, // TAMPERED epoch without recomputing tag
+        attr_hi,
+        attr_lo,
+        link_rand_x,
+        test_pub_key_x(),
+        test_pub_key_y(),
+        test_signature(),
+        tag,
+        1,
+        digest,
+    );
+}
