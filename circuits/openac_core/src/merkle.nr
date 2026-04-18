@@ -39,6 +39,12 @@ pub fn verify_inclusion_depth_8(
     siblings: [Field; CSCA_MERKLE_DEPTH],
     expected_root: Field,
 ) {
+    // Without this check, any high bits of `path_index` beyond depth-8 are
+    // silently ignored, so distinct u32 values can verify against the same
+    // root -- callers outside the circuit might then pass a 9th-bit-set
+    // index that looks distinct but is actually an aliased leaf position.
+    assert(path_index < 256, "path_index must fit in depth-8 tree (<256)");
+
     let mut node = leaf_hash;
 
     for depth in 0..CSCA_MERKLE_DEPTH {
@@ -114,4 +120,19 @@ fn test_csca_inclusion_rejects_tampered_leaf() {
     limbs[0] ^= 1;
     let tampered_leaf = compute_csca_leaf(limbs);
     verify_inclusion_depth_8(tampered_leaf, 0, test_siblings(), test_root_for_index(0));
+}
+
+#[test(should_fail)]
+fn test_csca_inclusion_rejects_out_of_range_path_index() {
+    // path_index >= 256 must be rejected; depth-8 tree only has indices 0..255.
+    let leaf = compute_csca_leaf(test_modulus_limbs());
+    verify_inclusion_depth_8(leaf, 256, test_siblings(), test_root_for_index(0));
+}
+
+#[test(should_fail)]
+fn test_csca_inclusion_rejects_high_bit_aliased_index() {
+    // Flip bit 8 (256) only; if range check is missing this would alias to index 0
+    // and verify against the same root, silently accepting a forged position.
+    let leaf = compute_csca_leaf(test_modulus_limbs());
+    verify_inclusion_depth_8(leaf, 0x100, test_siblings(), test_root_for_index(0));
 }
