@@ -4,6 +4,7 @@ use std::embedded_curve_ops::EmbeddedCurvePoint;
 
 use openac_core::commit::{assert_commitment_eq, commit_attributes_v3, DOMAIN_SDJWT, hash_to_fields};
 use openac_core::device::pk_digest_from_bytes;
+use openac_core::profile::derive_sdjwt_link_rand;
 
 // OpenAC SD-JWT Adapter (Prepare Phase, v1 -- Path A)
 //
@@ -28,6 +29,22 @@ use openac_core::device::pk_digest_from_bytes;
 //     Fields. No separate `commit_attributes_v3_extended` helper is
 //     introduced -- the extras are captured in `sd_root` as the spec
 //     directs (hi/lo packing of the combined _sd hash).
+//   * Link randomness derivation now matches the shared rule: callers pass
+//     `link_rand_p` (the root randomness shared across credentials from the
+//     same device); the circuit derives
+//     `link_rand_s = pedersen_hash([link_rand_p, SALT_SDJWT])` via
+//     openac_core::profile::derive_sdjwt_link_rand. This keeps sdjwt_adapter
+//     and composite_show on the same derivation rule so the two circuits
+//     produce matching commitments for the same (pk_digest, sd_root).
+//
+// Known spec gaps (tracked but not closed in v1):
+//   * jwt_payload_raw / jwt_payload_b64h SHA256 binding -- caller passes a
+//     precomputed `jwt_payload_hash` rather than the raw payload bytes. The
+//     adapter trusts this hash; a future version should fold SHA256 over
+//     the base64url-decoded payload in-circuit (spec sec 5).
+//   * `_sd` array model + disclosure_indices -- the current impl binds a
+//     combined hash over MAX_DISCLOSURES fixed slots rather than a
+//     positioned `_sd` array with explicit indices.
 //
 // SD-JWT structure:
 //   - Header.Payload.Signature (JWS Compact)
@@ -122,7 +139,9 @@ fn main(
     claim_lengths: [u32; MAX_DISCLOSURES],
     expected_disclosure_hashes: [[u8; 32]; MAX_DISCLOSURES],
     // === OpenAC commitment inputs ===
-    link_rand: Field,
+    // `link_rand_p` is the root randomness shared across credentials from the
+    // same device; the SD-JWT-specific randomness is derived internally.
+    link_rand_p: Field,
     // === Path A device-binding witnesses (enclave pk is private) ===
     enclave_pk_x: [u8; 32],
     enclave_pk_y: [u8; 32],
@@ -147,8 +166,12 @@ fn main(
     // over a nonce happens here -- the show circuit performs that check).
     let pk_digest = pk_digest_from_bytes(enclave_pk_x, enclave_pk_y);
 
-    // Step 4: Compute v3 Pedersen commitment.
-    let commitment = compute_sdjwt_commitment(combined_hash, pk_digest, link_rand);
+    // Step 4: Derive the SD-JWT link randomness from the root via the shared
+    //    helper so composite_show and sdjwt_adapter stay on one rule.
+    let link_rand_s = derive_sdjwt_link_rand(link_rand_p);
+
+    // Step 5: Compute v3 Pedersen commitment.
+    let commitment = compute_sdjwt_commitment(combined_hash, pk_digest, link_rand_s);
     assert_commitment_eq(commitment, out_commitment_x, out_commitment_y);
 }
 
@@ -371,4 +394,136 @@ fn test_invalid_signature_fails() {
         0,
         0,
     );
+}
+
+#[test(should_fail)]
+fn test_wrong_claim_length_in_hash_preimage() {
+    // The expected_disclosure_hashes[i] is computed with the TRUE claim
+    // length; if the prover supplies a different `claim_lengths[i]` the
+    // preimage changes and the SHA256 check must fail.
+    let (salt, claim, real_len, hash) = build_disclosure_fixture(0x10, 0x20, 32);
+
+    let mut salts: [[u8; SALT_SIZE]; MAX_DISCLOSURES] = [[0; SALT_SIZE]; MAX_DISCLOSURES];
+    let mut claims: [[u8; MAX_CLAIM_SIZE]; MAX_DISCLOSURES] =
+        [[0; MAX_CLAIM_SIZE]; MAX_DISCLOSURES];
+    let mut lengths: [u32; MAX_DISCLOSURES] = [0; MAX_DISCLOSURES];
+    let mut hashes: [[u8; 32]; MAX_DISCLOSURES] = [[0; 32]; MAX_DISCLOSURES];
+
+    salts[0] = salt;
+    claims[0] = claim;
+    // Lie about length -- use 31 bytes where the hash was built with 32.
+    lengths[0] = real_len - 1;
+    hashes[0] = hash;
+
+    let _ = verify_disclosure_hashes(1, salts, claims, lengths, hashes);
+}
+
+#[test(should_fail)]
+fn test_missing_disclosure_in_hash_set() {
+    // Two real disclosures are computed, but the prover zeroes out the
+    // second expected_disclosure_hashes entry while still claiming
+    // disclosure_count = 2. verify_disclosure_hashes must reject.
+    let (salt1, claim1, len1, hash1) = build_disclosure_fixture(0x10, 0x20, 16);
+    let (salt2, claim2, len2, _hash2) = build_disclosure_fixture(0x30, 0x40, 48);
+
+    let mut salts: [[u8; SALT_SIZE]; MAX_DISCLOSURES] = [[0; SALT_SIZE]; MAX_DISCLOSURES];
+    let mut claims: [[u8; MAX_CLAIM_SIZE]; MAX_DISCLOSURES] =
+        [[0; MAX_CLAIM_SIZE]; MAX_DISCLOSURES];
+    let mut lengths: [u32; MAX_DISCLOSURES] = [0; MAX_DISCLOSURES];
+    let mut hashes: [[u8; 32]; MAX_DISCLOSURES] = [[0; 32]; MAX_DISCLOSURES];
+
+    salts[0] = salt1;
+    salts[1] = salt2;
+    claims[0] = claim1;
+    claims[1] = claim2;
+    lengths[0] = len1;
+    lengths[1] = len2;
+    hashes[0] = hash1;
+    // Second expected hash is missing (all zeros) -- must mismatch.
+    hashes[1] = [0; 32];
+
+    let _ = verify_disclosure_hashes(2, salts, claims, lengths, hashes);
+}
+
+#[test(should_fail)]
+fn test_disclosure_count_exceeds_max_rejected() {
+    // `disclosure_count` must be bounded by MAX_DISCLOSURES. The assert
+    // inside verify_disclosure_hashes fails fast when the count overflows.
+    let salts: [[u8; SALT_SIZE]; MAX_DISCLOSURES] = [[0; SALT_SIZE]; MAX_DISCLOSURES];
+    let claims: [[u8; MAX_CLAIM_SIZE]; MAX_DISCLOSURES] = [[0; MAX_CLAIM_SIZE]; MAX_DISCLOSURES];
+    let lengths: [u32; MAX_DISCLOSURES] = [0; MAX_DISCLOSURES];
+    let hashes: [[u8; 32]; MAX_DISCLOSURES] = [[0; 32]; MAX_DISCLOSURES];
+
+    let _ = verify_disclosure_hashes((MAX_DISCLOSURES as u8) + 1, salts, claims, lengths, hashes);
+}
+
+#[test]
+fn test_three_disclosures_integration() {
+    // Three real disclosures: verify hashes, then bind the combined hash
+    // into a v3 SD-JWT commitment. Exercises MAX_DISCLOSURES > 2 accounting
+    // (combined_preimage indexing, padding of unused slots).
+    let (salt1, claim1, len1, hash1) = build_disclosure_fixture(0x10, 0x20, 16);
+    let (salt2, claim2, len2, hash2) = build_disclosure_fixture(0x30, 0x40, 48);
+    let (salt3, claim3, len3, hash3) = build_disclosure_fixture(0x50, 0x60, 24);
+
+    let mut salts: [[u8; SALT_SIZE]; MAX_DISCLOSURES] = [[0; SALT_SIZE]; MAX_DISCLOSURES];
+    let mut claims: [[u8; MAX_CLAIM_SIZE]; MAX_DISCLOSURES] =
+        [[0; MAX_CLAIM_SIZE]; MAX_DISCLOSURES];
+    let mut lengths: [u32; MAX_DISCLOSURES] = [0; MAX_DISCLOSURES];
+    let mut hashes: [[u8; 32]; MAX_DISCLOSURES] = [[0; 32]; MAX_DISCLOSURES];
+
+    salts[0] = salt1;
+    salts[1] = salt2;
+    salts[2] = salt3;
+    claims[0] = claim1;
+    claims[1] = claim2;
+    claims[2] = claim3;
+    lengths[0] = len1;
+    lengths[1] = len2;
+    lengths[2] = len3;
+    hashes[0] = hash1;
+    hashes[1] = hash2;
+    hashes[2] = hash3;
+
+    let combined = verify_disclosure_hashes(3, salts, claims, lengths, hashes);
+    let pk_digest = pk_digest_from_bytes(test_enclave_pk_x(), test_enclave_pk_y());
+    let c = compute_sdjwt_commitment(combined, pk_digest, 1234);
+    assert(c.x != 0, "Three-disclosure commitment X should be non-zero");
+    assert(c.y != 0, "Three-disclosure commitment Y should be non-zero");
+}
+
+#[test]
+fn test_sdjwt_commitment_changes_with_combined_hash() {
+    // Different sd_root (combined disclosure hash) -> different commitment.
+    // Ensures the commitment cryptographically binds the disclosure set.
+    let mut hash_a: [u8; 32] = [0; 32];
+    let mut hash_b: [u8; 32] = [0; 32];
+    for i in 0..32 {
+        hash_a[i] = (i as u8) + 0x50;
+        hash_b[i] = (i as u8) + 0x50;
+    }
+    hash_b[0] ^= 0x01;
+    let pk_digest = pk_digest_from_bytes(test_enclave_pk_x(), test_enclave_pk_y());
+    let c_a = compute_sdjwt_commitment(hash_a, pk_digest, 42);
+    let c_b = compute_sdjwt_commitment(hash_b, pk_digest, 42);
+    assert(c_a.x != c_b.x, "Different combined hash must yield a different commitment");
+}
+
+#[test]
+fn test_sdjwt_commitment_domain_separation() {
+    // Path A: SD-JWT commitments must be domain-separated from X.509 /
+    // passport commitments. Verify compute_sdjwt_commitment is DISTINCT
+    // from the same inputs run through a different commitment domain by
+    // reopening the SD-JWT point via commit_attributes_v3(DOMAIN_SDJWT ...)
+    // -- these must match. If they don't, the DOMAIN_SDJWT constant drifted.
+    let mut hash: [u8; 32] = [0; 32];
+    for i in 0..32 {
+        hash[i] = (i as u8) + 0x11;
+    }
+    let (attr_hi, attr_lo) = hash_to_fields(hash);
+    let pk_digest = pk_digest_from_bytes(test_enclave_pk_x(), test_enclave_pk_y());
+    let via_helper = compute_sdjwt_commitment(hash, pk_digest, 7);
+    let via_direct = commit_attributes_v3(DOMAIN_SDJWT, attr_hi, attr_lo, pk_digest, 7);
+    assert(via_helper.x == via_direct.x, "SD-JWT domain separator must match DOMAIN_SDJWT");
+    assert(via_helper.y == via_direct.y, "SD-JWT domain separator must match DOMAIN_SDJWT");
 }

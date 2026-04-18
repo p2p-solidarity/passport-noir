@@ -2,6 +2,7 @@ use std::hash::pedersen_hash;
 
 use openac_core::commit::{assert_commitment_eq, commit_attributes_v3, DOMAIN_X509, hash_to_fields};
 use openac_core::device::verify_device_binding;
+use openac_core::predicate::decode_domain;
 
 // X.509-only OpenAC Show Circuit (Path A, v1)
 //
@@ -27,19 +28,14 @@ use openac_core::device::verify_device_binding;
 //   * nonce_hash is [u8; 32]; we compress it to two Fields via hash_to_fields
 //     before feeding it into pedersen_hash (Field cannot fit 256 bits).
 
-fn decode_domain(attr_hi: Field, attr_lo: Field) -> Field {
-    // Pedersen digest over the packed attributes. The verifier must apply the
-    // identical transform to its canonical target domain before passing the
-    // value in as `target_domain_hash`.
-    pedersen_hash([attr_hi, attr_lo])
-}
-
 fn main(
     // === PUBLIC ===
     in_commitment_x509_x: pub Field,
     in_commitment_x509_y: pub Field,
     nonce_hash: pub [u8; 32],
     target_domain_hash: pub Field,
+    link_scope: pub Field,
+    epoch: pub Field,
     // === PRIVATE ===
     attr_hi: Field,
     attr_lo: Field,
@@ -47,8 +43,6 @@ fn main(
     enclave_pk_x: [u8; 32],
     enclave_pk_y: [u8; 32],
     signature: [u8; 64],
-    scope: Field,
-    epoch: Field,
     // === PUBLIC OUTPUTS ===
     out_link_tag: pub Field,
     out_domain_match: pub Field,
@@ -78,7 +72,9 @@ fn main(
 
     // 4. Scoped link tag. Uses link_rand_x (this credential's randomness);
     //    verifier observes only `tag` and cannot unpeel to link_rand_x.
-    let expected_link_tag = pedersen_hash([link_rand_x, scope, epoch]);
+    //    Spec sec 6: (link_scope, epoch) are public so the verifier can bind
+    //    the tag to a known session context.
+    let expected_link_tag = pedersen_hash([link_rand_x, link_scope, epoch]);
     assert(out_link_tag == expected_link_tag, "Link tag mismatch");
 
     // 5. Challenge digest binds the verifier's nonce to this presentation.
@@ -153,14 +149,14 @@ fn test_valid_show() {
         c.y,
         test_message_hash(),
         target_domain_hash,
+        scope,
+        epoch,
         attr_hi,
         attr_lo,
         link_rand_x,
         test_pub_key_x(),
         test_pub_key_y(),
         test_signature(),
-        scope,
-        epoch,
         link_tag,
         1,
         challenge_digest,
@@ -193,14 +189,14 @@ fn test_domain_match_true() {
         c.y,
         test_message_hash(),
         target,
+        scope,
+        epoch,
         attr_hi,
         attr_lo,
         link_rand_x,
         test_pub_key_x(),
         test_pub_key_y(),
         test_signature(),
-        scope,
-        epoch,
         tag,
         1,
         digest,
@@ -233,14 +229,14 @@ fn test_domain_match_false() {
         c.y,
         test_message_hash(),
         wrong_target,
+        scope,
+        epoch,
         attr_hi,
         attr_lo,
         link_rand_x,
         test_pub_key_x(),
         test_pub_key_y(),
         test_signature(),
-        scope,
-        epoch,
         tag,
         0,
         digest,
@@ -273,14 +269,14 @@ fn test_wrong_commitment() {
         c.y,
         test_message_hash(),
         target,
+        scope,
+        epoch,
         attr_hi,
         attr_lo,
         link_rand_x,
         test_pub_key_x(),
         test_pub_key_y(),
         test_signature(),
-        scope,
-        epoch,
         tag,
         1,
         digest,
@@ -316,14 +312,14 @@ fn test_wrong_pk_sig() {
         c.y,
         test_message_hash(),
         target,
+        scope,
+        epoch,
         attr_hi,
         attr_lo,
         link_rand_x,
         test_pub_key_x(),
         test_pub_key_y(),
         bad_sig,
-        scope,
-        epoch,
         tag,
         1,
         digest,

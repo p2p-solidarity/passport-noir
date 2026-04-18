@@ -436,7 +436,7 @@ public_input_types = ["[u8; 32]", "[u8; 32]", "Field", "Field"]
 private_inputs = [
   "jwt_payload_hash", "signature",
   "disclosure_count", "disclosure_salts", "claim_values", "claim_lengths", "expected_disclosure_hashes",
-  "link_rand",
+  "link_rand_p",
   "enclave_pk_x", "enclave_pk_y",
 ]
 private_input_types = [
@@ -521,7 +521,7 @@ assertions = [
   "Leaf cert JWT modulus mismatch",
   "Revocation witness matches blocked serial",
   "Revocation SMT root mismatch",
-  "Unsupported issuer_format_tag (v1 only accepts GoogleOIDCv1 = 1)",
+  "Unsupported issuer_format_tag (accepted: 1=GoogleOIDCv1, 2=AppleIDv1, 3=MicrosoftEntraV1)",
   "Normalized JWT domain missing value",
   "JWT payload hash mismatch",
   "JWT signature verification failed",
@@ -557,24 +557,24 @@ public_inputs = [
   "in_commitment_x509_x", "in_commitment_x509_y",
   "nonce_hash",
   "target_domain_hash",
+  "link_scope", "epoch",
   "out_link_tag", "out_domain_match", "out_challenge_digest",
 ]
 public_input_types = [
   "Field", "Field",
   "[u8; 32]",
   "Field",
+  "Field", "Field",
   "Field", "Field", "Field",
 ]
 
 private_inputs = [
   "attr_hi", "attr_lo", "link_rand_x",
   "enclave_pk_x", "enclave_pk_y", "signature",
-  "scope", "epoch",
 ]
 private_input_types = [
   "Field", "Field", "Field",
   "[u8; 32]", "[u8; 32]", "[u8; 64]",
-  "Field", "Field",
 ]
 
 assertions = [
@@ -607,49 +607,54 @@ gate_budget = 8000
 
 public_inputs = [
   "in_commitment_passport_x", "in_commitment_passport_y",
-  "in_commitment_x509_x", "in_commitment_x509_y",
+  "in_commitment_aux_x", "in_commitment_aux_y",
+  "aux_domain",
   "nonce_hash",
   "age_threshold",
-  "target_domain_hash",
-  "out_link_tag", "out_is_older", "out_domain_match", "out_challenge_digest",
+  "current_year", "current_month", "current_day",
+  "target_aux_hash",
+  "link_scope", "epoch",
+  "out_link_tag", "out_is_older", "out_aux_predicate", "out_challenge_digest",
 ]
 public_input_types = [
   "Field", "Field",
   "Field", "Field",
+  "Field",
   "[u8; 32]",
   "Field",
+  "Field", "Field", "Field",
   "Field",
+  "Field", "Field",
   "Field", "Field", "Field", "Field",
 ]
 
 private_inputs = [
   "p_attr_hi", "p_attr_lo", "link_rand_p",
-  "x_attr_hi", "x_attr_lo",
+  "a_attr_hi", "a_attr_lo",
   "enclave_pk_x", "enclave_pk_y", "signature",
-  "scope", "epoch",
 ]
 private_input_types = [
   "Field", "Field", "Field",
   "Field", "Field",
   "[u8; 32]", "[u8; 32]", "[u8; 64]",
-  "Field", "Field",
 ]
 
 assertions = [
+  "aux_domain must be DOMAIN_X509 or DOMAIN_SDJWT",
   "Commitment X mismatch",
   "Commitment Y mismatch",
   "Age predicate mismatch",
   "out_is_older must be boolean (0 or 1)",
-  "Domain match predicate mismatch",
-  "out_domain_match must be boolean (0 or 1)",
+  "Aux predicate mismatch",
+  "out_aux_predicate must be boolean (0 or 1)",
   "Link tag mismatch",
   "Challenge digest mismatch",
 ]
 
-min_positive_tests = 1
-min_negative_tests = 3
+min_positive_tests = 2
+min_negative_tests = 8
 
-imports = { in_commitment_passport_x = "passport_adapter", in_commitment_passport_y = "passport_adapter", in_commitment_x509_x = "jwt_x5c_adapter", in_commitment_x509_y = "jwt_x5c_adapter" }
+imports = { in_commitment_passport_x = "passport_adapter", in_commitment_passport_y = "passport_adapter", in_commitment_aux_x = "jwt_x5c_adapter", in_commitment_aux_y = "jwt_x5c_adapter" }
 
 [circuits.composite_show.dependencies]
 openac_core = "path"
@@ -756,6 +761,18 @@ type = "Field"
 [[cross_circuit.v3_commitment_chain.links]]
 from = "sdjwt_adapter"
 to = "openac_show"
+via = "out_commitment_y"
+type = "Field"
+
+[[cross_circuit.v3_commitment_chain.links]]
+from = "sdjwt_adapter"
+to = "composite_show"
+via = "out_commitment_x"
+type = "Field"
+
+[[cross_circuit.v3_commitment_chain.links]]
+from = "sdjwt_adapter"
+to = "composite_show"
 via = "out_commitment_y"
 type = "Field"
 

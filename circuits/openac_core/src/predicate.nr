@@ -3,6 +3,10 @@
 //
 // These predicates work for ALL credential types (passport MRZ, SD-JWT claims, mDL attributes).
 
+use std::hash::pedersen_hash;
+
+use crate::profile::unpack_passport_profile;
+
 /// Check if age is above a threshold given a birth date and current date.
 /// Handles century rollover for 2-digit year formats (e.g., MRZ uses YY format).
 ///
@@ -71,6 +75,56 @@ fn zero_terminated_len_64(value: [u8; 64]) -> u32 {
     }
 
     len
+}
+
+/// Decode a packed attribute pair into a single Field via domain-free
+/// pedersen_hash. Shared by x509_show and composite_show so that verifier-side
+/// `target_*_hash` commitments use one canonical transform across Path A
+/// circuits. Spec: x509-circuits.md sec 6, 7, 10.
+pub fn decode_domain(attr_hi: Field, attr_lo: Field) -> Field {
+    pedersen_hash([attr_hi, attr_lo])
+}
+
+/// Evaluate "packed passport attrs encode a birth date at least `threshold`
+/// years before (current_year, current_month, current_day)". Returns Field 0/1
+/// so the result can be published directly as `out_is_older`. Spec: x509-
+/// circuits.md sec 7 (`age_from_attr`).
+pub fn age_from_attr(
+    attr_hi: Field,
+    attr_lo: Field,
+    current_year: u32,
+    current_month: u32,
+    current_day: u32,
+    threshold: u32,
+) -> Field {
+    let (birth_year, birth_month, birth_day, _nationality) =
+        unpack_passport_profile(attr_hi, attr_lo);
+    if check_age_above(
+        birth_year,
+        birth_month,
+        birth_day,
+        current_year,
+        current_month,
+        current_day,
+        threshold,
+    ) {
+        1
+    } else {
+        0
+    }
+}
+
+/// Evaluate "opened aux attrs pedersen-hash to the verifier-supplied target".
+/// Used uniformly by composite_show for both X.509 domain-match and SD-JWT
+/// sd_root equality checks -- the spec overloads `target_domain_hash` as
+/// "expected opened attr hash" regardless of credential type (x509-circuits.md
+/// sec 7). Returns Field 0/1 for direct output publication.
+pub fn sdjwt_predicate_check(attr_hi: Field, attr_lo: Field, target_hash: Field) -> Field {
+    if decode_domain(attr_hi, attr_lo) == target_hash {
+        1
+    } else {
+        0
+    }
 }
 
 pub fn domain_suffix_match(actual: [u8; 31], expected_suffix: [u8; 64]) -> bool {
@@ -226,4 +280,57 @@ fn test_domain_suffix_match_rejects_mismatch() {
     expected[8] = 111;
     expected[9] = 109;
     assert(!domain_suffix_match(actual, expected), "Mismatched domain suffix should fail");
+}
+
+#[test]
+fn test_decode_domain_deterministic() {
+    let a = decode_domain(123, 456);
+    let b = decode_domain(123, 456);
+    assert(a == b, "decode_domain must be deterministic for identical inputs");
+}
+
+#[test]
+fn test_decode_domain_differs_on_input() {
+    let a = decode_domain(123, 456);
+    let b = decode_domain(123, 457);
+    assert(a != b, "decode_domain must differentiate distinct attr_lo values");
+}
+
+#[test]
+fn test_age_from_attr_pass() {
+    let sod_hash: [u8; 32] = [0xAA; 32];
+    let dg1_hash: [u8; 32] = [0xBB; 32];
+    let (attr_hi, attr_lo) =
+        crate::profile::pack_passport_profile(sod_hash, dg1_hash, 2000, 1, 1, [84, 87, 78]);
+    let out = age_from_attr(attr_hi, attr_lo, 2026, 4, 1, 18);
+    assert(out == 1, "Age 26 should satisfy threshold 18");
+}
+
+#[test]
+fn test_age_from_attr_fail() {
+    let sod_hash: [u8; 32] = [0xAA; 32];
+    let dg1_hash: [u8; 32] = [0xBB; 32];
+    let (attr_hi, attr_lo) =
+        crate::profile::pack_passport_profile(sod_hash, dg1_hash, 2010, 1, 1, [84, 87, 78]);
+    let out = age_from_attr(attr_hi, attr_lo, 2026, 4, 1, 18);
+    assert(out == 0, "Age 16 should not satisfy threshold 18");
+}
+
+#[test]
+fn test_sdjwt_predicate_check_match() {
+    let attr_hi: Field = 0xABCDEF;
+    let attr_lo: Field = 0x123456;
+    let target = decode_domain(attr_hi, attr_lo);
+    assert(sdjwt_predicate_check(attr_hi, attr_lo, target) == 1, "Matching hash should return 1");
+}
+
+#[test]
+fn test_sdjwt_predicate_check_mismatch() {
+    let attr_hi: Field = 0xABCDEF;
+    let attr_lo: Field = 0x123456;
+    let wrong_target: Field = 0xDEADBEEF;
+    assert(
+        sdjwt_predicate_check(attr_hi, attr_lo, wrong_target) == 0,
+        "Non-matching hash should return 0",
+    );
 }

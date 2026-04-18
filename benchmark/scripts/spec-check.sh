@@ -122,6 +122,49 @@ check_assertions "openac_show" \
 check_assertions "device_binding" \
   "Device binding ECDSA P-256 verification failed"
 
+# sdjwt_adapter (Path A v3)
+check_assertions "sdjwt_adapter" \
+  "SD-JWT ES256 signature verification failed" \
+  "Too many disclosures" \
+  "Claim length exceeds maximum" \
+  "SD-JWT disclosure hash mismatch" \
+  "Commitment X mismatch" \
+  "Commitment Y mismatch"
+
+# jwt_x5c_adapter (Path A v3.1 — RS256 variant)
+check_assertions "jwt_x5c_adapter" \
+  "Leaf certificate signature verification failed" \
+  "Issuer certificate signature verification failed" \
+  "Leaf cert JWT modulus mismatch" \
+  "Revocation witness matches blocked serial" \
+  "Revocation SMT root mismatch" \
+  "Unsupported issuer_format_tag (accepted: 1=GoogleOIDCv1, 2=AppleIDv1, 3=MicrosoftEntraV1)" \
+  "JWT payload hash mismatch" \
+  "JWT signature verification failed" \
+  "Commitment X mismatch" \
+  "Commitment Y mismatch"
+
+# x509_show (Path A v3)
+check_assertions "x509_show" \
+  "Commitment X mismatch" \
+  "Commitment Y mismatch" \
+  "Domain match predicate mismatch" \
+  "Domain match must be boolean (0 or 1)" \
+  "Link tag mismatch" \
+  "Challenge digest mismatch"
+
+# composite_show (Path A v3 — generalized passport + aux credential)
+check_assertions "composite_show" \
+  "aux_domain must be DOMAIN_X509 or DOMAIN_SDJWT" \
+  "Commitment X mismatch" \
+  "Commitment Y mismatch" \
+  "Age predicate mismatch" \
+  "out_is_older must be boolean (0 or 1)" \
+  "Aux predicate mismatch" \
+  "out_aux_predicate must be boolean (0 or 1)" \
+  "Link tag mismatch" \
+  "Challenge digest mismatch"
+
 echo ""
 echo "=== 3c. Domain Separator Verification ==="
 
@@ -154,8 +197,18 @@ check_domain "v2/scope" "openac.scope.v2" "$CIRCUIT_DIR/openac_core/src/show.nr"
 
 # v2 domain constants
 check_domain "v2/DOMAIN_PASSPORT" "DOMAIN_PASSPORT" "$CIRCUIT_DIR/openac_core/src/commit.nr"
+check_domain "v2/DOMAIN_X509" "DOMAIN_X509" "$CIRCUIT_DIR/openac_core/src/commit.nr"
 check_domain "v2/DOMAIN_SDJWT" "DOMAIN_SDJWT" "$CIRCUIT_DIR/openac_core/src/commit.nr"
 check_domain "v2/DOMAIN_MDL" "DOMAIN_MDL" "$CIRCUIT_DIR/openac_core/src/commit.nr"
+
+# Path A SALT constants for link-rand derivation
+check_domain "v3/SALT_X509" "SALT_X509" "$CIRCUIT_DIR/openac_core/src/profile.nr"
+check_domain "v3/SALT_SDJWT" "SALT_SDJWT" "$CIRCUIT_DIR/openac_core/src/profile.nr"
+
+# Path A predicate helpers (spec sec 10)
+check_domain "v3/age_from_attr" "pub fn age_from_attr" "$CIRCUIT_DIR/openac_core/src/predicate.nr"
+check_domain "v3/decode_domain" "pub fn decode_domain" "$CIRCUIT_DIR/openac_core/src/predicate.nr"
+check_domain "v3/sdjwt_predicate_check" "pub fn sdjwt_predicate_check" "$CIRCUIT_DIR/openac_core/src/predicate.nr"
 
 # Rust cross-layer (v1)
 RUST_OPENAC="$PROJECT_DIR/mopro-binding/src/openac.rs"

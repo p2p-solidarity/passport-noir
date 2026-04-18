@@ -222,7 +222,7 @@ PUBLIC inputs:
   smt_root:            Field        // revocation SMT root (Pedersen-hashed tree, see §11)
   jwt_signed_hash:     [u8; 32]     // SHA256(base64url(header) || "." || base64url(payload))
   jwt_payload_b64h:    [u8; 32]     // SHA256(base64url(payload)) — binds raw bytes
-  issuer_format_tag:   Field        // 1 = GoogleOIDCv1 (v1 支援；其他值 assert false)
+  issuer_format_tag:   Field        // 1=GoogleOIDCv1, 2=AppleIDv1, 3=MicrosoftEntraV1 (v3.1 landed)
   out_commitment_x:    Field
   out_commitment_y:    Field
 
@@ -254,6 +254,8 @@ PRIVATE witness:
 global SMT_DEPTH: u32 = 32;                        // 4 bytes × 8 bits serial key
 global JWT_PAYLOAD_LEN: u32 = 1024;                // app-layer canonical + pad
 global ISSUER_FORMAT_GOOGLE_OIDC_V1: Field = 1;
+global ISSUER_FORMAT_APPLE_ID_V1: Field = 2;
+global ISSUER_FORMAT_MICROSOFT_ENTRA_V1: Field = 3;
 global GOOGLE_OIDC_V1_EMAIL_DOMAIN_OFFSET: u32 = 17;  // canonical payload offset
 ```
 
@@ -275,11 +277,17 @@ fn main(/* inputs above */) {
     assert SHA256(jwt_payload_raw) == jwt_payload_b64h;
 
     // 4. Fixed-offset claim extraction dispatched by issuer_format_tag (P0-G v1 design).
-    //    v1 僅支援 issuer_format_tag == 1 (GoogleOIDCv1)；其它值 assert false。
-    //    App 負責在 prepare 前 canonicalize payload 到已知 key 順序，此偏移才穩定。
-    assert(issuer_format_tag == ISSUER_FORMAT_GOOGLE_OIDC_V1, "Unsupported issuer_format_tag");
-    let (domain_bytes, domain_len) = extract_claim_at_offset(
-        jwt_payload_raw, GOOGLE_OIDC_V1_EMAIL_DOMAIN_OFFSET);
+    //    v3.1 支援 issuer_format_tag ∈ {1=GoogleOIDCv1, 2=AppleIDv1, 3=MicrosoftEntraV1}；
+    //    其它值 assert false。App 負責在 prepare 前 canonicalize payload 到已知 key 順序，
+    //    此偏移才穩定。
+    let is_google = issuer_format_tag == ISSUER_FORMAT_GOOGLE_OIDC_V1;
+    let is_apple = issuer_format_tag == ISSUER_FORMAT_APPLE_ID_V1;
+    let is_microsoft = issuer_format_tag == ISSUER_FORMAT_MICROSOFT_ENTRA_V1;
+    assert(
+        is_google | is_apple | is_microsoft,
+        "Unsupported issuer_format_tag (accepted: 1=GoogleOIDCv1, 2=AppleIDv1, 3=MicrosoftEntraV1)",
+    );
+    let (domain_bytes, domain_len) = extract_claim_by_tag(jwt_payload_raw, issuer_format_tag);
     let (attr_hi, attr_lo) = pack_x509_domain(domain_bytes, domain_len);
 
     // 5. pk_digest + commitment
@@ -291,13 +299,16 @@ fn main(/* inputs above */) {
 }
 ```
 
-### RSA / ECDSA variant 分拆
+### RSA / ECDSA variant 分拆（v3.2 規劃，尚未 land）
+
+> 狀態 (2026-04-18): v3.1 landed 的 `jwt_x5c_adapter` 僅覆蓋 JWT=RS256 路徑。
+> ECDSA（ES256）variant 尚未實作；iOS app 目前不需要非 RSA 的 JWT。
 
 JWT signing algorithm 決定兩個 adapter variant：
 
 ```
-jwt_x5c_rsa_adapter   — cert chain RSA-2048, JWT signed with RS256 (Google OIDC 現況)
-jwt_x5c_ecdsa_adapter — cert chain RSA-2048, JWT signed with ES256
+jwt_x5c_rsa_adapter   — cert chain RSA-2048, JWT signed with RS256 (Google OIDC 現況；v3.1 landed)
+jwt_x5c_ecdsa_adapter — cert chain RSA-2048, JWT signed with ES256 (v3.2 規劃)
 ```
 
 App 在 prepare 前檢查 JWT header 的 `alg`，選對應 adapter。
@@ -432,8 +443,12 @@ fn main(
     in_commitment_aux_y:      pub Field,
     aux_domain:               pub Field,     // DOMAIN_X509 | DOMAIN_SDJWT
     nonce_hash:               pub [u8; 32],
-    target_domain_hash:       pub Field,     // pedersen_hash of expected (attr_hi, attr_lo)
     age_threshold:            pub Field,
+    current_year:             pub Field,       // for age_from_attr; paired with month/day
+    current_month:            pub Field,
+    current_day:              pub Field,
+    target_aux_hash:          pub Field,       // pedersen_hash of expected (attr_hi, attr_lo)
+                                               //   — overloaded across credential types
     link_scope:               pub Field,
     epoch:                    pub Field,
     out_link_tag:             pub Field,
@@ -467,11 +482,12 @@ fn main(
 
     let c_a = commit_attributes_v3(
         aux_domain, a_attr_hi, a_attr_lo, pk_digest, link_rand_aux);
-    // 4. Predicates from opened attributes (P0-B fix)
-    out_is_older = age_from_attr(p_attr_hi, p_attr_lo, age_threshold);
-    let attr_domain_hash = pedersen_hash([a_attr_hi, a_attr_lo]);
-    out_aux_predicate = if attr_domain_hash == target_domain_hash { 1 } else { 0 };
-    // (for SD-JWT, caller substitutes an sd_root_hash; target_domain_hash is
+    // 4. Predicates from opened attributes (P0-B fix; shared helpers live in
+    //    openac_core::predicate).
+    out_is_older = age_from_attr(
+        p_attr_hi, p_attr_lo, current_year, current_month, current_day, age_threshold);
+    out_aux_predicate = sdjwt_predicate_check(a_attr_hi, a_attr_lo, target_aux_hash);
+    // (for SD-JWT, caller substitutes an sd_root_hash; target_aux_hash is
     // overloaded: it means "expected opened attr hash" regardless of credential type)
 
     // 5. Link tag + challenge
