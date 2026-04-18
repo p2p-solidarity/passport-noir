@@ -649,3 +649,112 @@ fn test_wrong_challenge_digest() {
         f.challenge_digest + 1,
     );
 }
+
+#[test(should_fail)]
+fn test_age_predicate_bound_to_committed_birth_year() {
+    // Issue #4: the age predicate must be derived from the committed
+    // attr_hi/attr_lo, not from an independent witness. Birth 2010-01-01
+    // at current 2026-04-18 -> age 16, so `is_older(18) = 0`. A prover who
+    // tries to claim `out_is_older = 1` against the committed 2010 profile
+    // must be rejected. If `age_from_attr` secretly read a witness-only
+    // placeholder (as the audit suggested), this assertion would slip.
+    let f = make_fixture(DOMAIN_X509, 2010);
+    main(
+        f.c_p_x,
+        f.c_p_y,
+        f.c_a_x,
+        f.c_a_y,
+        DOMAIN_X509,
+        test_message_hash(),
+        18,
+        2026,
+        4,
+        18,
+        f.target_aux_hash,
+        f.link_scope,
+        f.epoch,
+        f.p_attr_hi,
+        f.p_attr_lo,
+        f.link_rand_p,
+        f.a_attr_hi,
+        f.a_attr_lo,
+        test_pub_key_x(),
+        test_pub_key_y(),
+        test_signature(),
+        f.link_tag,
+        1, // CLAIM: is_older. Real: 0 (age 16 at threshold 18).
+        1,
+        f.challenge_digest,
+    );
+}
+
+#[test(should_fail)]
+fn test_tampered_p_attr_breaks_commitment_before_predicate() {
+    // Issue #4 companion: if the prover flips p_attr_hi hoping to shift
+    // the unpacked birth year, `assert_commitment_eq` must fire first so
+    // the predicate never evaluates on an attacker-chosen profile.
+    let f = make_fixture(DOMAIN_X509, 2000);
+    main(
+        f.c_p_x,
+        f.c_p_y,
+        f.c_a_x,
+        f.c_a_y,
+        DOMAIN_X509,
+        test_message_hash(),
+        18,
+        2026,
+        4,
+        18,
+        f.target_aux_hash,
+        f.link_scope,
+        f.epoch,
+        f.p_attr_hi + 1, // TAMPERED attr_hi -> commitment re-open must fail
+        f.p_attr_lo,
+        f.link_rand_p,
+        f.a_attr_hi,
+        f.a_attr_lo,
+        test_pub_key_x(),
+        test_pub_key_y(),
+        test_signature(),
+        f.link_tag,
+        1,
+        1,
+        f.challenge_digest,
+    );
+}
+
+#[test(should_fail)]
+fn test_wrong_link_scope_breaks_link_tag() {
+    // Issue #5: `link_scope` is a public input; the link_tag binds
+    // (link_rand_p, link_scope, epoch) together, so changing scope without
+    // recomputing out_link_tag must be rejected. Confirms the scope policy
+    // is enforced by the circuit rather than advisory.
+    let f = make_fixture(DOMAIN_X509, 2000);
+    main(
+        f.c_p_x,
+        f.c_p_y,
+        f.c_a_x,
+        f.c_a_y,
+        DOMAIN_X509,
+        test_message_hash(),
+        18,
+        2026,
+        4,
+        18,
+        f.target_aux_hash,
+        f.link_scope + 1, // TAMPERED scope, link_tag was computed at the original scope
+        f.epoch,
+        f.p_attr_hi,
+        f.p_attr_lo,
+        f.link_rand_p,
+        f.a_attr_hi,
+        f.a_attr_lo,
+        test_pub_key_x(),
+        test_pub_key_y(),
+        test_signature(),
+        f.link_tag,
+        1,
+        1,
+        f.challenge_digest,
+    );
+}
