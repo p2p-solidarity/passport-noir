@@ -797,7 +797,10 @@ fn test_dsc_serial_lives_at_canonical_tbs_offset() {
     let tbs = build_dsc_tbs();
     let serial = dsc_serial();
     for i in 0..DSC_SERIAL_LEN {
-        assert(tbs[DSC_SERIAL_OFFSET + i] == serial[i], "TBS fixture must embed dsc_serial at the canonical offset");
+        assert(
+            tbs[DSC_SERIAL_OFFSET + i] == serial[i],
+            "TBS fixture must embed dsc_serial at the canonical offset",
+        );
     }
 }
 

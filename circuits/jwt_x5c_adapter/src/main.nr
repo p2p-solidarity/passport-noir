@@ -800,7 +800,10 @@ fn test_leaf_serial_lives_at_canonical_tbs_offset() {
     let tbs = build_leaf_tbs();
     let serial = serial_number();
     for i in 0..LEAF_SERIAL_LEN {
-        assert(tbs[LEAF_SERIAL_OFFSET + i] == serial[i], "TBS fixture must embed serial at canonical offset");
+        assert(
+            tbs[LEAF_SERIAL_OFFSET + i] == serial[i],
+            "TBS fixture must embed serial at canonical offset",
+        );
     }
 }
 

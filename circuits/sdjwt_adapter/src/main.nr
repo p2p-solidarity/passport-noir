@@ -577,5 +577,8 @@ fn test_main_rejects_mismatched_sd_root_output() {
     let (sd_root_hi, _sd_root_lo) = hash_to_fields(combined);
     // This must be non-zero for our fixture; assert the opposite to force
     // failure and prove the derivation path is exercised.
-    assert(sd_root_hi == 0, "Fixture expected non-zero sd_root_hi; binding assertion in main catches wrong outputs");
+    assert(
+        sd_root_hi == 0,
+        "Fixture expected non-zero sd_root_hi; binding assertion in main catches wrong outputs",
+    );
 }

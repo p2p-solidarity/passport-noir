@@ -121,9 +121,18 @@ fn main(
     assert(birth_year == bound_year, "birth_year not bound to commitment attr_hash");
     assert(birth_month == bound_month, "birth_month not bound to commitment attr_hash");
     assert(birth_day == bound_day, "birth_day not bound to commitment attr_hash");
-    assert(nationality[0] == bound_nationality[0], "nationality[0] not bound to commitment attr_hash");
-    assert(nationality[1] == bound_nationality[1], "nationality[1] not bound to commitment attr_hash");
-    assert(nationality[2] == bound_nationality[2], "nationality[2] not bound to commitment attr_hash");
+    assert(
+        nationality[0] == bound_nationality[0],
+        "nationality[0] not bound to commitment attr_hash",
+    );
+    assert(
+        nationality[1] == bound_nationality[1],
+        "nationality[1] not bound to commitment attr_hash",
+    );
+    assert(
+        nationality[2] == bound_nationality[2],
+        "nationality[2] not bound to commitment attr_hash",
+    );
 
     // Step 3: Show-phase verification (challenge + linking).
     // The challenge digest folds in the commitment coordinates (which now
@@ -177,7 +186,14 @@ fn test_packed_profile(
 ) -> (Field, Field) {
     let sod_hash: [u8; 32] = [0xAA; 32];
     let dg1_hash: [u8; 32] = [0xBB; 32];
-    pack_passport_profile(sod_hash, dg1_hash, birth_year, birth_month, birth_day, nationality)
+    pack_passport_profile(
+        sod_hash,
+        dg1_hash,
+        birth_year,
+        birth_month,
+        birth_day,
+        nationality,
+    )
 }
 
 /// Canonical P-256 enclave test fixture (matches device_binding/src/main.nr).
