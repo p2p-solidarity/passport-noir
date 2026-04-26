@@ -1,16 +1,22 @@
 use sha256::digest as sha256_digest;
 use std::hash::pedersen_hash;
 
-// Domain separators for show-phase operations (ASCII byte arrays)
+// Domain separator for the show-phase challenge digest (ASCII byte array)
 // "openac.show.v2" (v2 = Pedersen-based)
+//
+// Note: there is no SCOPE_DOMAIN ASCII constant here. The scoped link tag
+// uses a pure pedersen_hash([commitment_x, commitment_y, link_scope,
+// epoch_field]) construction (see compute_link_tag below); domain
+// separation against other pedersen_hash callers in this library comes
+// from the unique input shape (commitment coordinates as the leading
+// pair) rather than an ASCII tag. The Pedersen-domain string
+// "openac.scope.v2" only appears in cross-layer documentation
+// (spec.toml, mopro/Swift OpenAC v2 verifier) for v1-style hashing
+// flows and is intentionally absent from the in-circuit path.
 global SHOW_DOMAIN: [u8; 14] = [111, 112, 101, 110, 97, 99, 46, 115, 104, 111, 119, 46, 118, 50];
-// "openac.scope.v2"
-global SCOPE_DOMAIN: [u8; 15] =
-    [111, 112, 101, 110, 97, 99, 46, 115, 99, 111, 112, 101, 46, 118, 50];
 
 pub global HASH_LEN: u32 = 32;
 global SHOW_DOMAIN_LEN: u32 = 14;
-global SCOPE_DOMAIN_LEN: u32 = 15;
 pub global EPOCH_BYTES: u32 = 4;
 
 /// Serialize a Field element to 32 big-endian bytes.
