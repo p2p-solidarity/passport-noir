@@ -31,3 +31,6 @@ Sources/MoproiOSBindings/MoproBindings.xcframework/**/*.a
 
 # Ephemeral planning docs
 plan.md
+
+# Claude Code harness state (local scheduling locks etc.)
+.claude/
