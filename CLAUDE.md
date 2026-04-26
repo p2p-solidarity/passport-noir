@@ -83,7 +83,9 @@ make build-ios        # Full pipeline: lint → circuits → mopro → xcframewo
 make benchmark        # Full pipeline: TDD → spec → cross-circuit → perf → size
 make spec-check       # Spec compliance only
 make bench-report     # Performance metrics (assumes compiled)
-make bench-size       # Artifact size & compression ratio
+make bench-size       # Artifact size & compression ratio (gate count + bytes/gate)
+make bench-execute    # Witness gen time (lower bound for prove time, via nargo execute)
+make bench-prove-verify  # Real prove + verify time via mopro-binding cargo bench (~10 min first run)
 
 # Release (auto-version + tag → triggers GitHub Actions release)
 make release-patch    # v0.1.0 → v0.1.1

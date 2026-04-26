@@ -1,10 +1,10 @@
 # Benchmark Baseline
-# Generated: 2026-04-01; refreshed 2026-04-17 for Path A v3 migration.
+# Generated: 2026-04-01; refreshed 2026-04-26 after openac_core security fixes.
 # Update this after confirmed improvements via: make bench-update-baseline
 
 [meta]
 created = "2026-04-01"
-updated = "2026-04-17"
+updated = "2026-04-26"
 nargo_version = "1.0.0-beta.19"
 
 # Minimum test counts per circuit (fail if below)
@@ -38,14 +38,14 @@ data_integrity = 13643
 disclosure = 487
 prepare_link = 283
 show_link = 757
-passport_adapter = 36223   # v3.1 (+10498): CSCA->DSC RSA chain + depth-8 Merkle inclusion + DSC revocation SMT
-openac_show = 1752         # was 1432 (+320, in-circuit ECDSA-P256 device binding for show phase)
+passport_adapter = 36247   # v3.1 (+10498): CSCA->DSC RSA chain + depth-8 Merkle inclusion + DSC revocation SMT (4/26: +24 from 0cd7bb7 path_index range-check)
+openac_show = 1802         # 4/26: +50 from 879f68e binding birth_year/month/day/nationality to commitment attr_hash (security fix)
 device_binding = 162
-sdjwt_adapter = 5807       # new baseline (first Pedersen v3 adapter measurement; no prior entry)
+sdjwt_adapter = 5841       # new baseline (first Pedersen v3 adapter measurement); 4/26: +34 from openac_core changes
 # Path A v3 additions (2026-04-17); jwt_x5c_adapter v3.1 optimisation 2026-04-17
-jwt_x5c_adapter = 20859    # v3.1 multi-issuer dispatch (+75 gates vs. 20784 single-issuer baseline)
+jwt_x5c_adapter = 20879    # v3.1 multi-issuer dispatch; 4/26: +20 from openac_core path_index range-check
 x509_show = 549            # NEW — within 5,000 spec budget
-composite_show = 684       # NEW — within 8,000 spec budget
+composite_show = 815       # 4/26: +131 from openac_core/predicate.nr + commit.nr changes (security fixes flow through imports). Main fn unchanged.
 
 # Artifact sizes in bytes (warn if > 20% regression)
 # Measured: 2026-04-17, nargo 1.0.0-beta.19
@@ -56,14 +56,14 @@ disclosure = 79661
 prepare_link = 58832
 show_link = 73746
 passport_adapter = 1473390   # v3.1: CSCA chain + SMT added
-openac_show = 167332
+openac_show = 178000          # 4/26: +10668 from 879f68e (birth_year binding); within 7% of prior
 device_binding = 7351
-sdjwt_adapter = 217422
+sdjwt_adapter = 229000       # 4/26: +11578 from openac_core changes
 # Path A v3 additions (2026-04-17); jwt_x5c_adapter v3.1 optimisation 2026-04-17
 jwt_x5c_adapter = 1312940   # v3.1 multi-issuer (+11575 bytes vs. single-issuer)
-x509_show = 102038
-composite_show = 117812
-total = 4669822
+x509_show = 112000           # 4/26: +9962
+composite_show = 133000      # 4/26: +15188 from new test cases ab6add8 + openac_core changes
+total = 4742000              # 4/26 measurement
 
 # Bytes per gate (lower = more compact artifact representation)
 # Grade: A(≤10) B(≤30) C(≤60) D(≤100) F(>100)
@@ -73,12 +73,13 @@ data_integrity = 29
 disclosure = 163
 prepare_link = 207
 show_link = 97
-passport_adapter = 41   # v3.1: 1473390/36223 = 40.7
-openac_show = 95
+passport_adapter = 40   # 4/26: 1473390/36247 = 40.6
+openac_show = 98        # 4/26: 178000/1802 = 98.7
 device_binding = 45
-sdjwt_adapter = 37
+sdjwt_adapter = 39      # 4/26: 229000/5841 = 39.2
 # v3.1: fewer gates -> artifact overhead dominates ratio; grade D acceptable
 # until further artifact trimming lands (e.g. strip debug symbols in release build).
-jwt_x5c_adapter = 63   # v3.1: 1312940/20859 = 62.9
-x509_show = 185
-composite_show = 172
+jwt_x5c_adapter = 62   # 4/26: 1312940/20879 = 62.8
+x509_show = 204        # 4/26: 112000/549 = 204
+composite_show = 163   # 4/26: 133000/815 = 163; main fn unchanged, regression from openac_core security fixes
+

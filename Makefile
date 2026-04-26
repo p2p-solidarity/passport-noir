@@ -1,6 +1,6 @@
 .PHONY: all circuits compile-circuits test-circuits verify-circuit-artifacts copy-circuit-artifacts \
        build-ios sync-ios-bindings gen-srs clean \
-       fmt fmt-check lint score benchmark spec-check bench-report bench-update-baseline \
+       fmt fmt-check lint score benchmark spec-check bench-report bench-size bench-execute bench-prove-verify bench-update-baseline \
        install-hooks release-patch release-minor release-major
 
 CIRCUIT_DIR = circuits
@@ -110,6 +110,20 @@ bench-report:
 # Size analysis
 bench-size:
 	@./benchmark/scripts/size-bench.sh .
+
+# Witness generation time per circuit (lower bound for prove time).
+# For real prove + verify time, see `make bench-prove-verify`.
+bench-execute:
+	@mkdir -p benchmark/reports
+	@./benchmark/scripts/execute-bench.sh . benchmark/reports/execute-bench-$$(date +%Y%m%d-%H%M%S).json
+
+# Real prove + verify time via mopro-binding cargo bench tests.
+# Currently only `disclosure` has a complete bench in `mopro-binding/src/noir.rs`
+# (see PERF-1, PERF-4, PERF-5, PERF-7). Other circuits await test vectors.
+# First run is slow because cargo must build mopro-binding (~10 min).
+bench-prove-verify:
+	@echo "Running mopro-binding cargo bench (release; first run ~10 min)..."
+	@cd $(MOPRO_DIR) && cargo test --release -- --ignored --nocapture bench_
 
 # Update baseline
 bench-update-baseline:
