@@ -83,3 +83,46 @@ jwt_x5c_adapter = 62   # 4/26: 1312940/20879 = 62.8
 x509_show = 204        # 4/26: 112000/549 = 204
 composite_show = 163   # 4/26: 133000/815 = 163; main fn unchanged, regression from openac_core security fixes
 
+# ============================================================
+# Witness generation time (nargo execute) — prove-time lower bound.
+# Measured 2026-04-27 on darwin/arm64, nargo 1.0.0-beta.19.
+# Only circuits with a real Prover.toml are reported; the other 8
+# circuits still have stub or v3-mismatched fixtures.
+# ============================================================
+[witness_gen_ms]
+disclosure = 302
+prepare_link = 177
+show_link = 165
+device_binding = 159
+total_4_circuits = 803
+
+# ============================================================
+# Real prove + verify timings — BLOCKED 2026-04-27.
+#
+# `make bench-prove-verify` cannot run end-to-end because of a
+# noir_rs / circuit toolchain mismatch:
+#
+#   CircuitError: Incompatible noir_version
+#     '1.0.0-beta.19+74d6be658e1ad252f87943292ba09bdd4da80bd4'.
+#   This binding supports '1.0.0-beta.8.x' circuit artifacts
+#   (noir_rs v1.0.0-beta.8-3).
+#
+# Resolution paths (next session):
+#   (a) Bump mopro-binding's noir_rs / barretenberg deps to a beta.19+
+#       compatible release, OR
+#   (b) Pin the circuit workspace to nargo 1.0.0-beta.8 and recompile
+#       (loses recent security/feature fixes — not recommended).
+#
+# Until then, no real prove_ms / verify_ms / proof_bytes / RSS numbers
+# can be recorded here. PERF-7 reported "RSS before=8MB after=9MB" but
+# the prove call errored out before doing real work, so the delta is
+# meaningless.
+# ============================================================
+[performance]
+status = "blocked_on_noir_rs_upgrade"
+blocker_seen = "2026-04-27"
+prove_ms = "n/a"
+verify_ms = "n/a"
+proof_bytes = "n/a"
+peak_rss_mb = "n/a"
+
