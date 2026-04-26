@@ -294,3 +294,33 @@ Wallet 兩相：
 3. **跑 paper 的 mobile bench 對標**（zkID 提供 iPhone17 數字）：等 mopro FFI 接好後做一輪 bench，對照 5.6 GB / 2.1 s prepare 的數字評估我們在 mobile 是否落地。
 4. **把 `composite_show` 寫進 paper-style spec**：multi-credential bundle 是 paper 沒的；建議補一段 spec 描述 link tag 與 derive_x509_link_rand 的安全推導。
 5. **驗證 `verify_commitment_in_proof` 的搜尋順序**：目前是 FIELD_BYTES-aligned scan；在 UltraHonk public input layout 改變時要更新（已寫在 noir.rs 註解但建議加 lint）。
+
+---
+
+## 10. 2026-04-26 Update — zkID 大幅重構後的差距
+
+zkID 在 4 月 26 日（撰寫此補充當日）剛 ship：
+- 把 `age-verifier.circom` 砍掉，改成 **Generalised Predicates** evaluator（`(claim_index, op, operand)` + postfix AND/OR/NOT）— 詳見 `../zkID/generalized-predicates/README.md`。
+- 加入 **mDoc / mDL (ISO 18013-5)** 完整支援（`mdoc-claim-verifier.circom` 等）。
+- 公開 v1.0.0 / v2.0.0 / v3.0.0 tag。
+
+新差距與決策（2026-04-26 設計回顧）：
+
+| 差距 | 評估 | Direction | 處理 |
+|---|---|---|---|
+| Hardcoded disclose flags + 個別 predicate 結果外洩 | 真不優雅但 passport-niche 可接受 | **B** | 記錄延後：`spec/predicate-generalization.md` |
+| Swift API 三版本 free functions 不統一 | DX 痛點 | **C** | 立刻做 |
+| 缺 mDoc / mDL adapter | EUDI 必要 | **D** | 排程做 |
+| Path A / composite / CSCA-Merkle / SMT 沒有正式 spec | 戰略低 ROI 高 | **E** | 立刻做 |
+| Verify time / mobile bench 缺失 | 對齊 zkID iPhone17 數字 | benchmark 補強 | 排程做（依賴 mopro FFI 接 iOS） |
+
+**目前 benchmark 覆蓋（2026-04-26 量測）**：
+- ✅ Gate count / artifact bytes：12 個 circuit 全覆蓋（`benchmark/scripts/{perf,size}-bench.sh`）
+- ⚠️ Prove / verify time：只有 `disclosure`（v1）有 `bench_*` test in `mopro-binding/src/noir.rs:521-607`，標 `#[ignore]` 預設不跑
+- ❌ v2 / v3 路徑沒有 prove / verify time bench
+- ❌ Mobile 平台 bench 完全沒有（zkID 已公開 iPhone 17 / Pixel 10 Pro 數字）
+
+zkID 4/26 mobile 對標（`../zkID/wallet-unit-poc/README.md`）：
+- iPhone 17：Prepare prove 2102ms / Reblind 884ms / Verify 137ms（payload 1920 B）
+- iPhone 17 Show（與 payload 無關）：Prove 85ms / Verify 13ms
+- Peak memory：Prepare 2.27 GiB / Show 1.96 GiB
