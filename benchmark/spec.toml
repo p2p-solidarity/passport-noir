@@ -162,8 +162,11 @@ domain_separator_bytes = 16
 commitment_formula = "SHA256(domain || sod_hash || mrz_hash || link_rand)"
 preimage_length = 112  # 16 + 32 + 32 + 32
 
+# prepare_link uses the shared `assert_hash_equals` helper, so the literal
+# assertion message is "Hash mismatch" (semantically: prepare commitment
+# mismatch). spec-check.sh greps for the literal string.
 assertions = [
-  "Prepare commitment mismatch",
+  "Hash mismatch",
 ]
 
 min_positive_tests = 2
@@ -202,12 +205,17 @@ domain_separators = [
   { name = "scope", value = "openac.scope.v1", bytes = 15 },
 ]
 
+# show_link's `assert_hash_equals` and `assert_zero_hash` helpers emit the
+# literal messages below for every logical check listed alongside each line.
+# spec-check.sh only greps for "Hash mismatch" because all three positive-path
+# checks share the same helper, but both literal strings are normative.
 assertions = [
-  "Prepare commitment mismatch",
-  "Challenge digest mismatch",
-  "Scoped link tag mismatch",
-  "Unlinkable mode requires zero scope",
-  "Unlinkable mode requires zero tag",
+  # "Hash mismatch" is emitted for: prepare commitment, challenge digest,
+  # scoped link tag (compute_*_link_tag mismatches).
+  "Hash mismatch",
+  # "Expected zero hash" is emitted for both: unlinkable mode requires zero
+  # link_scope, and unlinkable mode requires zero out_link_tag.
+  "Expected zero hash",
 ]
 
 min_positive_tests = 3
@@ -223,37 +231,85 @@ sha256 = "v0.3.0"
 # ============================================================
 [circuits.openac_core]
 type = "lib"
-description = "Generic OpenAC building blocks: Pedersen commitment, show logic, predicates"
-version = "v2"
+description = "Generic OpenAC building blocks: Pedersen commitment, device binding, show logic, predicates, profile encodings, revocation SMT, CSCA Master List Merkle"
+version = "v3"
 
-modules = ["commit", "show", "predicate"]
+# v3 expanded the library beyond the original commit/show/predicate trio to
+# host the Path A device-binding helpers (`device`), profile encodings
+# (`profile`), the revocation SMT (`smt`), and the CSCA Master List Merkle
+# verifier (`merkle`). All seven modules are first-class and shipped via
+# `lib.nr`.
+modules = ["commit", "device", "show", "predicate", "profile", "smt", "merkle"]
 
 [circuits.openac_core.module_commit]
 source = "circuits/openac_core/src/commit.nr"
-functions = ["commit_attributes", "commit_attributes_extended", "assert_commitment_eq"]
-domain_constants = { DOMAIN_PASSPORT = "0x01", DOMAIN_SDJWT = "0x02", DOMAIN_MDL = "0x03" }
+functions = ["commit_attributes", "commit_attributes_v3", "hash_to_fields", "assert_commitment_eq"]
+domain_constants = { DOMAIN_PASSPORT = "0x01", DOMAIN_X509 = "0x02", DOMAIN_SDJWT = "0x03", DOMAIN_MDL = "0x04", DOMAIN_SMT_NODE = "0x736d7431", DOMAIN_CSCA_NODE = "0x6373636e", DOMAIN_CSCA_LEAF = "0x6373636c" }
 assertions = ["Commitment X mismatch", "Commitment Y mismatch"]
 min_positive_tests = 4
 min_negative_tests = 1
 
+[circuits.openac_core.module_device]
+source = "circuits/openac_core/src/device.nr"
+functions = ["verify_device_binding", "pk_digest_from_bytes"]
+# pk_digest = pedersen_hash([DOMAIN_PK_DIGEST, pk_x_hi, pk_x_lo, pk_y_hi, pk_y_lo])
+domain_constants = { DOMAIN_PK_DIGEST = "0x706b6467" }
+assertions = ["Device binding: ECDSA P-256 signature verification failed"]
+min_positive_tests = 4
+min_negative_tests = 2
+
 [circuits.openac_core.module_show]
 source = "circuits/openac_core/src/show.nr"
 functions = ["compute_challenge_digest", "compute_link_tag", "assert_hash_eq", "verify_show"]
+# Only the show-phase ASCII domain string lives in-circuit. The scope-phase
+# Pedersen link tag uses input shape (commitment coords as the leading pair)
+# for separation rather than an ASCII tag, so SCOPE_DOMAIN was removed from
+# show.nr in 2026-04-26 cleanup. The "openac.scope.v2" entry below is kept
+# for cross-layer (Swift / mopro v2 verifier) parity and lives in show.nr's
+# header comment as a documentation anchor.
 domain_separators = [
   { name = "show", value = "openac.show.v2", bytes = 14 },
-  { name = "scope", value = "openac.scope.v2", bytes = 15 },
+  { name = "scope", value = "openac.scope.v2", bytes = 15, in_circuit = false },
 ]
 # challenge_digest = SHA256("openac.show.v2" || commitment_x(32) || commitment_y(32) || challenge(32) || epoch(4))
 # link_tag = pedersen_hash([commitment_x, commitment_y, link_scope, epoch_field])
-assertions = ["Hash mismatch", "Scoped link tag mismatch", "Unlinkable mode requires zero scope", "Unlinkable mode requires zero tag"]
+assertions = ["Hash mismatch", "Scoped link tag mismatch", "Unlinkable mode requires zero scope", "Unlinkable mode requires zero tag", "epoch_field does not match epoch bytes"]
 min_positive_tests = 4
 min_negative_tests = 1
 
 [circuits.openac_core.module_predicate]
 source = "circuits/openac_core/src/predicate.nr"
-functions = ["check_age_above", "check_bytes3_eq", "two_digit_year_to_four"]
+functions = ["check_age_above", "check_bytes3_eq", "two_digit_year_to_four", "decode_domain", "age_from_attr", "sdjwt_predicate_check", "domain_suffix_match"]
+assertions = ["Birth year cannot be after current year"]
 min_positive_tests = 4
-min_negative_tests = 0
+min_negative_tests = 1
+
+[circuits.openac_core.module_profile]
+source = "circuits/openac_core/src/profile.nr"
+functions = ["fields_to_bytes32", "derive_x509_link_rand", "derive_sdjwt_link_rand", "compute_link_challenge_digest", "compute_link_tag", "pack_passport_profile", "unpack_passport_profile", "pack_x509_domain", "unpack_x509_domain"]
+# Path A salts for per-credential link_rand derivation (ASCII tags) and
+# additional Pedersen domain anchors for the per-credential challenge digest
+# and link tag.
+domain_constants = { SALT_X509 = "0x78353039", SALT_SDJWT = "0x73646a77", CHALLENGE_DOMAIN = "0x63686c67", LINK_TAG_DOMAIN = "0x6c746167" }
+assertions = ["Packed X.509 domain length exceeds maximum"]
+min_positive_tests = 3
+min_negative_tests = 1
+
+[circuits.openac_core.module_smt]
+source = "circuits/openac_core/src/smt.nr"
+functions = ["verify_non_membership", "compute_serial_key", "hash_field_pair", "smt_fold"]
+constants = { SMT_DEPTH = 32, SERIAL_KEY_BYTES = 4 }
+assertions = ["Revocation witness matches blocked serial", "Revocation SMT root mismatch"]
+min_positive_tests = 2
+min_negative_tests = 2
+
+[circuits.openac_core.module_merkle]
+source = "circuits/openac_core/src/merkle.nr"
+functions = ["verify_inclusion_depth_8", "compute_csca_leaf"]
+constants = { CSCA_MERKLE_DEPTH = 8 }
+assertions = ["CSCA Merkle root mismatch"]
+min_positive_tests = 2
+min_negative_tests = 3
 
 # ============================================================
 # Circuit: passport_adapter (v3.1 — Path A combined prepare with CSCA chain)
@@ -302,6 +358,7 @@ assertions = [
   "CSCA signature over DSC TBS failed verification",
   "DSC modulus mismatch with CSCA-signed TBS",
   "CSCA Merkle root mismatch",
+  "dsc_serial must match the CSCA-signed TBS serial bytes",
   "Revocation witness matches blocked serial",
   "Revocation SMT root mismatch",
   "Too many data groups",
@@ -313,7 +370,7 @@ assertions = [
   "Commitment Y mismatch",
 ]
 
-constants = { MAX_DG_COUNT = 4, MAX_DG_SIZE = 512, DSC_TBS_LEN = 1536, CSCA_MERKLE_DEPTH = 8, SMT_DEPTH = 32, CSCA_RSA_EXPONENT = 65537 }
+constants = { MAX_DG_COUNT = 4, MAX_DG_SIZE = 512, DSC_TBS_LEN = 1536, DSC_SERIAL_OFFSET = 352, DSC_SERIAL_LEN = 20, CSCA_MERKLE_DEPTH = 8, SMT_DEPTH = 32, CSCA_RSA_EXPONENT = 65537 }
 
 min_positive_tests = 7   # v3.1 unit tests: DG chain + commitment + DSC extract + revocation
 min_negative_tests = 4
@@ -385,6 +442,12 @@ assertions = [
   "Unlinkable mode requires zero tag",
   "Age predicate output mismatch",
   "Nationality output mismatch",
+  "birth_year not bound to commitment attr_hash",
+  "birth_month not bound to commitment attr_hash",
+  "birth_day not bound to commitment attr_hash",
+  "nationality[0] not bound to commitment attr_hash",
+  "nationality[1] not bound to commitment attr_hash",
+  "nationality[2] not bound to commitment attr_hash",
 ]
 
 min_positive_tests = 4
@@ -519,6 +582,7 @@ assertions = [
   "Leaf certificate signature verification failed",
   "Issuer certificate signature verification failed",
   "Leaf cert JWT modulus mismatch",
+  "serial_number must match the issuer-signed leaf TBS serial bytes",
   "Revocation witness matches blocked serial",
   "Revocation SMT root mismatch",
   "Unsupported issuer_format_tag (accepted: 1=GoogleOIDCv1, 2=AppleIDv1, 3=MicrosoftEntraV1)",
@@ -529,7 +593,7 @@ assertions = [
   "Commitment Y mismatch",
 ]
 
-constants = { CERT_TBS_LEN = 1536, JWT_PAYLOAD_LEN = 1024, LIMB_COUNT = 18, SMT_DEPTH = 32, RSA_EXPONENT = 65537, ISSUER_FORMAT_GOOGLE_OIDC_V1 = 1, ISSUER_FORMAT_APPLE_ID_V1 = 2, ISSUER_FORMAT_MICROSOFT_ENTRA_V1 = 3, GOOGLE_OIDC_V1_EMAIL_DOMAIN_OFFSET = 17, APPLE_ID_V1_EMAIL_DOMAIN_OFFSET = 16, MICROSOFT_ENTRA_V1_EMAIL_DOMAIN_OFFSET = 15 }
+constants = { CERT_TBS_LEN = 1536, JWT_PAYLOAD_LEN = 1024, LIMB_COUNT = 18, SMT_DEPTH = 32, RSA_EXPONENT = 65537, LEAF_SERIAL_OFFSET = 352, LEAF_SERIAL_LEN = 20, ISSUER_FORMAT_GOOGLE_OIDC_V1 = 1, ISSUER_FORMAT_APPLE_ID_V1 = 2, ISSUER_FORMAT_MICROSOFT_ENTRA_V1 = 3, GOOGLE_OIDC_V1_EMAIL_DOMAIN_OFFSET = 17, APPLE_ID_V1_EMAIL_DOMAIN_OFFSET = 16, MICROSOFT_ENTRA_V1_EMAIL_DOMAIN_OFFSET = 15 }
 
 min_positive_tests = 7
 min_negative_tests = 4

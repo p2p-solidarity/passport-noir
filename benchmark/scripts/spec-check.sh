@@ -107,7 +107,8 @@ check_assertions "passport_adapter" \
   "Data group hash mismatch" \
   "SOD combined hash mismatch" \
   "Commitment X mismatch" \
-  "Commitment Y mismatch"
+  "Commitment Y mismatch" \
+  "dsc_serial must match the CSCA-signed TBS serial bytes"
 
 # openac_show (v3 Path A: "Age/Nationality not disclosed but output is ..."
 # assertions intentionally removed per spec.toml — when a disclosure flag
@@ -116,7 +117,10 @@ check_assertions "openac_show" \
   "Commitment X mismatch" \
   "Commitment Y mismatch" \
   "Age predicate output mismatch" \
-  "Nationality output mismatch"
+  "Nationality output mismatch" \
+  "birth_year not bound to commitment attr_hash" \
+  "birth_month not bound to commitment attr_hash" \
+  "birth_day not bound to commitment attr_hash"
 
 # device_binding
 check_assertions "device_binding" \
@@ -136,9 +140,11 @@ check_assertions "jwt_x5c_adapter" \
   "Leaf certificate signature verification failed" \
   "Issuer certificate signature verification failed" \
   "Leaf cert JWT modulus mismatch" \
+  "serial_number must match the issuer-signed leaf TBS serial bytes" \
   "Revocation witness matches blocked serial" \
   "Revocation SMT root mismatch" \
   "Unsupported issuer_format_tag (accepted: 1=GoogleOIDCv1, 2=AppleIDv1, 3=MicrosoftEntraV1)" \
+  "Normalized JWT domain missing value" \
   "JWT payload hash mismatch" \
   "JWT signature verification failed" \
   "Commitment X mismatch" \

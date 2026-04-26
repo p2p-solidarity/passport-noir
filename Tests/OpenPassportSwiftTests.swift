@@ -732,6 +732,852 @@ final class OpenPassportSwiftTests: XCTestCase {
             )
         )
     }
+
+    func testOpenACShowV3WrapperThrowsWhenFFIUnavailable() throws {
+        // openACShowV3 also has to surface the underlying mopro FFI failure
+        // as a thrown error rather than swallowing it (parity with the
+        // prepare wrapper coverage above).
+        let prepare = OpenACV3PrepareArtifact(
+            createdAtUnix: 0,
+            expiresAtUnix: 3600,
+            credentialType: .passport,
+            commitmentX: Data(repeating: 0x01, count: 32),
+            commitmentY: Data(repeating: 0x02, count: 32),
+            pkDigest: Data(repeating: 0x03, count: 32),
+            linkRand: Data(repeating: 0x04, count: 32),
+            proof: Data(),
+            vk: Data()
+        )
+        let request = OpenACShowRequest(
+            challenge: Data(repeating: 0x05, count: 32),
+            linkMode: .scopedLinkable,
+            linkScope: Data(repeating: 0x06, count: 32),
+            epoch: Data([0x20, 0x26, 0x04, 0x01])
+        )
+        XCTAssertThrowsError(
+            try openACShowV3(
+                circuitPath: "/nonexistent/circuit.json",
+                srsPath: nil,
+                inputs: [:],
+                prepare: prepare,
+                request: request,
+                nonceHash: Data(repeating: 0x07, count: 32),
+                linkTag: Data(repeating: 0x08, count: 32)
+            )
+        )
+    }
+
+    // MARK: - OpenAC v1 error coverage
+
+    private func v1Fixture(
+        linkMode: OpenACLinkMode = .scopedLinkable,
+        nowUnix: UInt64 = 150
+    ) throws -> (OpenACPrepareArtifact, OpenACShowPresentation, OpenACShowRequest, UInt64) {
+        let sodHash = Data(repeating: 0x12, count: 32)
+        let mrzHash = Data(repeating: 0x23, count: 32)
+        let linkRandomness = Data(repeating: 0x34, count: 32)
+        let epoch = Data([0x20, 0x26, 0x03, 0x15])
+        let challenge = Data(repeating: 0x45, count: 32)
+        let scope: Data?
+        switch linkMode {
+        case .scopedLinkable: scope = Data(repeating: 0x56, count: 32)
+        case .unlinkable: scope = nil
+        }
+
+        let prepareCommitment = try computeOpenACPrepareCommitment(
+            sodHash: sodHash,
+            mrzHash: mrzHash,
+            linkRandomness: linkRandomness
+        )
+        let prepare = OpenACPrepareArtifact(
+            createdAtUnix: 100,
+            expiresAtUnix: 200,
+            sodHash: sodHash,
+            mrzHash: mrzHash,
+            prepareCommitment: prepareCommitment
+        )
+        let request = OpenACShowRequest(
+            challenge: challenge,
+            linkMode: linkMode,
+            linkScope: scope,
+            epoch: epoch
+        )
+        let challengeDigest = try computeOpenACChallengeDigest(
+            challenge: challenge,
+            prepareCommitment: prepareCommitment,
+            epoch: epoch
+        )
+        let linkTag: Data
+        switch linkMode {
+        case .scopedLinkable:
+            linkTag = try computeOpenACScopedLinkTag(
+                prepareCommitment: prepareCommitment,
+                linkScope: scope!,
+                epoch: epoch
+            )
+        case .unlinkable:
+            linkTag = Data(repeating: 0, count: 32)
+        }
+        let show = OpenACShowPresentation(
+            sodHash: sodHash,
+            mrzHash: mrzHash,
+            prepareCommitment: prepareCommitment,
+            challenge: challenge,
+            challengeDigest: challengeDigest,
+            linkTag: linkTag
+        )
+        return (prepare, show, request, nowUnix)
+    }
+
+    func testOpenACPrepareCommitmentRejectsBadLength() {
+        // Length validation is the first defence; any mis-sized field must
+        // throw `invalidLength` rather than silently truncate or hash garbage.
+        XCTAssertThrowsError(
+            try computeOpenACPrepareCommitment(
+                sodHash: Data(repeating: 0, count: 31),
+                mrzHash: Data(repeating: 0, count: 32),
+                linkRandomness: Data(repeating: 0, count: 32)
+            )
+        ) { err in
+            if case let OpenACError.invalidLength(field, expected, actual) = err {
+                XCTAssertEqual(field, "sodHash")
+                XCTAssertEqual(expected, 32)
+                XCTAssertEqual(actual, 31)
+            } else {
+                XCTFail("Expected OpenACError.invalidLength, got \(err)")
+            }
+        }
+    }
+
+    func testOpenACChallengeDigestRequiresFourByteEpoch() {
+        let prepareCommitment = Data(repeating: 0x10, count: 32)
+        XCTAssertThrowsError(
+            try computeOpenACChallengeDigest(
+                challenge: Data(repeating: 0x20, count: 32),
+                prepareCommitment: prepareCommitment,
+                epoch: Data([0x01, 0x02, 0x03])
+            )
+        ) { err in
+            if case let OpenACError.invalidLength(field, expected, _) = err {
+                XCTAssertEqual(field, "epoch")
+                XCTAssertEqual(expected, 4)
+            } else {
+                XCTFail("Expected OpenACError.invalidLength for epoch, got \(err)")
+            }
+        }
+    }
+
+    func testOpenACScopedLinkTagRejectsBadScope() {
+        XCTAssertThrowsError(
+            try computeOpenACScopedLinkTag(
+                prepareCommitment: Data(repeating: 0x10, count: 32),
+                linkScope: Data(repeating: 0x20, count: 16),
+                epoch: Data([0x20, 0x26, 0x03, 0x15])
+            )
+        ) { err in
+            if case let OpenACError.invalidLength(field, _, _) = err {
+                XCTAssertEqual(field, "linkScope")
+            } else {
+                XCTFail("Expected invalidLength for linkScope, got \(err)")
+            }
+        }
+    }
+
+    func testOpenACVerifyRejectsPrepareNotActive() throws {
+        let (prepare, show, request, _) = try v1Fixture()
+        XCTAssertThrowsError(
+            try verifyOpenACLinking(prepare: prepare, show: show, request: request, nowUnix: 50)
+        ) { err in
+            XCTAssertEqual(err as? OpenACError, .prepareNotActive)
+        }
+    }
+
+    func testOpenACVerifyRejectsExpiredPrepare() throws {
+        let (prepare, show, request, _) = try v1Fixture()
+        XCTAssertThrowsError(
+            try verifyOpenACLinking(prepare: prepare, show: show, request: request, nowUnix: 500)
+        ) { err in
+            XCTAssertEqual(err as? OpenACError, .expiredPrepare)
+        }
+    }
+
+    func testOpenACVerifyRejectsLinkMismatch() throws {
+        let (prepare, show, request, now) = try v1Fixture()
+        let tampered = OpenACShowPresentation(
+            sodHash: show.sodHash,
+            mrzHash: show.mrzHash,
+            prepareCommitment: Data(repeating: 0xAB, count: 32),
+            challenge: show.challenge,
+            challengeDigest: show.challengeDigest,
+            linkTag: show.linkTag
+        )
+        XCTAssertThrowsError(
+            try verifyOpenACLinking(prepare: prepare, show: tampered, request: request, nowUnix: now)
+        ) { err in
+            XCTAssertEqual(err as? OpenACError, .linkMismatch)
+        }
+    }
+
+    func testOpenACVerifyRejectsSodHashMismatch() throws {
+        let (prepare, show, request, now) = try v1Fixture()
+        let tampered = OpenACShowPresentation(
+            sodHash: Data(repeating: 0xFF, count: 32),
+            mrzHash: show.mrzHash,
+            prepareCommitment: show.prepareCommitment,
+            challenge: show.challenge,
+            challengeDigest: show.challengeDigest,
+            linkTag: show.linkTag
+        )
+        XCTAssertThrowsError(
+            try verifyOpenACLinking(prepare: prepare, show: tampered, request: request, nowUnix: now)
+        ) { err in
+            XCTAssertEqual(err as? OpenACError, .sodHashMismatch)
+        }
+    }
+
+    func testOpenACVerifyRejectsMrzHashMismatch() throws {
+        let (prepare, show, request, now) = try v1Fixture()
+        let tampered = OpenACShowPresentation(
+            sodHash: show.sodHash,
+            mrzHash: Data(repeating: 0xFE, count: 32),
+            prepareCommitment: show.prepareCommitment,
+            challenge: show.challenge,
+            challengeDigest: show.challengeDigest,
+            linkTag: show.linkTag
+        )
+        XCTAssertThrowsError(
+            try verifyOpenACLinking(prepare: prepare, show: tampered, request: request, nowUnix: now)
+        ) { err in
+            XCTAssertEqual(err as? OpenACError, .mrzHashMismatch)
+        }
+    }
+
+    func testOpenACVerifyRejectsInvalidChallenge() throws {
+        let (prepare, show, request, now) = try v1Fixture()
+        let tampered = OpenACShowPresentation(
+            sodHash: show.sodHash,
+            mrzHash: show.mrzHash,
+            prepareCommitment: show.prepareCommitment,
+            challenge: show.challenge,
+            challengeDigest: Data(repeating: 0xCC, count: 32),
+            linkTag: show.linkTag
+        )
+        XCTAssertThrowsError(
+            try verifyOpenACLinking(prepare: prepare, show: tampered, request: request, nowUnix: now)
+        ) { err in
+            XCTAssertEqual(err as? OpenACError, .invalidChallenge)
+        }
+    }
+
+    func testOpenACVerifyUnlinkableHappyPath() throws {
+        let (prepare, show, request, now) = try v1Fixture(linkMode: .unlinkable)
+        XCTAssertTrue(try verifyOpenACLinking(prepare: prepare, show: show, request: request, nowUnix: now))
+    }
+
+    func testOpenACVerifyUnlinkableRejectsNonZeroTag() throws {
+        let (prepare, _, request, now) = try v1Fixture(linkMode: .unlinkable)
+        let badShow = OpenACShowPresentation(
+            sodHash: prepare.sodHash,
+            mrzHash: prepare.mrzHash,
+            prepareCommitment: prepare.prepareCommitment,
+            challenge: request.challenge,
+            challengeDigest: try computeOpenACChallengeDigest(
+                challenge: request.challenge,
+                prepareCommitment: prepare.prepareCommitment,
+                epoch: request.epoch
+            ),
+            linkTag: Data(repeating: 0xAA, count: 32) // unlinkable mode requires zero
+        )
+        XCTAssertThrowsError(
+            try verifyOpenACLinking(prepare: prepare, show: badShow, request: request, nowUnix: now)
+        ) { err in
+            XCTAssertEqual(err as? OpenACError, .scopeMismatch)
+        }
+    }
+
+    func testOpenACShowFunctionRejectsScopedWithoutScope() throws {
+        // The high-level openACShow helper should refuse scoped-linkable mode
+        // when the request omits a linkScope; otherwise the resulting tag
+        // would be silently zero and indistinguishable from unlinkable mode.
+        let sodHash = Data(repeating: 0x12, count: 32)
+        let mrzHash = Data(repeating: 0x23, count: 32)
+        let linkRandomness = Data(repeating: 0x34, count: 32)
+        let epoch = Data([0x20, 0x26, 0x03, 0x15])
+        let challenge = Data(repeating: 0x45, count: 32)
+        let prepareCommitment = try computeOpenACPrepareCommitment(
+            sodHash: sodHash,
+            mrzHash: mrzHash,
+            linkRandomness: linkRandomness
+        )
+        let prepare = OpenACPrepareArtifact(
+            createdAtUnix: 0,
+            expiresAtUnix: 1000,
+            sodHash: sodHash,
+            mrzHash: mrzHash,
+            prepareCommitment: prepareCommitment
+        )
+        let request = OpenACShowRequest(
+            challenge: challenge,
+            linkMode: .scopedLinkable,
+            linkScope: nil,
+            epoch: epoch
+        )
+        XCTAssertThrowsError(
+            try openACShow(
+                circuitPath: "/nonexistent/circuit.json",
+                srsPath: nil,
+                inputs: [:],
+                prepareArtifact: prepare,
+                request: request,
+                sodHash: sodHash,
+                mrzHash: mrzHash
+            )
+        ) { err in
+            // Either scopeMismatch (caught before FFI) or whatever the FFI
+            // throws — but scopeMismatch should hit first.
+            XCTAssertEqual(err as? OpenACError, .scopeMismatch)
+        }
+    }
+
+    func testOpenACEnvelopeRoundTrip() {
+        let envelope = makeOpenACEnvelope(
+            phase: .prepare,
+            challenge: nil,
+            linkMode: .unlinkable,
+            linkScope: nil,
+            linkTag: nil,
+            prepareCommitment: Data(repeating: 0x55, count: 32),
+            publicOutputs: ["age_over_18": "true"],
+            proofPayload: Data([0xDE, 0xAD, 0xBE, 0xEF])
+        )
+        XCTAssertEqual(envelope.proofSystem, "openpassport_openac")
+        XCTAssertEqual(envelope.phase, .prepare)
+        XCTAssertEqual(envelope.publicOutputs["age_over_18"], "true")
+        XCTAssertEqual(envelope.proofPayload, Data([0xDE, 0xAD, 0xBE, 0xEF]))
+    }
+
+    // MARK: - OpenAC v2 — additional coverage
+
+    func testOpenACv2HappyPathUnlinkable() throws {
+        let (prepare, show, policy, verifier) = try v2Fixture(linkMode: .unlinkable)
+        XCTAssertTrue(try verifyOpenACv2(prepare: prepare, show: show, policy: policy, verifier: verifier))
+    }
+
+    func testOpenACv2EmptyPrepareBundleRejected() throws {
+        let (prepare, show, policy, verifier) = try v2Fixture()
+        let stripped = OpenACV2PrepareArtifact(
+            createdAtUnix: prepare.createdAtUnix,
+            expiresAtUnix: prepare.expiresAtUnix,
+            credentialType: prepare.credentialType,
+            commitment: prepare.commitment,
+            linkRand: prepare.linkRand,
+            proof: Data(),
+            vk: prepare.vk
+        )
+        XCTAssertThrowsError(
+            try verifyOpenACv2(prepare: stripped, show: show, policy: policy, verifier: verifier)
+        ) { err in
+            XCTAssertEqual(err as? OpenACV2Error, .emptyPrepareBundle)
+        }
+    }
+
+    func testOpenACv2EmptyShowBundleRejected() throws {
+        let (prepare, show, policy, verifier) = try v2Fixture()
+        let stripped = OpenACV2ShowPresentation(
+            commitment: show.commitment,
+            challenge: show.challenge,
+            challengeDigest: show.challengeDigest,
+            linkTag: show.linkTag,
+            proof: Data(),
+            vk: show.vk
+        )
+        XCTAssertThrowsError(
+            try verifyOpenACv2(prepare: prepare, show: stripped, policy: policy, verifier: verifier)
+        ) { err in
+            XCTAssertEqual(err as? OpenACV2Error, .emptyShowBundle)
+        }
+    }
+
+    func testOpenACv2InvalidPrepareProofRejected() throws {
+        let (prepare, show, policy, _) = try v2Fixture()
+        let alwaysFalse: OpenACNoirVerifier = { _, _ in false }
+        XCTAssertThrowsError(
+            try verifyOpenACv2(prepare: prepare, show: show, policy: policy, verifier: alwaysFalse)
+        ) { err in
+            XCTAssertEqual(err as? OpenACV2Error, .invalidPrepareProof)
+        }
+    }
+
+    func testOpenACv2InvalidShowProofRejected() throws {
+        let (prepare, show, policy, _) = try v2Fixture()
+        // Pass prepare, fail show (matching how the runtime behaves when
+        // the show circuit's proof fails verification mid-flow).
+        var calls = 0
+        let verifier: OpenACNoirVerifier = { _, _ in
+            calls += 1
+            return calls == 1
+        }
+        XCTAssertThrowsError(
+            try verifyOpenACv2(prepare: prepare, show: show, policy: policy, verifier: verifier)
+        ) { err in
+            XCTAssertEqual(err as? OpenACV2Error, .invalidShowProof)
+        }
+    }
+
+    func testOpenACv2PrepareCommitmentNotInProofRejected() throws {
+        let (_, show, policy, verifier) = try v2Fixture()
+        let other = v2SampleCommitment(seed: 99)
+        // Build a prepare bundle whose proof does not contain its declared
+        // commitment — exposes the field-scan defense layer.
+        let prepareProof = Data([1, 2, 3, 4]) + Data(repeating: 0xFF, count: 60)
+        let prepare = OpenACV2PrepareArtifact(
+            createdAtUnix: 100,
+            expiresAtUnix: 200,
+            credentialType: .passport,
+            commitment: other,
+            linkRand: Data(repeating: 0x33, count: 32),
+            proof: prepareProof,
+            vk: Data([1, 2, 3])
+        )
+        let mutatedPolicy = OpenACV2Policy(
+            linkMode: policy.linkMode,
+            linkScope: policy.linkScope,
+            epoch: policy.epoch,
+            epochField: policy.epochField,
+            nowUnix: policy.nowUnix,
+            expectedChallenge: policy.expectedChallenge,
+            prepareVkHash: sha256Hash(prepare.vk),
+            showVkHash: policy.showVkHash
+        )
+        XCTAssertThrowsError(
+            try verifyOpenACv2(prepare: prepare, show: show, policy: mutatedPolicy, verifier: verifier)
+        ) { err in
+            XCTAssertEqual(err as? OpenACV2Error, .prepareCommitmentNotInProof)
+        }
+    }
+
+    func testOpenACv2InvalidChallengeRejected() throws {
+        let (prepare, show, policy, verifier) = try v2Fixture()
+        let mutated = OpenACV2Policy(
+            linkMode: policy.linkMode,
+            linkScope: policy.linkScope,
+            epoch: policy.epoch,
+            epochField: policy.epochField,
+            nowUnix: policy.nowUnix,
+            expectedChallenge: Data(repeating: 0xFE, count: 32),
+            prepareVkHash: policy.prepareVkHash,
+            showVkHash: policy.showVkHash
+        )
+        XCTAssertThrowsError(
+            try verifyOpenACv2(prepare: prepare, show: show, policy: mutated, verifier: verifier)
+        ) { err in
+            XCTAssertEqual(err as? OpenACV2Error, .invalidChallenge)
+        }
+    }
+
+    func testOpenACv2InvalidChallengeDigestRejected() throws {
+        let (prepare, show, policy, verifier) = try v2Fixture()
+        let badShow = OpenACV2ShowPresentation(
+            commitment: show.commitment,
+            challenge: show.challenge,
+            challengeDigest: Data(repeating: 0x00, count: 32),
+            linkTag: show.linkTag,
+            proof: show.proof,
+            vk: show.vk
+        )
+        XCTAssertThrowsError(
+            try verifyOpenACv2(prepare: prepare, show: badShow, policy: policy, verifier: verifier)
+        ) { err in
+            XCTAssertEqual(err as? OpenACV2Error, .invalidChallengeDigest)
+        }
+    }
+
+    func testOpenACv2UntrustedShowVkRejected() throws {
+        let (prepare, show, policy, verifier) = try v2Fixture()
+        let mutated = OpenACV2Policy(
+            linkMode: policy.linkMode,
+            linkScope: policy.linkScope,
+            epoch: policy.epoch,
+            epochField: policy.epochField,
+            nowUnix: policy.nowUnix,
+            expectedChallenge: policy.expectedChallenge,
+            prepareVkHash: policy.prepareVkHash,
+            showVkHash: Data(repeating: 0xAA, count: 32)
+        )
+        XCTAssertThrowsError(
+            try verifyOpenACv2(prepare: prepare, show: show, policy: mutated, verifier: verifier)
+        ) { err in
+            XCTAssertEqual(err as? OpenACV2Error, .untrustedShowVk)
+        }
+    }
+
+    func testOpenACv2PrepareNotActiveRejected() throws {
+        let (prepare, show, policy, verifier) = try v2Fixture()
+        let earlyPolicy = OpenACV2Policy(
+            linkMode: policy.linkMode,
+            linkScope: policy.linkScope,
+            epoch: policy.epoch,
+            epochField: policy.epochField,
+            nowUnix: 0,
+            expectedChallenge: policy.expectedChallenge,
+            prepareVkHash: policy.prepareVkHash,
+            showVkHash: policy.showVkHash
+        )
+        XCTAssertThrowsError(
+            try verifyOpenACv2(prepare: prepare, show: show, policy: earlyPolicy, verifier: verifier)
+        ) { err in
+            XCTAssertEqual(err as? OpenACV2Error, .prepareNotActive)
+        }
+    }
+
+    func testOpenACv2ScopedLinkableWithoutScopeRejected() throws {
+        let (prepare, show, _, verifier) = try v2Fixture(linkMode: .scopedLinkable)
+        let invalidPolicy = OpenACV2Policy(
+            linkMode: .scopedLinkable,
+            linkScope: nil,
+            epoch: Data([0x20, 0x26, 0x04, 0x01]),
+            epochField: Data(repeating: 0x20, count: 32),
+            nowUnix: 150,
+            expectedChallenge: show.challenge,
+            prepareVkHash: sha256Hash(prepare.vk),
+            showVkHash: sha256Hash(show.vk)
+        )
+        XCTAssertThrowsError(
+            try verifyOpenACv2(prepare: prepare, show: show, policy: invalidPolicy, verifier: verifier)
+        ) { err in
+            XCTAssertEqual(err as? OpenACV2Error, .scopeMismatch)
+        }
+    }
+
+    // MARK: - OpenAC v3 — additional coverage
+
+    func testOpenACv3PrepareNotActiveRejected() throws {
+        let (prepare, show, policy, verifier) = try v3FullFixture()
+        let earlyPolicy = OpenACV3Policy(
+            linkMode: policy.linkMode,
+            linkScope: policy.linkScope,
+            epoch: policy.epoch,
+            nowUnix: 0,
+            expectedChallenge: policy.expectedChallenge,
+            expectedNonceHash: policy.expectedNonceHash,
+            prepareVkHash: policy.prepareVkHash,
+            showVkHash: policy.showVkHash
+        )
+        XCTAssertThrowsError(
+            try verifyOpenACv3(prepare: prepare, show: show, policy: earlyPolicy, verifier: verifier)
+        ) { err in
+            XCTAssertEqual(err as? OpenACV3Error, .prepareNotActive)
+        }
+    }
+
+    func testOpenACv3ExpiredPrepareRejected() throws {
+        let (prepare, show, policy, verifier) = try v3FullFixture()
+        let latePolicy = OpenACV3Policy(
+            linkMode: policy.linkMode,
+            linkScope: policy.linkScope,
+            epoch: policy.epoch,
+            nowUnix: 5_000,
+            expectedChallenge: policy.expectedChallenge,
+            expectedNonceHash: policy.expectedNonceHash,
+            prepareVkHash: policy.prepareVkHash,
+            showVkHash: policy.showVkHash
+        )
+        XCTAssertThrowsError(
+            try verifyOpenACv3(prepare: prepare, show: show, policy: latePolicy, verifier: verifier)
+        ) { err in
+            XCTAssertEqual(err as? OpenACV3Error, .expiredPrepare)
+        }
+    }
+
+    func testOpenACv3UntrustedShowVkRejected() throws {
+        let (prepare, show, policy, verifier) = try v3FullFixture()
+        let mutated = OpenACV3Policy(
+            linkMode: policy.linkMode,
+            linkScope: policy.linkScope,
+            epoch: policy.epoch,
+            nowUnix: policy.nowUnix,
+            expectedChallenge: policy.expectedChallenge,
+            expectedNonceHash: policy.expectedNonceHash,
+            prepareVkHash: policy.prepareVkHash,
+            showVkHash: Data(repeating: 0xCD, count: 32)
+        )
+        XCTAssertThrowsError(
+            try verifyOpenACv3(prepare: prepare, show: show, policy: mutated, verifier: verifier)
+        ) { err in
+            XCTAssertEqual(err as? OpenACV3Error, .untrustedShowVk)
+        }
+    }
+
+    func testOpenACv3EmptyPrepareBundleRejected() throws {
+        let (prepare, show, policy, verifier) = try v3FullFixture()
+        let stripped = OpenACV3PrepareArtifact(
+            createdAtUnix: prepare.createdAtUnix,
+            expiresAtUnix: prepare.expiresAtUnix,
+            credentialType: prepare.credentialType,
+            commitmentX: prepare.commitmentX,
+            commitmentY: prepare.commitmentY,
+            pkDigest: prepare.pkDigest,
+            linkRand: prepare.linkRand,
+            proof: Data(),
+            vk: prepare.vk
+        )
+        XCTAssertThrowsError(
+            try verifyOpenACv3(prepare: stripped, show: show, policy: policy, verifier: verifier)
+        ) { err in
+            XCTAssertEqual(err as? OpenACV3Error, .emptyPrepareBundle)
+        }
+    }
+
+    func testOpenACv3EmptyShowBundleRejected() throws {
+        let (prepare, show, policy, verifier) = try v3FullFixture()
+        let stripped = OpenACV3ShowPresentation(
+            commitmentX: show.commitmentX,
+            commitmentY: show.commitmentY,
+            pkDigest: show.pkDigest,
+            nonceHash: show.nonceHash,
+            challenge: show.challenge,
+            challengeDigest: show.challengeDigest,
+            linkTag: show.linkTag,
+            proof: Data(),
+            vk: show.vk
+        )
+        XCTAssertThrowsError(
+            try verifyOpenACv3(prepare: prepare, show: stripped, policy: policy, verifier: verifier)
+        ) { err in
+            XCTAssertEqual(err as? OpenACV3Error, .emptyShowBundle)
+        }
+    }
+
+    func testOpenACv3InvalidPrepareProofRejected() throws {
+        let (prepare, show, policy, _) = try v3FullFixture()
+        let alwaysFalse: OpenACNoirVerifier = { _, _ in false }
+        XCTAssertThrowsError(
+            try verifyOpenACv3(prepare: prepare, show: show, policy: policy, verifier: alwaysFalse)
+        ) { err in
+            XCTAssertEqual(err as? OpenACV3Error, .invalidPrepareProof)
+        }
+    }
+
+    func testOpenACv3InvalidShowProofRejected() throws {
+        let (prepare, show, policy, _) = try v3FullFixture()
+        var calls = 0
+        let verifier: OpenACNoirVerifier = { _, _ in
+            calls += 1
+            return calls == 1 // first (prepare) ok, second (show) fails
+        }
+        XCTAssertThrowsError(
+            try verifyOpenACv3(prepare: prepare, show: show, policy: policy, verifier: verifier)
+        ) { err in
+            XCTAssertEqual(err as? OpenACV3Error, .invalidShowProof)
+        }
+    }
+
+    func testOpenACv3PrepareCommitmentNotInProofRejected() throws {
+        let (prepare, show, policy, verifier) = try v3FullFixture()
+        // Strip the commitment prefix from the prepare proof so the
+        // 64-byte aligned scan misses it.
+        let stripped = OpenACV3PrepareArtifact(
+            createdAtUnix: prepare.createdAtUnix,
+            expiresAtUnix: prepare.expiresAtUnix,
+            credentialType: prepare.credentialType,
+            commitmentX: prepare.commitmentX,
+            commitmentY: prepare.commitmentY,
+            pkDigest: prepare.pkDigest,
+            linkRand: prepare.linkRand,
+            proof: Data([0xFF, 0xEE, 0xDD]),
+            vk: prepare.vk
+        )
+        XCTAssertThrowsError(
+            try verifyOpenACv3(prepare: stripped, show: show, policy: policy, verifier: verifier)
+        ) { err in
+            XCTAssertEqual(err as? OpenACV3Error, .prepareCommitmentNotInProof)
+        }
+    }
+
+    func testOpenACv3ShowCommitmentNotInProofRejected() throws {
+        let (prepare, show, policy, verifier) = try v3FullFixture()
+        // Show proof retains nonce_hash + pk_digest but drops commitment x||y.
+        var stripped = Data()
+        stripped.append(show.pkDigest)
+        stripped.append(show.nonceHash)
+        stripped.append(Data([40, 50, 60]))
+        let strippedShow = OpenACV3ShowPresentation(
+            commitmentX: show.commitmentX,
+            commitmentY: show.commitmentY,
+            pkDigest: show.pkDigest,
+            nonceHash: show.nonceHash,
+            challenge: show.challenge,
+            challengeDigest: show.challengeDigest,
+            linkTag: show.linkTag,
+            proof: stripped,
+            vk: show.vk
+        )
+        XCTAssertThrowsError(
+            try verifyOpenACv3(prepare: prepare, show: strippedShow, policy: policy, verifier: verifier)
+        ) { err in
+            XCTAssertEqual(err as? OpenACV3Error, .showCommitmentNotInProof)
+        }
+    }
+
+    func testOpenACv3InvalidChallengeRejected() throws {
+        let (prepare, show, policy, verifier) = try v3FullFixture()
+        let mutated = OpenACV3Policy(
+            linkMode: policy.linkMode,
+            linkScope: policy.linkScope,
+            epoch: policy.epoch,
+            nowUnix: policy.nowUnix,
+            expectedChallenge: Data(repeating: 0xFA, count: 32),
+            expectedNonceHash: policy.expectedNonceHash,
+            prepareVkHash: policy.prepareVkHash,
+            showVkHash: policy.showVkHash
+        )
+        XCTAssertThrowsError(
+            try verifyOpenACv3(prepare: prepare, show: show, policy: mutated, verifier: verifier)
+        ) { err in
+            XCTAssertEqual(err as? OpenACV3Error, .invalidChallenge)
+        }
+    }
+
+    func testOpenACv3InvalidChallengeDigestRejected() throws {
+        let (prepare, show, policy, verifier) = try v3FullFixture()
+        let badShow = OpenACV3ShowPresentation(
+            commitmentX: show.commitmentX,
+            commitmentY: show.commitmentY,
+            pkDigest: show.pkDigest,
+            nonceHash: show.nonceHash,
+            challenge: show.challenge,
+            challengeDigest: Data(repeating: 0x77, count: 32),
+            linkTag: show.linkTag,
+            proof: show.proof,
+            vk: show.vk
+        )
+        XCTAssertThrowsError(
+            try verifyOpenACv3(prepare: prepare, show: badShow, policy: policy, verifier: verifier)
+        ) { err in
+            XCTAssertEqual(err as? OpenACV3Error, .invalidChallengeDigest)
+        }
+    }
+
+    func testOpenACv3UnlinkableHappyPath() throws {
+        let (prepare, show, policy, verifier) = try v3FullFixture(linkMode: .unlinkable)
+        XCTAssertTrue(
+            try verifyOpenACv3(prepare: prepare, show: show, policy: policy, verifier: verifier)
+        )
+    }
+
+    func testOpenACv3UnlinkableNonZeroTagRejected() throws {
+        let (prepare, show, _, verifier) = try v3FullFixture(linkMode: .scopedLinkable)
+        let unlinkablePolicy = OpenACV3Policy(
+            linkMode: .unlinkable,
+            linkScope: nil,
+            epoch: Data([0x20, 0x26, 0x04, 0x01]),
+            nowUnix: 150,
+            expectedChallenge: show.challenge,
+            expectedNonceHash: show.nonceHash,
+            prepareVkHash: sha256Hash(prepare.vk),
+            showVkHash: sha256Hash(show.vk)
+        )
+        XCTAssertThrowsError(
+            try verifyOpenACv3(prepare: prepare, show: show, policy: unlinkablePolicy, verifier: verifier)
+        ) { err in
+            XCTAssertEqual(err as? OpenACV3Error, .scopeMismatch)
+        }
+    }
+
+    func testOpenACv3ScopedLinkableMissingScopeRejected() throws {
+        let (prepare, show, _, verifier) = try v3FullFixture(linkMode: .scopedLinkable)
+        let invalidPolicy = OpenACV3Policy(
+            linkMode: .scopedLinkable,
+            linkScope: nil,
+            epoch: Data([0x20, 0x26, 0x04, 0x01]),
+            nowUnix: 150,
+            expectedChallenge: show.challenge,
+            expectedNonceHash: show.nonceHash,
+            prepareVkHash: sha256Hash(prepare.vk),
+            showVkHash: sha256Hash(show.vk)
+        )
+        XCTAssertThrowsError(
+            try verifyOpenACv3(prepare: prepare, show: show, policy: invalidPolicy, verifier: verifier)
+        ) { err in
+            XCTAssertEqual(err as? OpenACV3Error, .scopeMismatch)
+        }
+    }
+
+    func testOpenACv3ScopedLinkableZeroTagRejected() throws {
+        let (prepare, show, policy, verifier) = try v3FullFixture(linkMode: .scopedLinkable)
+        let badShow = OpenACV3ShowPresentation(
+            commitmentX: show.commitmentX,
+            commitmentY: show.commitmentY,
+            pkDigest: show.pkDigest,
+            nonceHash: show.nonceHash,
+            challenge: show.challenge,
+            challengeDigest: show.challengeDigest,
+            linkTag: Data(repeating: 0, count: 32),
+            proof: show.proof,
+            vk: show.vk
+        )
+        XCTAssertThrowsError(
+            try verifyOpenACv3(prepare: prepare, show: badShow, policy: policy, verifier: verifier)
+        ) { err in
+            XCTAssertEqual(err as? OpenACV3Error, .scopeMismatch)
+        }
+    }
+
+    func testOpenACv3LinkingHappyPathBoundaryNow() throws {
+        // Boundary test: nowUnix exactly equal to expiresAtUnix is still
+        // active (the check is `>` not `>=`). A regression here would
+        // expire credentials a second early.
+        let (prepare, show, policy) = try v3Fixture()
+        let boundaryPolicy = OpenACV3Policy(
+            linkMode: policy.linkMode,
+            linkScope: policy.linkScope,
+            epoch: policy.epoch,
+            nowUnix: prepare.expiresAtUnix,
+            expectedChallenge: policy.expectedChallenge,
+            expectedNonceHash: policy.expectedNonceHash,
+            prepareVkHash: policy.prepareVkHash,
+            showVkHash: policy.showVkHash
+        )
+        XCTAssertTrue(
+            try verifyOpenAcV3Linking(prepare: prepare, show: show, policy: boundaryPolicy)
+        )
+    }
+
+    func testOpenACv3ChallengeDigestSensitiveToEpoch() throws {
+        let cx = Data(repeating: 0x10, count: 32)
+        let cy = Data(repeating: 0x20, count: 32)
+        let challenge = Data(repeating: 0x30, count: 32)
+        let d1 = try computeOpenACv3ChallengeDigest(
+            commitmentX: cx,
+            commitmentY: cy,
+            challenge: challenge,
+            epoch: Data([0x20, 0x26, 0x04, 0x01])
+        )
+        let d2 = try computeOpenACv3ChallengeDigest(
+            commitmentX: cx,
+            commitmentY: cy,
+            challenge: challenge,
+            epoch: Data([0x20, 0x26, 0x04, 0x02])
+        )
+        XCTAssertNotEqual(d1, d2)
+    }
+
+    func testOpenACv3ChallengeDigestRejectsWrongLength() {
+        XCTAssertThrowsError(
+            try computeOpenACv3ChallengeDigest(
+                commitmentX: Data(repeating: 0, count: 31),
+                commitmentY: Data(repeating: 0, count: 32),
+                challenge: Data(repeating: 0, count: 32),
+                epoch: Data([0, 0, 0, 0])
+            )
+        ) { err in
+            if case let OpenACError.invalidLength(field, _, _) = err {
+                XCTAssertEqual(field, "commitmentX")
+            } else {
+                XCTFail("Expected OpenACError.invalidLength, got \(err)")
+            }
+        }
+    }
 }
 
 /// Thin CryptoKit facade used by tests to reproduce the package's SHA256 hash.
