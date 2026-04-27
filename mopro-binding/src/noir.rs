@@ -1,10 +1,10 @@
 use crate::error::MoproError;
 use std::collections::HashMap;
 
-use noir_rs::native_types::WitnessMap;
-use noir_rs::FieldElement;
+use noir_rs::acir::native_types::{Witness, WitnessMap};
+use noir_rs::acir::FieldElement;
 
-const SUPPORTED_NOIR_VERSION_PREFIX: &str = "1.0.0-beta.8";
+const SUPPORTED_NOIR_VERSION_PREFIX: &str = "1.0.0-beta.19";
 
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct NoirProofResult {
@@ -29,7 +29,7 @@ fn assert_supported_noir_version(circuit_json: &serde_json::Value) -> Result<(),
 
     if !noir_version.starts_with(SUPPORTED_NOIR_VERSION_PREFIX) {
         return Err(MoproError::CircuitError(format!(
-            "Incompatible noir_version '{noir_version}'. This binding supports '{SUPPORTED_NOIR_VERSION_PREFIX}.x' circuit artifacts (noir_rs v1.0.0-beta.8-3). Recompile circuits with matching toolchain or upgrade noir_rs/barretenberg."
+            "Incompatible noir_version '{noir_version}'. This binding supports '{SUPPORTED_NOIR_VERSION_PREFIX}.x' circuit artifacts (noir_rs v1.0.0-beta.19). Recompile circuits with matching toolchain or upgrade noir_rs/barretenberg."
         )));
     }
 
@@ -86,7 +86,7 @@ fn build_witness_map(
                         "Cannot parse '{val_str}' as field element for input '{name}'"
                     ))
                 })?;
-                witness_map.insert(noir_rs::native_types::Witness(witness_idx), field);
+                witness_map.insert(Witness(witness_idx), field);
                 witness_idx += 1;
             }
         } else {

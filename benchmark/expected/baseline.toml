@@ -97,32 +97,49 @@ device_binding = 159
 total_4_circuits = 803
 
 # ============================================================
-# Real prove + verify timings — BLOCKED 2026-04-27.
+# Real prove + verify timings — UNBLOCKED 2026-04-27.
 #
-# `make bench-prove-verify` cannot run end-to-end because of a
-# noir_rs / circuit toolchain mismatch:
+# History: the 4/27 morning bench-prove-verify run errored out with
+# `CircuitError: Incompatible noir_version`. Circuits compile with
+# nargo 1.0.0-beta.19; mopro-binding pinned noir_rs to the
+# `v1.0.0-beta.8-3` branch which only accepts beta.8 ACIR artifacts.
 #
-#   CircuitError: Incompatible noir_version
-#     '1.0.0-beta.19+74d6be658e1ad252f87943292ba09bdd4da80bd4'.
-#   This binding supports '1.0.0-beta.8.x' circuit artifacts
-#   (noir_rs v1.0.0-beta.8-3).
+# Resolution: 4/27 afternoon, mopro-binding/Cargo.toml moved to
+# `tag = "v1.0.0-beta.19"` (released 2026-04-16, includes the
+# upstream switch to the official barretenberg-rs crate). Three
+# follow-up source edits made the build green:
+#   * noir.rs imports moved to `noir_rs::acir::native_types::*` and
+#     `noir_rs::acir::FieldElement` (both re-exports of the embedded
+#     acvm crate; the legacy `noir_rs::native_types` shim was removed
+#     in beta.19).
+#   * SUPPORTED_NOIR_VERSION_PREFIX bumped from "1.0.0-beta.8" to
+#     "1.0.0-beta.19" so assert_supported_noir_version accepts the
+#     freshly compiled circuit JSON.
 #
-# Resolution paths (next session):
-#   (a) Bump mopro-binding's noir_rs / barretenberg deps to a beta.19+
-#       compatible release, OR
-#   (b) Pin the circuit workspace to nargo 1.0.0-beta.8 and recompile
-#       (loses recent security/feature fixes — not recommended).
+# After the upgrade, `make bench-prove-verify` runs the four
+# disclosure benches end-to-end against real proofs.
 #
-# Until then, no real prove_ms / verify_ms / proof_bytes / RSS numbers
-# can be recorded here. PERF-7 reported "RSS before=8MB after=9MB" but
-# the prove call errored out before doing real work, so the delta is
-# meaningless.
+# Numbers below come from: darwin/arm64 (host machine), nargo
+# 1.0.0-beta.19, noir_rs v1.0.0-beta.19, mopro-binding release
+# build, single-thread Criterion run. They reflect the v1 disclosure
+# circuit only (487 ACIR opcodes, ~80 KB artifact); v2/v3 circuits
+# still need bench wrappers added in mopro-binding/src/noir.rs.
 # ============================================================
 [performance]
-status = "blocked_on_noir_rs_upgrade"
-blocker_seen = "2026-04-27"
-prove_ms = "n/a"
-verify_ms = "n/a"
-proof_bytes = "n/a"
-peak_rss_mb = "n/a"
+status = "unblocked"
+unblocked_on = "2026-04-27"
+mopro_binding_noir_rs = "v1.0.0-beta.19"
+host = "darwin/arm64"
+
+# disclosure (v1 SHA256-based, 487 gates, 79,661-byte artifact)
+disclosure_prove_ms = 26690    # 26.689755459 s -- first run on toolchain-upgraded build cache
+disclosure_verify_ms = 83      # 82.85275 ms
+disclosure_proof_bytes = 18724
+disclosure_vk_bytes = 3680
+disclosure_peak_rss_mb = 320   # delta 309 MB above 11 MB idle baseline
+
+# v2 / v3 prove+verify numbers still pending; bench wrappers for
+# passport_adapter / openac_show / composite_show etc. need to be
+# added to mopro-binding/src/noir.rs (mirror the disclosure pattern).
+v2_v3_status = "wrappers_pending_in_mopro_binding_src_noir_rs"
 
