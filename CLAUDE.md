@@ -20,28 +20,37 @@ Passport → MRZ OCR → NFC chip read → CSCA passive auth → OpenPassport No
 ## Project Structure
 
 ```
-circuits/                   # Noir workspace (Nargo.toml at root)
-├── passport_verifier/      # RSA-SHA256 signature verification (DSC → SOD)
-├── data_integrity/         # DG hash chain verification (SOD hash matching)
-├── disclosure/             # Selective disclosure (nationality, age, name from MRZ)
-├── prepare_link/           # OpenAC prepare-phase commitment (offline, v1 SHA256)
-├── show_link/              # OpenAC show-phase challenge binding (online, v1 SHA256)
-├── openac_core/            # Shared Pedersen commitment library (v2)
-├── passport_adapter/       # Passport → OpenAC adapter (v2 Pedersen)
-├── openac_show/            # Show-phase with Pedersen commitments (v2)
-├── device_binding/         # Device binding circuit (v2, planned)
-├── sdjwt_adapter/          # SD-JWT credential adapter
+circuits/                   # Noir workspace (Nargo.toml at root) — 14 production circuits
+├── passport_verifier/      # v1: RSA-SHA256 signature verification (DSC → SOD)
+├── data_integrity/         # v1: DG hash chain verification (SOD hash matching)
+├── disclosure/             # v1: Selective disclosure (nationality, age, name from MRZ)
+├── prepare_link/           # v1: OpenAC prepare-phase commitment (SHA256, offline)
+├── show_link/              # v1: OpenAC show-phase challenge binding (SHA256, online)
+├── device_binding/         # v2: Device binding circuit (Pedersen arity-4, deprecated)
+├── openac_core/            # v3: Shared Pedersen library (commit/show/predicate/profile/smt)
+├── passport_adapter/       # v3.1: Passport → OpenAC adapter (CSCA root + DSC SMT)
+├── openac_show/            # v3: Show phase with Pedersen + pk_digest
+├── sdjwt_adapter/          # v3: SD-JWT (ES256) → Pedersen commitment
+├── jwt_x5c_adapter/        # v3.1: JWT x5c (RSA + JWT payload) → X.509 commitment
+├── x509_show/              # v3: X.509 show phase (commitment opening + ECDSA device binding)
+├── composite_show/         # v3: Multi-credential show (passport + X.509 OR SD-JWT)
+├── mdoc_adapter/           # v3: mDoc/mDL prepare adapter (Direction D, ES256 issuer)
 └── target/                 # Compiled circuit JSON artifacts
-mopro-binding/              # Mobile prover integration via mopro (WIP)
-├── src/bin/
-├── src/openac.rs           # Rust OpenAC verification layer
-├── src/openac_v2.rs        # Rust OpenAC v2 (Pedersen) verification
-└── test-vectors/noir/
+mopro-binding/              # Mobile prover integration via mopro
+├── src/openac.rs           # v1 SHA256 OpenAC verifier (Rust)
+├── src/openac_v2.rs        # v2 Pedersen OpenAC verifier (Rust)
+├── src/openac_v3.rs        # v3 Pedersen + pk_digest verifier (Rust)
+├── src/noir.rs             # noir_rs prove/verify entry points
+└── test-vectors/noir/      # Compiled circuit JSONs for cargo tests
 benchmark/                  # Circuit benchmark & spec compliance suite
-├── spec.toml               # Machine-readable circuit spec definition
+├── spec.toml               # Machine-readable circuit spec (source of truth)
 ├── expected/baseline.toml  # Gate count, test count, artifact size baselines
 ├── scripts/                # Benchmark, lint, size analysis scripts
 └── reports/                # Generated reports (gitignored)
+spec/                       # Human-readable design docs
+├── x509-circuits.md        # X.509 / JWT-x5c circuit spec
+├── x509-benchmark.md       # X.509 gate-count benchmarks
+└── x509-migration.md       # X.509 migration notes
 scripts/                    # Project tooling
 ├── pre-commit              # Git pre-commit hook (install via: make install-hooks)
 ├── release.sh              # Auto-version + tag creation
@@ -129,7 +138,7 @@ Each circuit is graded by **bytes/gate** (artifact bytes ÷ ACIR gate count).
 | D | ≤ 100 | Bloated — review artifact structure |
 | F | > 100 | Critical — likely low gate count inflating ratio |
 
-Total artifact budget: ~2.3 MB (all 8 circuits). Passport_adapter is the largest at ~1 MB.
+Total artifact budget: ~2.3 MB across all 14 circuits. `passport_adapter` is the largest single artifact (~1 MB). For exact per-circuit sizes, run `make bench-size` or check `benchmark/expected/baseline.toml`.
 
 ## Benchmark
 
@@ -149,10 +158,15 @@ bash benchmark/scripts/circuit-lint.sh         # 9-dimension quality lint
 - **reports/** — Generated JSON/text reports (gitignored)
 
 ### Architecture Versions
-| Version | Commitment | Circuits |
-|---------|-----------|----------|
-| v1 | SHA256 | passport_verifier, data_integrity, disclosure, prepare_link, show_link |
-| v2 | Pedersen | openac_core, passport_adapter, openac_show, device_binding |
+
+`benchmark/spec.toml` is the source of truth for per-circuit `version =` fields.
+
+| Version | Commitment | Arity | Key feature | Circuits |
+|---------|-----------|-------|-------------|----------|
+| v1 | SHA256 | n/a | Hash-based prepare/show links | passport_verifier, data_integrity, disclosure, prepare_link, show_link |
+| v2 | Pedersen | 4 | Pedersen commitment without device binding (deprecated 2026-04-17) | device_binding |
+| v3 | Pedersen | 5 | `pk_digest` baked into commitment via `commit_attributes_v3()` — closes revocation bypass + enables in-circuit device binding | openac_core, openac_show, sdjwt_adapter, mdoc_adapter, x509_show, composite_show |
+| v3.1 | Pedersen | 5 | v3 + trust-anchor model (CSCA root / DSC SMT) and gate-budget optimizations | passport_adapter, jwt_x5c_adapter |
 
 ## CI / CD
 
@@ -192,7 +206,8 @@ Verifies that passport data groups (DG1–DG4) hash correctly into the SOD.
 - **Public inputs**: `expected_dg_hashes`, `sod_hash`
 - **Private inputs**: `dg_count`, `dg_contents`, `dg_lengths`
 - Constants: `MAX_DG_COUNT = 4`, `MAX_DG_SIZE = 512` bytes
-- Uses `std::hash::sha256`
+- Uses `sha256::digest`
+- **SOD hash format (hard constraint)**: `sod_hash = SHA256(dg0_hash || dg1_hash || dg2_hash || dg3_hash)` with **zero-padding** for unused DG slots (each slot is 32 bytes regardless of `dg_count`). This is **NOT** the ICAO 9303 LDS Security Object's TLV-encoded `signedAttrs` structure. The iOS app pipeline must therefore normalize NFC chip data into this raw-concatenation layout before feeding the circuit; passport_verifier consumes the same `sod_hash`.
 
 ### disclosure
 Selective disclosure over MRZ data — proves nationality, age ≥ threshold, or name without revealing the full MRZ.
@@ -217,16 +232,19 @@ Binds a verifier challenge to the prepare commitment and optionally computes a s
 - Unlinkable mode: `link_mode=false` → enforces zero link_scope and zero link_tag
 - Uses `sha256::digest`
 
-### OpenAC Flow (5-circuit composition)
+### OpenAC Flow (v1 5-circuit composition)
 ```
 passport_verifier ──(sod_hash)──► prepare_link ──(prepare_commitment)──► show_link
 data_integrity ──(mrz_hash)──┘                                              │
        └──(mrz_hash)──► disclosure ◄── (challenge binding via main_with_challenge)
 ```
 - **Paper reference**: OpenAC (zkID Team @ PSE, Nov 2025) — see `openAC.md` for full mapping
-- **Design**: Hash-based commitment (SHA256) instead of paper's Pedersen — pragmatic choice for Noir/mopro backend
-- **Device binding**: Planned v2 (out-of-band ECDSA, not in-circuit)
-- **Domain separation**: `openac.preparev1`, `openac.show.v1`, `openac.scope.v1` — consistent across Noir, Swift, Rust
+- **Design (v1)**: Hash-based commitment (SHA256) instead of paper's Pedersen — pragmatic choice for Noir/mopro backend. v3 switched to true Pedersen with pk_digest binding.
+- **Device binding**: v2 was out-of-band ECDSA (deprecated). v3 binds `pk_digest` into the commitment in-circuit.
+- **Domain separation** (all consistent across Noir / Rust / Swift):
+  - v1 hash-based: `openac.preparev1`, `openac.show.v1`, `openac.scope.v1`
+  - v1 disclosure challenge: `openac.disclosure.v1` (distinct from `openac.show.v1` — different preimage layout: `mrz_hash` vs `prepare_commitment`)
+  - v2/v3 Pedersen: `openac.show.v2`, `openac.scope.v2` + per-credential `DOMAIN_PASSPORT` / `DOMAIN_X509` / `DOMAIN_SDJWT` / `DOMAIN_MDL`
 
 ## Conventions
 

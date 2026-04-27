@@ -172,7 +172,8 @@ public / private inputs：
 OpenAC 擴充：
 
 - `main_with_challenge()` 先呼叫 `main()`
-- 再計算 `SHA256("openac.show.v1" || challenge || mrz_hash || epoch)` 與 `out_challenge_digest` 比對
+- 再計算 `SHA256("openac.disclosure.v1" || challenge || mrz_hash || epoch)` 與 `out_challenge_digest` 比對
+- 注意：domain 為 `openac.disclosure.v1`，與 `show_link` 的 `openac.show.v1` 刻意分離（preimage 也不同：mrz_hash vs prepare_commitment）
 
 public / private inputs：
 
@@ -282,6 +283,7 @@ public / private inputs：
 | Prepare | `openac.preparev1` |
 | Show | `openac.show.v1` |
 | Scope | `openac.scope.v1` |
+| Disclosure challenge | `openac.disclosure.v1` |
 
 必查檔案：
 
