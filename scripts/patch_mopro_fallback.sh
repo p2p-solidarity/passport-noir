@@ -19,6 +19,11 @@ HEADER
 
 cat "$TARGET_FILE" >> "$TMP_FILE"
 
+# Ensure the appended `#else` lands on its own line: uniffi 0.29 stopped emitting
+# a trailing newline, so without this the `#else` glues onto the previous line
+# and gets eaten by the trailing `// swiftlint:enable all` comment.
+printf '\n' >> "$TMP_FILE"
+
 cat >> "$TMP_FILE" <<'FALLBACK'
 #else
 import Foundation
