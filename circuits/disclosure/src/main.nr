@@ -590,11 +590,15 @@ fn test_undisclosed_fields_zeroed() {
 // ============================================================
 
 global CHALLENGE_BYTES: u32 = 32;
-global CHALLENGE_DOMAIN_BYTES: u32 = 14;
+global CHALLENGE_DOMAIN_BYTES: u32 = 20;
 global EPOCH_BYTES: u32 = 4;
 
+// Domain separator for disclosure challenge binding.
+// Must be distinct from show_link's "openac.show.v1": preimage layouts
+// diverge (mrz_hash here vs prepare_commitment there), so sharing a domain
+// would let an external verifier confuse digests across the two circuits.
 fn challenge_domain() -> [u8; CHALLENGE_DOMAIN_BYTES] {
-    [111, 112, 101, 110, 97, 99, 46, 115, 104, 111, 119, 46, 118, 49]
+    [111, 112, 101, 110, 97, 99, 46, 100, 105, 115, 99, 108, 111, 115, 117, 114, 101, 46, 118, 49]
 }
 
 fn compute_challenge_binding(

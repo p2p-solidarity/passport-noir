@@ -418,7 +418,9 @@ mod tests {
         println!("MP-5 PASS: {:?}", result.unwrap_err());
     }
 
-    // MP-5b: Version mismatch should fail gracefully (no native abort)
+    // MP-5b: Version mismatch should fail gracefully (no native abort).
+    // Uses a noir_version string that does NOT start with SUPPORTED_NOIR_VERSION_PREFIX
+    // so the version-check path fires before any bytecode deserialization.
     #[test]
     fn test_incompatible_noir_version_is_rejected() {
         let tmp_path = std::env::temp_dir().join(format!(
@@ -426,7 +428,7 @@ mod tests {
             std::process::id()
         ));
         let manifest = format!(
-            r#"{{"noir_version":"1.0.0-beta.19+test","bytecode":"{}"}}"#,
+            r#"{{"noir_version":"1.0.0-beta.18","bytecode":"{}"}}"#,
             SMALL_BETA8_BYTECODE
         );
         std::fs::write(&tmp_path, manifest).expect("should write temp manifest");
