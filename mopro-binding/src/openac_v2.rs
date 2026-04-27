@@ -432,8 +432,11 @@ mod tests {
         // Rebuild show proof with tampered commitment so it passes the proof-binding check
         show.commitment = tampered_commitment;
         show.proof = mock_proof_with_commitment(&tampered_commitment, &[40, 50, 60]);
-        show.challenge_digest =
-            compute_challenge_digest_v2(&show.commitment, &policy.expected_challenge, &policy.epoch);
+        show.challenge_digest = compute_challenge_digest_v2(
+            &show.commitment,
+            &policy.expected_challenge,
+            &policy.epoch,
+        );
 
         let err =
             verify_openac_v2_with_verifier(&prepare, &show, &policy, &always_valid).unwrap_err();
@@ -483,8 +486,11 @@ mod tests {
         policy.link_mode = LinkMode::Unlinkable;
         policy.link_scope = None;
         show.link_tag = [0u8; FIELD_BYTES];
-        show.challenge_digest =
-            compute_challenge_digest_v2(&show.commitment, &policy.expected_challenge, &policy.epoch);
+        show.challenge_digest = compute_challenge_digest_v2(
+            &show.commitment,
+            &policy.expected_challenge,
+            &policy.epoch,
+        );
 
         let result = verify_openac_v2_with_verifier(&prepare, &show, &policy, &always_valid);
         assert!(result.is_ok());
