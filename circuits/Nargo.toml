@@ -13,5 +13,6 @@ members = [
     "jwt_x5c_adapter",
     "x509_show",
     "composite_show",
+    "mdoc_adapter",
 ]
 default-member = "passport_verifier"

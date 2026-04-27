@@ -18,6 +18,7 @@ workspace_members = [
   "jwt_x5c_adapter",
   "x509_show",
   "composite_show",
+  "mdoc_adapter",
 ]
 
 # ============================================================
@@ -40,6 +41,7 @@ v3_circuits = [
   "jwt_x5c_adapter",
   "x509_show",
   "composite_show",
+  "mdoc_adapter",
 ]
 
 # ============================================================
@@ -524,6 +526,76 @@ min_positive_tests = 5
 min_negative_tests = 2
 
 exports = { out_commitment_x = "Field", out_commitment_y = "Field" }
+
+# ============================================================
+# Circuit: mdoc_adapter (v2 — Path A mDoc / mDL prepare, Direction D)
+# ============================================================
+# Direction D third slice (2026-04-27). v2 adds:
+#   * validUntil extraction: 13-byte CBOR prefix substring inclusion
+#     followed by ASCII date parse to YYYYMMDD (public output).
+#   * Device-key extraction from the issuer-signed mso. The 32+32
+#     coordinate bytes are read from the message (anchored by the
+#     8-byte COSE_Key prefix and 3-byte y-prefix) and used to derive
+#     pk_digest. This drops the v1 `enclave_pk_x/y` private witnesses
+#     -- the prover can no longer point at an arbitrary device key.
+# v0 + v1 layers (issuer ECDSA-P256, per-claim envelope authenticity +
+# substring inclusion, Pedersen v3 commitment) are preserved.
+[circuits.mdoc_adapter]
+type = "bin"
+description = "OpenAC mDoc / mDL adapter (v2): ECDSA-P256 issuer signature + variable-position CBOR substring inclusion + per-claim digest envelope verification + validUntil parsing + deviceKey extraction from mso + Pedersen v3 commitment bound to extracted pk_digest"
+source = "circuits/mdoc_adapter/src/main.nr"
+version = "v3"
+
+public_inputs = [
+  "issuer_pk_x", "issuer_pk_y",
+  "out_valid_until",
+  "out_commitment_x", "out_commitment_y",
+]
+public_input_types = ["[u8; 32]", "[u8; 32]", "u32", "Field", "Field"]
+
+# v2 drops `enclave_pk_x` / `enclave_pk_y` private witnesses (now
+# extracted in-circuit from the issuer-signed mso) and adds two layout
+# pointers: `valid_until_prefix_pos` and `device_key_prefix_pos`.
+private_inputs = [
+  "claim_count", "preimages", "preimage_lens", "digest_ids", "expected_envelopes",
+  "message", "message_len", "envelope_positions", "issuer_signature",
+  "valid_until_prefix_pos", "device_key_prefix_pos",
+  "link_rand",
+]
+private_input_types = [
+  "u8", "[[u8; 256]; 4]", "[u32; 4]", "[u8; 4]", "[[u8; 35]; 4]",
+  "[u8; 512]", "u32", "[u32; 4]", "[u8; 64]",
+  "u32", "u32",
+  "Field",
+]
+
+assertions = [
+  "mDoc preimage length exceeds maximum",
+  "mDoc digest envelope: digest_id byte mismatch",
+  "mDoc digest envelope: CBOR bytes(32) marker (0x58) mismatch",
+  "mDoc digest envelope: CBOR length byte (0x20) mismatch",
+  "mDoc digest envelope: preimage hash mismatch",
+  "mDoc must contain at least one claim",
+  "mDoc claim count exceeds MAX_CLAIMS",
+  "mDoc message length exceeds maximum",
+  "mDoc issuer ECDSA-P256 signature verification failed",
+  "mDoc substring window past message_len",
+  "mDoc substring byte does not match issuer-signed message",
+  "mDoc validUntil: expected '-' at byte 4",
+  "mDoc validUntil: expected '-' at byte 7",
+  "mDoc validUntil date window past message_len",
+  "mDoc validUntil extracted from mso does not match public output",
+  "mDoc deviceKey window past message_len",
+  "Commitment X mismatch",
+  "Commitment Y mismatch",
+]
+
+constants = { MAX_CLAIMS = 4, MAX_PREIMAGE_LEN = 256, MAX_MSG_LEN = 512, ENCODED_DIGEST_LEN = 35, VALID_UNTIL_PREFIX_LEN = 13, VALID_UNTIL_DATE_LEN = 10, DEVICE_KEY_PREFIX_LEN = 8, DEVICE_KEY_Y_PREFIX_LEN = 3, DEVICE_KEY_COORD_LEN = 32, CBOR_BYTES_32_MARKER = "0x58", CBOR_BYTES_32_LENGTH = "0x20" }
+
+min_positive_tests = 10
+min_negative_tests = 14
+
+exports = { out_valid_until = "u32", out_commitment_x = "Field", out_commitment_y = "Field" }
 
 # ============================================================
 # Circuit: jwt_x5c_adapter (v3.1 — Path A X.509 / OIDC RS256 prepare)

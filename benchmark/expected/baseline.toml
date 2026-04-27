@@ -4,7 +4,7 @@
 
 [meta]
 created = "2026-04-01"
-updated = "2026-04-26"
+updated = "2026-04-27"
 nargo_version = "1.0.0-beta.19"
 
 # Minimum test counts per circuit (fail if below)
@@ -25,9 +25,17 @@ sdjwt_adapter = { positive = 6, negative = 2, total = 8 }
 jwt_x5c_adapter = { positive = 7, negative = 4, total = 11 }
 x509_show = { positive = 3, negative = 2, total = 5 }
 composite_show = { positive = 1, negative = 3, total = 4 }
+# mdoc_adapter v2 (Direction D + validUntil + deviceKey extraction, 2026-04-27).
+# v1 had 10/11/21; v2 adds 3 positive (test_v2_main_passes, parse_iso_date_known_values,
+# extract_device_key_from_mso_round_trip) and 4 negative (wrong validUntil pos,
+# wrong out_valid_until, wrong device key pos, tampered device key y byte,
+# parse_iso_date rejects missing dash). v1 4 negative tests (tampered_sig /
+# tampered_message_byte / wrong_envelope_position / envelope_window_past_message_len)
+# were repurposed to use v2_build_message via v2_invoke_main.
+mdoc_adapter = { positive = 13, negative = 15, total = 28 }
 
 [tests.total]
-minimum = 171
+minimum = 199
 
 # Gate count baselines (ACIR opcodes, warn if > 10% regression)
 # Measured: 2026-04-17, nargo 1.0.0-beta.19
@@ -46,6 +54,7 @@ sdjwt_adapter = 5841       # new baseline (first Pedersen v3 adapter measurement
 jwt_x5c_adapter = 20879    # v3.1 multi-issuer dispatch; 4/26: +20 from openac_core path_index range-check
 x509_show = 549            # NEW — within 5,000 spec budget
 composite_show = 815       # 4/26: +131 from openac_core/predicate.nr + commit.nr changes (security fixes flow through imports). Main fn unchanged.
+mdoc_adapter = 692381      # 4/27: Direction D v2 (+validUntil prefix/parse + deviceKey extraction from mso). v1 was 441471, v0 was 7512.
 
 # Artifact sizes in bytes (warn if > 20% regression)
 # Measured: 2026-04-17, nargo 1.0.0-beta.19
@@ -63,7 +72,8 @@ sdjwt_adapter = 229000       # 4/26: +11578 from openac_core changes
 jwt_x5c_adapter = 1312940   # v3.1 multi-issuer (+11575 bytes vs. single-issuer)
 x509_show = 112000           # 4/26: +9962
 composite_show = 133000      # 4/26: +15188 from new test cases ab6add8 + openac_core changes
-total = 4742000              # 4/26 measurement
+mdoc_adapter = 10115613      # 4/27: Direction D v2 (+validUntil + deviceKey). v1 was 6441164.
+total = 14857613             # 4/27: 4742000 + 10115613 (mdoc_adapter v2)
 
 # Bytes per gate (lower = more compact artifact representation)
 # Grade: A(≤10) B(≤30) C(≤60) D(≤100) F(>100)
@@ -82,6 +92,7 @@ sdjwt_adapter = 39      # 4/26: 229000/5841 = 39.2
 jwt_x5c_adapter = 62   # 4/26: 1312940/20879 = 62.8
 x509_show = 204        # 4/26: 112000/549 = 204
 composite_show = 163   # 4/26: 133000/815 = 163; main fn unchanged, regression from openac_core security fixes
+mdoc_adapter = 14      # 4/27: 10115613/692381 = 14.6 -> grade B (v2 maintains ratio; main-fn-dominant artifact)
 
 # ============================================================
 # Witness generation time (nargo execute) — prove-time lower bound.
