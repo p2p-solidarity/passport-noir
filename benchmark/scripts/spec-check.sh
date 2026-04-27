@@ -113,7 +113,10 @@ check_assertions "passport_adapter" \
 # openac_show (v3 Path A: "Age/Nationality not disclosed but output is ..."
 # assertions intentionally removed per spec.toml — when a disclosure flag
 # is false the corresponding output is left unconstrained to avoid leakage).
+# 2026-04-28 P1-8: `credential_type` was promoted to a public input that must
+# equal DOMAIN_PASSPORT.
 check_assertions "openac_show" \
+  "openac_show only accepts DOMAIN_PASSPORT credentials" \
   "Commitment X mismatch" \
   "Commitment Y mismatch" \
   "Age predicate output mismatch" \
@@ -127,15 +130,18 @@ check_assertions "device_binding" \
   "Device binding ECDSA P-256 verification failed"
 
 # sdjwt_adapter (Path A v3)
+# 2026-04-28 P0-5 partial: out_disclosure_root binds the disclosed slot set.
 check_assertions "sdjwt_adapter" \
   "SD-JWT ES256 signature verification failed" \
   "Too many disclosures" \
   "Claim length exceeds maximum" \
   "SD-JWT disclosure hash mismatch" \
   "Commitment X mismatch" \
-  "Commitment Y mismatch"
+  "Commitment Y mismatch" \
+  "out_disclosure_root must match Pedersen-bound disclosure root"
 
 # jwt_x5c_adapter (Path A v3.1 — RS256 variant)
+# 2026-04-28 P0-4: sha256_var-based binding from jwt_signing_input to jwt_signed_hash.
 check_assertions "jwt_x5c_adapter" \
   "Leaf certificate signature verification failed" \
   "Issuer certificate signature verification failed" \
@@ -146,20 +152,23 @@ check_assertions "jwt_x5c_adapter" \
   "Unsupported issuer_format_tag (accepted: 1=GoogleOIDCv1, 2=AppleIDv1, 3=MicrosoftEntraV1)" \
   "Normalized JWT domain missing value" \
   "JWT payload hash mismatch" \
+  "JWT signing input hash does not match jwt_signed_hash" \
   "JWT signature verification failed" \
   "Commitment X mismatch" \
   "Commitment Y mismatch"
 
-# x509_show (Path A v3)
+# x509_show (Path A v3 + 2026-04-28 P1-9: link_mode + commitment-bound digest)
 check_assertions "x509_show" \
   "Commitment X mismatch" \
   "Commitment Y mismatch" \
   "Domain match predicate mismatch" \
   "Domain match must be boolean (0 or 1)" \
   "Link tag mismatch" \
+  "Unlinkable mode requires zero scope" \
   "Challenge digest mismatch"
 
 # composite_show (Path A v3 — generalized passport + aux credential)
+# 2026-04-28 P1-9: link_mode + composite (passport + aux) commitment-bound digest
 check_assertions "composite_show" \
   "aux_domain must be DOMAIN_X509 or DOMAIN_SDJWT" \
   "Commitment X mismatch" \
@@ -169,6 +178,7 @@ check_assertions "composite_show" \
   "Aux predicate mismatch" \
   "out_aux_predicate must be boolean (0 or 1)" \
   "Link tag mismatch" \
+  "Unlinkable mode requires zero scope" \
   "Challenge digest mismatch"
 
 echo ""
@@ -253,6 +263,27 @@ check_constant "MAX_DG_COUNT" "4" "$CIRCUIT_DIR/passport_adapter/src/main.nr"
 # MAX_DG_SIZE
 check_constant "MAX_DG_SIZE" "512" "$CIRCUIT_DIR/data_integrity/src/main.nr"
 check_constant "MAX_DG_SIZE" "512" "$CIRCUIT_DIR/passport_adapter/src/main.nr"
+
+echo ""
+echo "=== 3e. ABI-based public-input check (P2-10) ==="
+# Issue P2-10 (2026-04-28): the original `pub` count was a grep heuristic.
+# Replaced/augmented by spec-check-abi.py which parses every compiled
+# circuit's ABI from circuits/target/<name>.json and compares against
+# benchmark/spec.toml's public_inputs list. Detects reordering, renames,
+# missing entries, and count drift -- the actual things spec-check is
+# supposed to catch. We only fail the script if the ABI script returns
+# non-zero AND the compiled artifacts exist (so an uncompiled run still
+# reports the assertion checks above).
+ABI_SCRIPT="$PROJECT_DIR/benchmark/scripts/spec-check-abi.py"
+if [ -x "$ABI_SCRIPT" ]; then
+  if python3 "$ABI_SCRIPT" "$PROJECT_DIR"; then
+    :
+  else
+    ISSUES=$((ISSUES + 1))
+  fi
+else
+  warn_ "spec-check-abi.py not executable; run \`chmod +x $ABI_SCRIPT\`"
+fi
 
 echo ""
 echo "  Spec check complete: $ISSUES issue(s) found"

@@ -342,34 +342,45 @@ gate_budget = 50000  # v3.1 measured 36,223 opcodes; ~28% headroom
 # and `dsc_smt_root` (DSC revocation list) are the only non-commitment public
 # inputs. The DSC RSA modulus is now a private witness because CSCA + Merkle
 # inclusion proves its legitimacy.
+# 2026-04-28 P0-3: `exponent` is also PUBLIC and asserted to equal 65537 in
+# the circuit so verifiers can rely on the DSC RSA exponent being ICAO-mandated.
 public_inputs = [
   "csca_root", "dsc_smt_root",
+  "exponent",
   "out_commitment_x", "out_commitment_y",
 ]
-public_input_types = ["Field", "Field", "Field", "Field"]
+public_input_types = ["Field", "Field", "u32", "Field", "Field"]
 
 private_inputs = [
-  "sod_hash", "signature_limbs", "modulus_limbs", "redc_limbs", "exponent",
+  "sod_hash", "signature_limbs", "modulus_limbs", "redc_limbs",
   "csca_modulus_limbs", "csca_redc_limbs",
   "dsc_tbs", "dsc_cert_sig_limbs",
   "csca_merkle_index", "csca_merkle_siblings",
+  "csca_tbs_hash_hi", "csca_tbs_hash_lo",
   "dsc_serial", "smt_siblings", "smt_old_key", "smt_old_value", "smt_is_old0",
   "dg_count", "dg_contents", "dg_lengths", "expected_dg_hashes",
   "link_rand",
   "enclave_pk_x", "enclave_pk_y",
 ]
 private_input_types = [
-  "[u8; 32]", "[u128; 18]", "[u128; 18]", "[u128; 18]", "u32",
+  "[u8; 32]", "[u128; 18]", "[u128; 18]", "[u128; 18]",
   "[u128; 18]", "[u128; 18]",
   "[u8; 1536]", "[u128; 18]",
   "u32", "[Field; 8]",
+  "Field", "Field",
   "[u8; 20]", "[Field; 32]", "Field", "Field", "bool",
   "u8", "[[u8; 512]; 4]", "[u32; 4]", "[[u8; 32]; 4]",
   "Field",
   "[u8; 32]", "[u8; 32]",
 ]
 
+# 2026-04-28 P1-7 follow-up: passport_adapter switched to compute_csca_leaf_v2
+# in both `verify_csca_chain` and the DSC revocation SMT issuer_id derivation.
+# `csca_tbs_hash_hi/lo` are private witnesses constrained by the Master List
+# Merkle root (a tampered hash produces a leaf that no longer matches the
+# off-chain snapshot's path).
 assertions = [
+  "Passport DSC exponent must be 65537 (ICAO 9303 v3 trust model)",
   "Passport DSC signature verification failed",
   "CSCA signature over DSC TBS failed verification",
   "DSC modulus mismatch with CSCA-signed TBS",
@@ -386,10 +397,10 @@ assertions = [
   "Commitment Y mismatch",
 ]
 
-constants = { MAX_DG_COUNT = 4, MAX_DG_SIZE = 512, DSC_TBS_LEN = 1536, DSC_SERIAL_OFFSET = 352, DSC_SERIAL_LEN = 20, CSCA_MERKLE_DEPTH = 8, SMT_DEPTH = 32, CSCA_RSA_EXPONENT = 65537 }
+constants = { MAX_DG_COUNT = 4, MAX_DG_SIZE = 512, DSC_TBS_LEN = 1536, DSC_SERIAL_OFFSET = 352, DSC_SERIAL_LEN = 20, CSCA_MERKLE_DEPTH = 8, SMT_DEPTH = 32, CSCA_RSA_EXPONENT = 65537, DSC_RSA_EXPONENT = 65537 }
 
 min_positive_tests = 7   # v3.1 unit tests: DG chain + commitment + DSC extract + revocation
-min_negative_tests = 4
+min_negative_tests = 6
 
 exports = { out_commitment_x = "Field", out_commitment_y = "Field" }
 
@@ -409,6 +420,7 @@ source = "circuits/openac_show/src/main.nr"
 version = "v3"
 
 public_inputs = [
+  "credential_type",
   "nonce_hash",
   "link_mode", "link_scope", "epoch", "epoch_field",
   "current_year", "current_month", "current_day", "age_threshold",
@@ -418,6 +430,7 @@ public_inputs = [
   "out_is_older", "out_nationality",
 ]
 public_input_types = [
+  "Field",
   "[u8; 32]",
   "bool", "Field", "[u8; 4]", "Field",
   "u32", "u32", "u32", "u32",
@@ -434,15 +447,18 @@ public_input_types = [
 # ...` assertions from v2 are intentionally removed — when a disclosure flag
 # is false, the corresponding output is unconstrained to prevent leakage.
 # `verify_show` (openac_core::show) handles hash + link-tag assertions.
+# Note (2026-04-28 P1-8): `credential_type` is PUBLIC and asserted equal to
+# DOMAIN_PASSPORT in-circuit -- verifiers can require passport-only semantics
+# from openac_show. Multi-credential flows live in composite_show.
 private_inputs = [
-  "credential_type", "attr_hash_hi", "attr_hash_lo", "link_rand",
+  "attr_hash_hi", "attr_hash_lo", "link_rand",
   "enclave_pk_x", "enclave_pk_y", "signature",
   "challenge",
   "birth_year", "birth_month", "birth_day",
   "nationality",
 ]
 private_input_types = [
-  "Field", "Field", "Field", "Field",
+  "Field", "Field", "Field",
   "[u8; 32]", "[u8; 32]", "[u8; 64]",
   "[u8; 32]",
   "u32", "u32", "u32",
@@ -450,6 +466,7 @@ private_input_types = [
 ]
 
 assertions = [
+  "openac_show only accepts DOMAIN_PASSPORT credentials",
   "Commitment X mismatch",
   "Commitment Y mismatch",
   "Hash mismatch",
@@ -467,7 +484,7 @@ assertions = [
 ]
 
 min_positive_tests = 4
-min_negative_tests = 3
+min_negative_tests = 4
 
 imports = { out_commitment_x = "passport_adapter", out_commitment_y = "passport_adapter" }
 
@@ -510,17 +527,23 @@ version = "v3"
 # payload the issuer signed (a private payload hash would let a prover swap
 # the signed payload silently). `out_sd_root_{hi,lo}` are `pub` so the verifier
 # can externally link which disclosure set was committed.
+# 2026-04-28 P0-5 (partial): out_disclosure_root publishes a Pedersen
+# commitment over (count, slot_hashes...) so verifier policy can match the
+# disclosed set against an issuer-published manifest off-chain. Full
+# inclusion-in-issuer-_sd-array binding is tracked for v3.2.
 public_inputs = [
   "jwt_payload_hash",
   "issuer_pk_x", "issuer_pk_y",
   "out_commitment_x", "out_commitment_y",
   "out_sd_root_hi", "out_sd_root_lo",
+  "out_disclosure_root",
 ]
 public_input_types = [
   "[u8; 32]",
   "[u8; 32]", "[u8; 32]",
   "Field", "Field",
   "Field", "Field",
+  "Field",
 ]
 
 # v3 adds `enclave_pk_x`, `enclave_pk_y` as private witnesses so the
@@ -546,14 +569,15 @@ assertions = [
   "SD-JWT disclosure hash mismatch",
   "Commitment X mismatch",
   "Commitment Y mismatch",
+  "out_disclosure_root must match Pedersen-bound disclosure root",
 ]
 
 constants = { MAX_DISCLOSURES = 8, MAX_CLAIM_SIZE = 64, SALT_SIZE = 16 }
 
-min_positive_tests = 5
+min_positive_tests = 8
 min_negative_tests = 2
 
-exports = { out_commitment_x = "Field", out_commitment_y = "Field", out_sd_root_hi = "Field", out_sd_root_lo = "Field" }
+exports = { out_commitment_x = "Field", out_commitment_y = "Field", out_sd_root_hi = "Field", out_sd_root_lo = "Field", out_disclosure_root = "Field" }
 
 # ============================================================
 # Circuit: mdoc_adapter (v2 — Path A mDoc / mDL prepare, Direction D)
@@ -662,7 +686,9 @@ private_inputs = [
   "leaf_sig", "issuer_sig",
   "serial_number",
   "smt_siblings", "smt_old_key", "smt_old_value", "smt_is_old0",
-  "jwt_payload_norm", "jwt_sig",
+  "jwt_payload_norm",
+  "jwt_signing_input", "jwt_signing_input_len",
+  "jwt_sig",
   "jwt_modulus_limbs", "jwt_redc_limbs", "issuer_redc_limbs",
   "link_rand_p",
   "enclave_pk_x", "enclave_pk_y",
@@ -672,12 +698,20 @@ private_input_types = [
   "[u128; 18]", "[u128; 18]",
   "[u8; 20]",
   "[Field; 32]", "Field", "Field", "bool",
-  "[u8; 1024]", "[u128; 18]",
+  "[u8; 1024]",
+  "[u8; 1536]", "u32",
+  "[u128; 18]",
   "[u128; 18]", "[u128; 18]", "[u128; 18]",
   "Field",
   "[u8; 32]", "[u8; 32]",
 ]
 
+# 2026-04-28 P0-4: jwt_signing_input + jwt_signing_input_len are private
+# witnesses that bind sha256_var(input, len) == jwt_signed_hash, closing the
+# gap where jwt_signed_hash and jwt_payload_b64h were unrelated. Residual
+# gap (tracked, not yet closed): the circuit does NOT verify base64url
+# decoding of the payload section back to jwt_payload_norm. Verifier policy
+# must do that off-chain.
 assertions = [
   "Leaf certificate signature verification failed",
   "Issuer certificate signature verification failed",
@@ -688,15 +722,16 @@ assertions = [
   "Unsupported issuer_format_tag (accepted: 1=GoogleOIDCv1, 2=AppleIDv1, 3=MicrosoftEntraV1)",
   "Normalized JWT domain missing value",
   "JWT payload hash mismatch",
+  "JWT signing input hash does not match jwt_signed_hash",
   "JWT signature verification failed",
   "Commitment X mismatch",
   "Commitment Y mismatch",
 ]
 
-constants = { CERT_TBS_LEN = 1536, JWT_PAYLOAD_LEN = 1024, LIMB_COUNT = 18, SMT_DEPTH = 32, RSA_EXPONENT = 65537, LEAF_SERIAL_OFFSET = 352, LEAF_SERIAL_LEN = 20, ISSUER_FORMAT_GOOGLE_OIDC_V1 = 1, ISSUER_FORMAT_APPLE_ID_V1 = 2, ISSUER_FORMAT_MICROSOFT_ENTRA_V1 = 3, GOOGLE_OIDC_V1_EMAIL_DOMAIN_OFFSET = 17, APPLE_ID_V1_EMAIL_DOMAIN_OFFSET = 16, MICROSOFT_ENTRA_V1_EMAIL_DOMAIN_OFFSET = 15 }
+constants = { CERT_TBS_LEN = 1536, JWT_PAYLOAD_LEN = 1024, JWT_SIGNING_INPUT_LEN = 1536, LIMB_COUNT = 18, SMT_DEPTH = 32, RSA_EXPONENT = 65537, LEAF_SERIAL_OFFSET = 352, LEAF_SERIAL_LEN = 20, ISSUER_FORMAT_GOOGLE_OIDC_V1 = 1, ISSUER_FORMAT_APPLE_ID_V1 = 2, ISSUER_FORMAT_MICROSOFT_ENTRA_V1 = 3, GOOGLE_OIDC_V1_EMAIL_DOMAIN_OFFSET = 17, APPLE_ID_V1_EMAIL_DOMAIN_OFFSET = 16, MICROSOFT_ENTRA_V1_EMAIL_DOMAIN_OFFSET = 15 }
 
-min_positive_tests = 7
-min_negative_tests = 4
+min_positive_tests = 8
+min_negative_tests = 5
 
 exports = { out_commitment_x = "Field", out_commitment_y = "Field" }
 
@@ -721,14 +756,14 @@ public_inputs = [
   "in_commitment_x509_x", "in_commitment_x509_y",
   "nonce_hash",
   "target_domain_hash",
-  "link_scope", "epoch",
+  "link_mode", "link_scope", "epoch",
   "out_link_tag", "out_domain_match", "out_challenge_digest",
 ]
 public_input_types = [
   "Field", "Field",
   "[u8; 32]",
   "Field",
-  "Field", "Field",
+  "bool", "Field", "Field",
   "Field", "Field", "Field",
 ]
 
@@ -741,17 +776,22 @@ private_input_types = [
   "[u8; 32]", "[u8; 32]", "[u8; 64]",
 ]
 
+# 2026-04-28 P1-9: challenge digest now binds the credential commitment via
+# `compute_show_challenge_digest_v2`, and `link_mode` toggles unlinkable mode
+# (link_scope = out_link_tag = 0). This brings x509_show in line with
+# openac_core::show's transcript & link-mode semantics.
 assertions = [
   "Commitment X mismatch",
   "Commitment Y mismatch",
   "Domain match predicate mismatch",
   "Domain match must be boolean (0 or 1)",
   "Link tag mismatch",
+  "Unlinkable mode requires zero scope",
   "Challenge digest mismatch",
 ]
 
-min_positive_tests = 3
-min_negative_tests = 2
+min_positive_tests = 4
+min_negative_tests = 5
 
 imports = { in_commitment_x509_x = "jwt_x5c_adapter", in_commitment_x509_y = "jwt_x5c_adapter" }
 
@@ -777,7 +817,7 @@ public_inputs = [
   "age_threshold",
   "current_year", "current_month", "current_day",
   "target_aux_hash",
-  "link_scope", "epoch",
+  "link_mode", "link_scope", "epoch",
   "out_link_tag", "out_is_older", "out_aux_predicate", "out_challenge_digest",
 ]
 public_input_types = [
@@ -788,7 +828,7 @@ public_input_types = [
   "Field",
   "Field", "Field", "Field",
   "Field",
-  "Field", "Field",
+  "bool", "Field", "Field",
   "Field", "Field", "Field", "Field",
 ]
 
@@ -803,6 +843,9 @@ private_input_types = [
   "[u8; 32]", "[u8; 32]", "[u8; 64]",
 ]
 
+# 2026-04-28 P1-9: challenge digest now folds BOTH commitments
+# (compute_composite_challenge_digest), and `link_mode` toggles unlinkable
+# mode the same way openac_core::show / x509_show do.
 assertions = [
   "aux_domain must be DOMAIN_X509 or DOMAIN_SDJWT",
   "Commitment X mismatch",
@@ -812,6 +855,7 @@ assertions = [
   "Aux predicate mismatch",
   "out_aux_predicate must be boolean (0 or 1)",
   "Link tag mismatch",
+  "Unlinkable mode requires zero scope",
   "Challenge digest mismatch",
 ]
 
