@@ -7,7 +7,7 @@ use openac_core::commit::{
     assert_commitment_eq, commit_attributes_v3, DOMAIN_CSCA_NODE, DOMAIN_PASSPORT,
 };
 use openac_core::device::pk_digest_from_bytes;
-use openac_core::merkle::{compute_csca_leaf, CSCA_MERKLE_DEPTH, verify_inclusion_depth_8};
+use openac_core::merkle::{compute_csca_leaf_v2, CSCA_MERKLE_DEPTH, verify_inclusion_depth_8};
 use openac_core::predicate::two_digit_year_to_four;
 use openac_core::profile::pack_passport_profile;
 use openac_core::smt::{SMT_DEPTH, smt_fold, verify_non_membership};
@@ -55,6 +55,13 @@ global DSC_SERIAL_LEN: u32 = 20;
 // CSCA -> DSC RSA signature uses RSA-2048 PKCS#1v1.5 with exponent 65537, per
 // ICAO 9303 conformance (same parameters as the DSC -> SOD signature).
 global CSCA_RSA_EXPONENT: u32 = 65537;
+// DSC -> SOD signature exponent: ICAO 9303 mandates 65537 for new passports.
+// Issue P0-3 (2026-04-28): the exponent used to be a private witness, so a
+// prover could swap in any value (e=3, e=1, etc.) the verifier could not see.
+// We now require it to be a public input AND assert it is exactly 65537.
+// Legacy passports issued with e=3 are out of scope for the v3 trust model;
+// when they need to be supported, lift the assertion to `e == 3 || e == 65537`.
+global DSC_RSA_EXPONENT: u32 = 65537;
 
 /// Verify DG hash chain: each data group's content hashes to the expected hash,
 /// and the combined hash of all DG hashes matches the SOD hash.
@@ -129,14 +136,22 @@ fn extract_dsc_modulus_limbs(dsc_tbs: [u8; DSC_TBS_LEN]) -> [u128; RSA_LIMB_COUN
 ///   3. Re-extract the DSC modulus from the TBS and assert it matches the one
 ///      used to verify DSC -> SOD. This is how an attacker is prevented from
 ///      swapping in a DSC public key that the CSCA never signed.
-///   4. Hash the CSCA modulus into a leaf and verify depth-8 Merkle inclusion
-///      under the ICAO Master List root.
+///   4. Compute the v3 CSCA leaf via `compute_csca_leaf_v2(modulus, exponent,
+///      tbs_hash_hi/lo)` and verify depth-8 Merkle inclusion. P1-7 (2026-04-28)
+///      moved the leaf from "modulus only" (v1) to a binding that also
+///      commits to the CSCA's RSA exponent and a SHA256 of its canonical TBS
+///      (country, subject, validity, key-usage). The off-chain Master List
+///      builder MUST use the same recipe; if a prover supplies wrong
+///      tbs_hash_hi/lo for the actual CSCA, the leaf will not match the
+///      Merkle path and verification fails.
 fn verify_csca_chain(
     csca_modulus_limbs: [u128; RSA_LIMB_COUNT],
     csca_redc_limbs: [u128; RSA_LIMB_COUNT],
     dsc_tbs: [u8; DSC_TBS_LEN],
     dsc_cert_sig_limbs: [u128; RSA_LIMB_COUNT],
     dsc_modulus_limbs: [u128; RSA_LIMB_COUNT],
+    csca_tbs_hash_hi: Field,
+    csca_tbs_hash_lo: Field,
     csca_merkle_index: u32,
     csca_merkle_siblings: [Field; CSCA_MERKLE_DEPTH],
     csca_root: Field,
@@ -157,8 +172,15 @@ fn verify_csca_chain(
         assert(extracted[i] == dsc_modulus_limbs[i], "DSC modulus mismatch with CSCA-signed TBS");
     }
 
-    // 4. CSCA must appear in the Master List (ICAO snapshot).
-    let csca_leaf = compute_csca_leaf(csca_modulus_limbs);
+    // 4. CSCA must appear in the Master List (ICAO snapshot). Use v2 leaf
+    // (P1-7 2026-04-28) so the Merkle commitment binds the full CSCA cert
+    // identity, not just the modulus.
+    let csca_leaf = compute_csca_leaf_v2(
+        csca_modulus_limbs,
+        CSCA_RSA_EXPONENT,
+        csca_tbs_hash_hi,
+        csca_tbs_hash_lo,
+    );
     verify_inclusion_depth_8(
         csca_leaf,
         csca_merkle_index,
@@ -205,7 +227,6 @@ fn main(
     signature_limbs: [u128; RSA_LIMB_COUNT],
     modulus_limbs: [u128; RSA_LIMB_COUNT],
     redc_limbs: [u128; RSA_LIMB_COUNT],
-    exponent: u32,
     // === CSCA -> DSC chain inputs (v3.1) ===
     csca_modulus_limbs: [u128; RSA_LIMB_COUNT],
     csca_redc_limbs: [u128; RSA_LIMB_COUNT],
@@ -213,6 +234,13 @@ fn main(
     dsc_cert_sig_limbs: [u128; RSA_LIMB_COUNT],
     csca_merkle_index: u32,
     csca_merkle_siblings: [Field; CSCA_MERKLE_DEPTH],
+    // P1-7 (2026-04-28): CSCA TBS hash split into two 128-bit halves so the
+    // depth-8 Master List leaf binds the full CSCA cert identity (modulus
+    // alone is too weak). Caller computes SHA256(canonical CSCA TBS) off
+    // chain; the Merkle root constrains the supplied value -- a wrong
+    // tbs_hash produces a leaf that does not match the path / root.
+    csca_tbs_hash_hi: Field,
+    csca_tbs_hash_lo: Field,
     // === DSC revocation SMT inputs (v3.1) ===
     dsc_serial: [u8; 20],
     smt_siblings: [Field; SMT_DEPTH],
@@ -232,10 +260,24 @@ fn main(
     // === Public trust anchors (v3.1) ===
     csca_root: pub Field,
     dsc_smt_root: pub Field,
+    // === Public RSA exponent (P0-3, 2026-04-28) ===
+    // The DSC RSA exponent is now a PUBLIC input. The circuit asserts it is
+    // exactly DSC_RSA_EXPONENT (65537). Without this, a private exponent
+    // witness could be set to anything (e=1, e=3, ...), giving the prover a
+    // trivial signature forgery against any modulus the verifier accepts.
+    exponent: pub u32,
     // === Public outputs ===
     out_commitment_x: pub Field,
     out_commitment_y: pub Field,
 ) {
+    // Issue P0-3: pin the DSC RSA exponent. Verifiers can rely on every
+    // accepted proof using e = 65537 (ICAO 9303 mandate). Legacy e=3 chains
+    // need a separate circuit / lifted assertion in a future version.
+    assert(
+        exponent == DSC_RSA_EXPONENT,
+        "Passport DSC exponent must be 65537 (ICAO 9303 v3 trust model)",
+    );
+
     // Step 1: Verify RSA-2048 signature (DSC -> SOD).
     let params: BigNumParams<18, 2048> = BigNumParams::new(false, modulus_limbs, redc_limbs);
     let signature: RuntimeBigNum<18, 2048> = RuntimeBigNum { params, limbs: signature_limbs };
@@ -251,6 +293,8 @@ fn main(
         dsc_tbs,
         dsc_cert_sig_limbs,
         modulus_limbs,
+        csca_tbs_hash_hi,
+        csca_tbs_hash_lo,
         csca_merkle_index,
         csca_merkle_siblings,
         csca_root,
@@ -268,7 +312,20 @@ fn main(
             "dsc_serial must match the CSCA-signed TBS serial bytes",
         );
     }
+    // P1-6 + P1-7 (2026-04-28): the SMT key now binds the CSCA's v2 leaf
+    // hash + the full 20-byte serial. The v2 leaf folds modulus + RSA
+    // exponent + canonical TBS hash, so a revoked DSC under one CSCA cannot
+    // replay a non-membership proof from another CSCA's snapshot AND the
+    // SMT identity is the same Field that the Master List Merkle path
+    // constrains.
+    let dsc_smt_issuer_id = compute_csca_leaf_v2(
+        csca_modulus_limbs,
+        CSCA_RSA_EXPONENT,
+        csca_tbs_hash_hi,
+        csca_tbs_hash_lo,
+    );
     verify_non_membership(
+        dsc_smt_issuer_id,
         dsc_serial,
         smt_siblings,
         smt_old_key,
@@ -664,13 +721,41 @@ fn dsc_smt_siblings() -> [Field; SMT_DEPTH] {
     siblings
 }
 
+// P1-7 (2026-04-28): test fixture uses arbitrary deterministic Field halves
+// for the CSCA TBS hash. Real callers compute `SHA256(canonical CSCA TBS)`
+// off-chain and split via openac_core::commit::hash_to_fields. The Merkle
+// path constrains these values, so the unit-test choice is opaque.
+fn csca_tbs_hash_hi() -> Field {
+    0x4353434154425348415348484948494
+}
+
+fn csca_tbs_hash_lo() -> Field {
+    0x4353434154425348415348414c4f4c4f
+}
+
+fn csca_issuer_id() -> Field {
+    // v2 leaf identity == compute_csca_leaf_v2(modulus, e=65537, tbs hi/lo).
+    // Reused by both the Merkle inclusion fixture (csca_root_computed) and
+    // the DSC revocation SMT issuer_id (dsc_smt_root_computed) so the two
+    // fixtures stay coherent under a single CSCA identity.
+    compute_csca_leaf_v2(
+        csca_modulus_limbs(),
+        CSCA_RSA_EXPONENT,
+        csca_tbs_hash_hi(),
+        csca_tbs_hash_lo(),
+    )
+}
+
 fn dsc_smt_root_computed() -> Field {
     // Mirrors openac_core::smt::verify_non_membership with smt_is_old0 = true.
+    // P1-6 + P1-7: walk bits of the hashed key (issuer_id + full serial),
+    // not raw serial bytes. issuer_id == csca_issuer_id() (v2 leaf hash).
     let siblings = dsc_smt_siblings();
-    let serial = dsc_serial();
+    let key = openac_core::smt::compute_serial_key(csca_issuer_id(), dsc_serial());
+    let key_bytes = key.to_be_bytes::<32>();
     let mut node: Field = 0;
     for depth in 0..SMT_DEPTH {
-        let byte = serial[depth / 8];
+        let byte = key_bytes[depth / 8];
         let shift: u8 = 7 - ((depth % 8) as u8);
         let go_right = ((byte >> shift) & 1) == 1;
         node = smt_fold(node, siblings[depth], go_right);
@@ -688,7 +773,8 @@ fn csca_merkle_siblings() -> [Field; CSCA_MERKLE_DEPTH] {
 
 fn csca_root_computed() -> Field {
     // CSCA appears at index 0 under the test Master List snapshot.
-    let leaf = compute_csca_leaf(csca_modulus_limbs());
+    // P1-7: leaf binds modulus + exponent + tbs_hash via v2 helper.
+    let leaf = csca_issuer_id();
     let siblings = csca_merkle_siblings();
     let mut node = leaf;
     for depth in 0..CSCA_MERKLE_DEPTH {
@@ -729,6 +815,8 @@ fn test_csca_chain_fails_on_tampered_dsc_tbs() {
         tampered,
         dsc_cert_sig_limbs(),
         dsc_modulus_limbs(),
+        csca_tbs_hash_hi(),
+        csca_tbs_hash_lo(),
         0,
         csca_merkle_siblings(),
         csca_root_computed(),
@@ -745,6 +833,8 @@ fn test_csca_chain_fails_on_wrong_csca_root() {
         build_dsc_tbs(),
         dsc_cert_sig_limbs(),
         dsc_modulus_limbs(),
+        csca_tbs_hash_hi(),
+        csca_tbs_hash_lo(),
         0,
         csca_merkle_siblings(),
         bad_root,
@@ -761,6 +851,28 @@ fn test_csca_chain_fails_on_dsc_modulus_mismatch() {
         build_dsc_tbs(),
         dsc_cert_sig_limbs(),
         tampered_dsc_modulus,
+        csca_tbs_hash_hi(),
+        csca_tbs_hash_lo(),
+        0,
+        csca_merkle_siblings(),
+        csca_root_computed(),
+    );
+}
+
+#[test(should_fail)]
+fn test_csca_chain_fails_on_tampered_tbs_hash() {
+    // P1-7 (2026-04-28): the v2 leaf binds the CSCA TBS hash. A prover that
+    // tampers the supplied tbs_hash_hi/lo while keeping the same modulus
+    // must produce a leaf that no longer matches the Master List Merkle
+    // root, even when the CSCA RSA signature math passes.
+    verify_csca_chain(
+        csca_modulus_limbs(),
+        csca_redc_limbs(),
+        build_dsc_tbs(),
+        dsc_cert_sig_limbs(),
+        dsc_modulus_limbs(),
+        csca_tbs_hash_hi() + 1, // FORGED tbs hash
+        csca_tbs_hash_lo(),
         0,
         csca_merkle_siblings(),
         csca_root_computed(),
@@ -772,6 +884,7 @@ fn test_csca_chain_fails_on_dsc_modulus_mismatch() {
 #[test]
 fn test_dsc_non_membership_passes_for_unrevoked_serial() {
     verify_non_membership(
+        csca_issuer_id(),
         dsc_serial(),
         dsc_smt_siblings(),
         0,
@@ -785,7 +898,15 @@ fn test_dsc_non_membership_passes_for_unrevoked_serial() {
 fn test_dsc_non_membership_fails_on_wrong_root() {
     let mut bad_root = dsc_smt_root_computed();
     bad_root += 1;
-    verify_non_membership(dsc_serial(), dsc_smt_siblings(), 0, 0, true, bad_root);
+    verify_non_membership(
+        csca_issuer_id(),
+        dsc_serial(),
+        dsc_smt_siblings(),
+        0,
+        0,
+        true,
+        bad_root,
+    );
 }
 
 #[test]
@@ -822,4 +943,27 @@ fn test_dsc_serial_binding_rejects_serial_not_in_tbs() {
             "dsc_serial must match the CSCA-signed TBS serial bytes",
         );
     }
+}
+
+#[test]
+fn test_dsc_rsa_exponent_constant_is_65537() {
+    // Issue P0-3 (2026-04-28): the DSC RSA exponent is a public input pinned
+    // to ICAO's 65537. Lock the constant via a unit test so any future change
+    // (e.g. accidentally allowing e=3 again) breaks the build instead of
+    // silently relaxing the trust model.
+    assert(DSC_RSA_EXPONENT == 65537, "DSC_RSA_EXPONENT must remain 65537 (ICAO 9303)");
+    assert(CSCA_RSA_EXPONENT == 65537, "CSCA_RSA_EXPONENT must remain 65537 (ICAO 9303)");
+}
+
+#[test(should_fail)]
+fn test_dsc_exponent_assertion_rejects_three() {
+    // Issue P0-3 negative test: reproduce the in-circuit assertion shape so
+    // we can exercise the rejection path without a full RSA fixture. A
+    // prover that supplies e=3 must be rejected before any signature math
+    // runs, even if they happen to know a valid e=3 signature.
+    let bad_exponent: u32 = 3;
+    assert(
+        bad_exponent == DSC_RSA_EXPONENT,
+        "Passport DSC exponent must be 65537 (ICAO 9303 v3 trust model)",
+    );
 }

@@ -1,8 +1,7 @@
-use std::hash::pedersen_hash;
-
-use openac_core::commit::{assert_commitment_eq, commit_attributes_v3, DOMAIN_X509, hash_to_fields};
+use openac_core::commit::{assert_commitment_eq, commit_attributes_v3, DOMAIN_X509};
 use openac_core::device::verify_device_binding;
 use openac_core::predicate::decode_domain;
+use openac_core::profile::{compute_link_tag_with_mode, compute_show_challenge_digest_v2};
 
 // X.509-only OpenAC Show Circuit (Path A, v1)
 //
@@ -25,8 +24,18 @@ use openac_core::predicate::decode_domain;
 // Notes:
 //   * Poseidon hash_2 is not exposed in nargo 1.0.0-beta.19 stdlib, so we keep
 //     every algebraic hash on pedersen_hash (same primitive as openac_core).
-//   * nonce_hash is [u8; 32]; we compress it to two Fields via hash_to_fields
-//     before feeding it into pedersen_hash (Field cannot fit 256 bits).
+//   * nonce_hash is [u8; 32]; the helpers in openac_core::profile compress it
+//     to two Fields via hash_to_fields (Field cannot fit 256 bits).
+//
+// Issue P1-9 (2026-04-28):
+//   * Challenge digest now binds the credential commitment via
+//     `compute_show_challenge_digest_v2`. Without the commitment in the
+//     transcript, a presentation under one credential could be replayed
+//     against a different credential that happened to share (link_rand,
+//     scope, epoch).
+//   * Added `link_mode` public input + `compute_link_tag_with_mode` so this
+//     circuit supports the same unlinkable mode as `openac_core::show`. The
+//     unlinkable case forces `link_scope == 0` and `out_link_tag == 0`.
 
 fn main(
     // === PUBLIC ===
@@ -34,6 +43,7 @@ fn main(
     in_commitment_x509_y: pub Field,
     nonce_hash: pub [u8; 32],
     target_domain_hash: pub Field,
+    link_mode: pub bool,
     link_scope: pub Field,
     epoch: pub Field,
     // === PRIVATE ===
@@ -70,16 +80,25 @@ fn main(
         "Domain match must be boolean (0 or 1)",
     );
 
-    // 4. Scoped link tag. Uses link_rand_x (this credential's randomness);
-    //    verifier observes only `tag` and cannot unpeel to link_rand_x.
-    //    Spec sec 6: (link_scope, epoch) are public so the verifier can bind
-    //    the tag to a known session context.
-    let expected_link_tag = pedersen_hash([link_rand_x, link_scope, epoch]);
+    // 4. Scoped link tag with explicit unlinkable-mode support (Issue P1-9).
+    //    The shared helper enforces zero-tag in unlinkable mode; here we also
+    //    require zero link_scope so callers cannot smuggle a session context
+    //    while pretending to be unlinkable.
+    if !link_mode {
+        assert(link_scope == 0, "Unlinkable mode requires zero scope");
+    }
+    let expected_link_tag = compute_link_tag_with_mode(link_rand_x, link_scope, epoch, link_mode);
     assert(out_link_tag == expected_link_tag, "Link tag mismatch");
 
     // 5. Challenge digest binds the verifier's nonce to this presentation.
-    let (nonce_hi, nonce_lo) = hash_to_fields(nonce_hash);
-    let expected_challenge_digest = pedersen_hash([nonce_hi, nonce_lo, link_rand_x]);
+    //    Issue P1-9: also fold the credential commitment so a tampered nonce
+    //    paired with a re-randomised commitment cannot reuse the digest.
+    let expected_challenge_digest = compute_show_challenge_digest_v2(
+        nonce_hash,
+        in_commitment_x509_x,
+        in_commitment_x509_y,
+        link_rand_x,
+    );
     assert(out_challenge_digest == expected_challenge_digest, "Challenge digest mismatch");
 }
 
@@ -124,14 +143,26 @@ fn test_message_hash() -> [u8; 32] {
     ]
 }
 
-#[test]
-fn test_valid_show() {
-    let attr_hi: Field = 1;
-    let attr_lo: Field = 2;
-    let link_rand_x: Field = 3;
-    let scope: Field = 4;
-    let epoch: Field = 5;
+struct X509Fixture {
+    c_x: Field,
+    c_y: Field,
+    target_domain: Field,
+    link_tag_linkable: Field,
+    challenge_digest: Field,
+    attr_hi: Field,
+    attr_lo: Field,
+    link_rand_x: Field,
+    scope: Field,
+    epoch: Field,
+}
 
+fn make_fixture(
+    attr_hi: Field,
+    attr_lo: Field,
+    link_rand_x: Field,
+    scope: Field,
+    epoch: Field,
+) -> X509Fixture {
     let pk_digest = verify_device_binding(
         test_pub_key_x(),
         test_pub_key_y(),
@@ -139,272 +170,288 @@ fn test_valid_show() {
         test_message_hash(),
     );
     let c = commit_attributes_v3(DOMAIN_X509, attr_hi, attr_lo, pk_digest, link_rand_x);
-    let target_domain_hash = decode_domain(attr_hi, attr_lo);
-    let (nonce_hi, nonce_lo) = hash_to_fields(test_message_hash());
-    let link_tag = pedersen_hash([link_rand_x, scope, epoch]);
-    let challenge_digest = pedersen_hash([nonce_hi, nonce_lo, link_rand_x]);
-
-    main(
-        c.x,
-        c.y,
-        test_message_hash(),
-        target_domain_hash,
-        scope,
-        epoch,
+    let target = decode_domain(attr_hi, attr_lo);
+    let link_tag = compute_link_tag_with_mode(link_rand_x, scope, epoch, true);
+    let digest = compute_show_challenge_digest_v2(test_message_hash(), c.x, c.y, link_rand_x);
+    X509Fixture {
+        c_x: c.x,
+        c_y: c.y,
+        target_domain: target,
+        link_tag_linkable: link_tag,
+        challenge_digest: digest,
         attr_hi,
         attr_lo,
         link_rand_x,
+        scope,
+        epoch,
+    }
+}
+
+#[test]
+fn test_valid_show_linkable() {
+    let f = make_fixture(1, 2, 3, 4, 5);
+    main(
+        f.c_x,
+        f.c_y,
+        test_message_hash(),
+        f.target_domain,
+        true,
+        f.scope,
+        f.epoch,
+        f.attr_hi,
+        f.attr_lo,
+        f.link_rand_x,
         test_pub_key_x(),
         test_pub_key_y(),
         test_signature(),
-        link_tag,
+        f.link_tag_linkable,
         1,
-        challenge_digest,
+        f.challenge_digest,
+    );
+}
+
+#[test]
+fn test_valid_show_unlinkable() {
+    // Issue P1-9: x509_show now supports unlinkable mode -- link_scope and
+    // out_link_tag must both be 0 when link_mode = false.
+    let f = make_fixture(1, 2, 3, 0, 5);
+    main(
+        f.c_x,
+        f.c_y,
+        test_message_hash(),
+        f.target_domain,
+        false,
+        0,
+        f.epoch,
+        f.attr_hi,
+        f.attr_lo,
+        f.link_rand_x,
+        test_pub_key_x(),
+        test_pub_key_y(),
+        test_signature(),
+        0,
+        1,
+        f.challenge_digest,
     );
 }
 
 #[test]
 fn test_domain_match_true() {
-    // target_domain_hash matches -> out_domain_match = 1
-    let attr_hi: Field = 111;
-    let attr_lo: Field = 222;
-    let link_rand_x: Field = 333;
-    let scope: Field = 0;
-    let epoch: Field = 0;
-
-    let pk_digest = verify_device_binding(
-        test_pub_key_x(),
-        test_pub_key_y(),
-        test_signature(),
-        test_message_hash(),
-    );
-    let c = commit_attributes_v3(DOMAIN_X509, attr_hi, attr_lo, pk_digest, link_rand_x);
-    let target = decode_domain(attr_hi, attr_lo);
-    let (nonce_hi, nonce_lo) = hash_to_fields(test_message_hash());
-    let tag = pedersen_hash([link_rand_x, scope, epoch]);
-    let digest = pedersen_hash([nonce_hi, nonce_lo, link_rand_x]);
-
+    let f = make_fixture(111, 222, 333, 0, 0);
     main(
-        c.x,
-        c.y,
+        f.c_x,
+        f.c_y,
         test_message_hash(),
-        target,
-        scope,
-        epoch,
-        attr_hi,
-        attr_lo,
-        link_rand_x,
+        f.target_domain,
+        false,
+        0,
+        f.epoch,
+        f.attr_hi,
+        f.attr_lo,
+        f.link_rand_x,
         test_pub_key_x(),
         test_pub_key_y(),
         test_signature(),
-        tag,
+        0,
         1,
-        digest,
+        f.challenge_digest,
     );
 }
 
 #[test]
 fn test_domain_match_false() {
-    // target_domain_hash does NOT match -> out_domain_match = 0
-    let attr_hi: Field = 111;
-    let attr_lo: Field = 222;
-    let link_rand_x: Field = 333;
-    let scope: Field = 0;
-    let epoch: Field = 0;
-
-    let pk_digest = verify_device_binding(
-        test_pub_key_x(),
-        test_pub_key_y(),
-        test_signature(),
-        test_message_hash(),
-    );
-    let c = commit_attributes_v3(DOMAIN_X509, attr_hi, attr_lo, pk_digest, link_rand_x);
-    let wrong_target = decode_domain(attr_hi + 1, attr_lo);
-    let (nonce_hi, nonce_lo) = hash_to_fields(test_message_hash());
-    let tag = pedersen_hash([link_rand_x, scope, epoch]);
-    let digest = pedersen_hash([nonce_hi, nonce_lo, link_rand_x]);
-
+    let f = make_fixture(111, 222, 333, 0, 0);
+    let wrong_target = decode_domain(f.attr_hi + 1, f.attr_lo);
     main(
-        c.x,
-        c.y,
+        f.c_x,
+        f.c_y,
         test_message_hash(),
         wrong_target,
-        scope,
-        epoch,
-        attr_hi,
-        attr_lo,
-        link_rand_x,
+        false,
+        0,
+        f.epoch,
+        f.attr_hi,
+        f.attr_lo,
+        f.link_rand_x,
         test_pub_key_x(),
         test_pub_key_y(),
         test_signature(),
-        tag,
         0,
-        digest,
+        0,
+        f.challenge_digest,
     );
 }
 
 #[test(should_fail)]
 fn test_wrong_commitment() {
-    let attr_hi: Field = 1;
-    let attr_lo: Field = 2;
-    let link_rand_x: Field = 3;
-    let scope: Field = 4;
-    let epoch: Field = 5;
-
-    let pk_digest = verify_device_binding(
-        test_pub_key_x(),
-        test_pub_key_y(),
-        test_signature(),
-        test_message_hash(),
-    );
-    let c = commit_attributes_v3(DOMAIN_X509, attr_hi, attr_lo, pk_digest, link_rand_x);
-    let target = decode_domain(attr_hi, attr_lo);
-    let (nonce_hi, nonce_lo) = hash_to_fields(test_message_hash());
-    let tag = pedersen_hash([link_rand_x, scope, epoch]);
-    let digest = pedersen_hash([nonce_hi, nonce_lo, link_rand_x]);
-
-    // Tamper the commitment -- commit_attributes_eq must fail.
+    let f = make_fixture(1, 2, 3, 4, 5);
     main(
-        c.x + 1,
-        c.y,
+        f.c_x + 1,
+        f.c_y,
         test_message_hash(),
-        target,
-        scope,
-        epoch,
-        attr_hi,
-        attr_lo,
-        link_rand_x,
+        f.target_domain,
+        true,
+        f.scope,
+        f.epoch,
+        f.attr_hi,
+        f.attr_lo,
+        f.link_rand_x,
         test_pub_key_x(),
         test_pub_key_y(),
         test_signature(),
-        tag,
+        f.link_tag_linkable,
         1,
-        digest,
+        f.challenge_digest,
     );
 }
 
 #[test(should_fail)]
 fn test_wrong_pk_sig() {
-    let attr_hi: Field = 1;
-    let attr_lo: Field = 2;
-    let link_rand_x: Field = 3;
-    let scope: Field = 4;
-    let epoch: Field = 5;
-
-    let pk_digest = verify_device_binding(
-        test_pub_key_x(),
-        test_pub_key_y(),
-        test_signature(),
-        test_message_hash(),
-    );
-    let c = commit_attributes_v3(DOMAIN_X509, attr_hi, attr_lo, pk_digest, link_rand_x);
-    let target = decode_domain(attr_hi, attr_lo);
-    let (nonce_hi, nonce_lo) = hash_to_fields(test_message_hash());
-    let tag = pedersen_hash([link_rand_x, scope, epoch]);
-    let digest = pedersen_hash([nonce_hi, nonce_lo, link_rand_x]);
-
+    let f = make_fixture(1, 2, 3, 4, 5);
     let mut bad_sig = test_signature();
     bad_sig[0] ^= 0xFF;
-
-    // Signature does not match the public key -> verify_device_binding fails.
     main(
-        c.x,
-        c.y,
+        f.c_x,
+        f.c_y,
         test_message_hash(),
-        target,
-        scope,
-        epoch,
-        attr_hi,
-        attr_lo,
-        link_rand_x,
+        f.target_domain,
+        true,
+        f.scope,
+        f.epoch,
+        f.attr_hi,
+        f.attr_lo,
+        f.link_rand_x,
         test_pub_key_x(),
         test_pub_key_y(),
         bad_sig,
-        tag,
+        f.link_tag_linkable,
         1,
-        digest,
+        f.challenge_digest,
     );
 }
 
 #[test(should_fail)]
 fn test_wrong_link_scope_breaks_link_tag() {
-    // Issue #5: scope is a public input bound into the link_tag. Tampering
-    // the public scope while keeping the original link_tag must be rejected,
-    // proving scope is enforced by the circuit (not advisory).
-    let attr_hi: Field = 1;
-    let attr_lo: Field = 2;
-    let link_rand_x: Field = 3;
-    let scope: Field = 4;
-    let epoch: Field = 5;
-
-    let pk_digest = verify_device_binding(
-        test_pub_key_x(),
-        test_pub_key_y(),
-        test_signature(),
-        test_message_hash(),
-    );
-    let c = commit_attributes_v3(DOMAIN_X509, attr_hi, attr_lo, pk_digest, link_rand_x);
-    let target = decode_domain(attr_hi, attr_lo);
-    let (nonce_hi, nonce_lo) = hash_to_fields(test_message_hash());
-    let tag = pedersen_hash([link_rand_x, scope, epoch]);
-    let digest = pedersen_hash([nonce_hi, nonce_lo, link_rand_x]);
-
+    let f = make_fixture(1, 2, 3, 4, 5);
     main(
-        c.x,
-        c.y,
+        f.c_x,
+        f.c_y,
         test_message_hash(),
-        target,
-        scope + 1, // TAMPERED scope without recomputing tag
-        epoch,
-        attr_hi,
-        attr_lo,
-        link_rand_x,
+        f.target_domain,
+        true,
+        f.scope + 1, // TAMPERED scope without recomputing tag
+        f.epoch,
+        f.attr_hi,
+        f.attr_lo,
+        f.link_rand_x,
         test_pub_key_x(),
         test_pub_key_y(),
         test_signature(),
-        tag,
+        f.link_tag_linkable,
         1,
-        digest,
+        f.challenge_digest,
     );
 }
 
 #[test(should_fail)]
 fn test_wrong_epoch_breaks_link_tag() {
-    // Issue #5 companion: epoch is public and also bound into the link_tag.
-    // Bumping epoch without recomputing the tag must fail.
-    let attr_hi: Field = 1;
-    let attr_lo: Field = 2;
-    let link_rand_x: Field = 3;
-    let scope: Field = 4;
-    let epoch: Field = 5;
-
-    let pk_digest = verify_device_binding(
-        test_pub_key_x(),
-        test_pub_key_y(),
-        test_signature(),
-        test_message_hash(),
-    );
-    let c = commit_attributes_v3(DOMAIN_X509, attr_hi, attr_lo, pk_digest, link_rand_x);
-    let target = decode_domain(attr_hi, attr_lo);
-    let (nonce_hi, nonce_lo) = hash_to_fields(test_message_hash());
-    let tag = pedersen_hash([link_rand_x, scope, epoch]);
-    let digest = pedersen_hash([nonce_hi, nonce_lo, link_rand_x]);
-
+    let f = make_fixture(1, 2, 3, 4, 5);
     main(
-        c.x,
-        c.y,
+        f.c_x,
+        f.c_y,
         test_message_hash(),
-        target,
-        scope,
-        epoch + 42, // TAMPERED epoch without recomputing tag
-        attr_hi,
-        attr_lo,
-        link_rand_x,
+        f.target_domain,
+        true,
+        f.scope,
+        f.epoch + 42, // TAMPERED epoch without recomputing tag
+        f.attr_hi,
+        f.attr_lo,
+        f.link_rand_x,
         test_pub_key_x(),
         test_pub_key_y(),
         test_signature(),
-        tag,
+        f.link_tag_linkable,
         1,
-        digest,
+        f.challenge_digest,
+    );
+}
+
+#[test(should_fail)]
+fn test_unlinkable_mode_rejects_nonzero_scope() {
+    // Issue P1-9: link_mode = false must enforce link_scope == 0 in-circuit.
+    // A prover that pretends to be unlinkable while supplying a non-zero
+    // scope must be rejected by the circuit, not just by off-chain policy.
+    let f = make_fixture(1, 2, 3, 0, 5);
+    main(
+        f.c_x,
+        f.c_y,
+        test_message_hash(),
+        f.target_domain,
+        false,
+        7, // Non-zero scope contradicts link_mode = false
+        f.epoch,
+        f.attr_hi,
+        f.attr_lo,
+        f.link_rand_x,
+        test_pub_key_x(),
+        test_pub_key_y(),
+        test_signature(),
+        0,
+        1,
+        f.challenge_digest,
+    );
+}
+
+#[test(should_fail)]
+fn test_unlinkable_mode_rejects_nonzero_tag() {
+    // Issue P1-9 companion: with link_mode = false and link_scope = 0, a
+    // non-zero out_link_tag must still be rejected.
+    let f = make_fixture(1, 2, 3, 0, 5);
+    main(
+        f.c_x,
+        f.c_y,
+        test_message_hash(),
+        f.target_domain,
+        false,
+        0,
+        f.epoch,
+        f.attr_hi,
+        f.attr_lo,
+        f.link_rand_x,
+        test_pub_key_x(),
+        test_pub_key_y(),
+        test_signature(),
+        99, // Non-zero tag contradicts link_mode = false
+        1,
+        f.challenge_digest,
+    );
+}
+
+#[test(should_fail)]
+fn test_challenge_digest_rejects_wrong_commitment_binding() {
+    // Issue P1-9 (commitment binding): the digest must reject a
+    // pre-recomputed digest derived from a different commitment. Build the
+    // expected digest against (c.x + 1) so the in-circuit recomputation
+    // diverges and the assert fires.
+    let f = make_fixture(1, 2, 3, 4, 5);
+    let bogus_digest =
+        compute_show_challenge_digest_v2(test_message_hash(), f.c_x + 1, f.c_y, f.link_rand_x);
+    main(
+        f.c_x,
+        f.c_y,
+        test_message_hash(),
+        f.target_domain,
+        true,
+        f.scope,
+        f.epoch,
+        f.attr_hi,
+        f.attr_lo,
+        f.link_rand_x,
+        test_pub_key_x(),
+        test_pub_key_y(),
+        test_signature(),
+        f.link_tag_linkable,
+        1,
+        bogus_digest,
     );
 }

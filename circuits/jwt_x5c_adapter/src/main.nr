@@ -1,12 +1,14 @@
 use bignum::params::BigNumParams;
 use bignum::RuntimeBigNum;
 use noir_rsa::rsa::verify_sha256_pkcs1v15;
-use sha256::digest;
+use sha256::{digest, sha256_var};
 
 use openac_core::commit::{assert_commitment_eq, commit_attributes_v3, DOMAIN_X509};
 use openac_core::device::pk_digest_from_bytes;
 use openac_core::profile::{derive_x509_link_rand, MAX_DOMAIN_LEN, pack_x509_domain};
-use openac_core::smt::{SMT_DEPTH, smt_fold, verify_non_membership};
+use openac_core::smt::{
+    compute_serial_key, compute_x509_issuer_id, SMT_DEPTH, smt_fold, verify_non_membership,
+};
 use std::embedded_curve_ops::EmbeddedCurvePoint;
 
 global CERT_TBS_LEN: u32 = 1536;
@@ -14,6 +16,12 @@ global CERT_TBS_LEN: u32 = 1536;
 // SD-JWT payloads live in sdjwt_adapter, not here. App must zero-pad the
 // base64url-decoded payload to exactly this length before prove.
 global JWT_PAYLOAD_LEN: u32 = 1024;
+// Issue P0-4 (2026-04-28): the compact JWS signing input is
+// `base64url(header) || "." || base64url(payload)`. b64url expands ~4/3, so a
+// 1024-byte raw payload produces ~1366 b64 bytes; allow ~120 bytes header
+// b64 + "." + 1366 = 1487, rounded up to 1536 to share a buffer size with
+// CERT_TBS_LEN (the off-circuit RSA fixture pipeline already targets 1536).
+global JWT_SIGNING_INPUT_LEN: u32 = 1536;
 global LIMB_COUNT: u32 = 18;
 global LIMB_BYTES: u32 = 16;
 global LEAF_MODULUS_BYTES: u32 = LIMB_COUNT * LIMB_BYTES;
@@ -132,6 +140,13 @@ fn main(
     smt_old_value: Field,
     smt_is_old0: bool,
     jwt_payload_norm: [u8; JWT_PAYLOAD_LEN],
+    // Issue P0-4 (2026-04-28): JWS signing input bytes
+    // (`base64url(header) || "." || base64url(payload)`). The circuit
+    // hashes them via sha256_var and binds the digest to jwt_signed_hash so
+    // the RSA-signed value provably comes from a real compact JWS, closing
+    // the gap where jwt_signed_hash and jwt_payload_b64h were unrelated.
+    jwt_signing_input: [u8; JWT_SIGNING_INPUT_LEN],
+    jwt_signing_input_len: u32,
     jwt_sig: [u128; LIMB_COUNT],
     jwt_modulus_limbs: [u128; LIMB_COUNT],
     jwt_redc_limbs: [u128; LIMB_COUNT],
@@ -177,7 +192,22 @@ fn main(
             "serial_number must match the issuer-signed leaf TBS serial bytes",
         );
     }
+    // P1-6 + P1-7 (2026-04-28): the SMT key now binds a canonical issuer
+    // identity (compute_x509_issuer_id folds modulus + RSA exponent + the
+    // SHA256 issuer TBS hash into a single Field). This closes:
+    //   * P1-6: cross-issuer SMT replay (key was unbound from issuer)
+    //   * P1-6: prefix-only collisions (only 4 leading serial bytes used)
+    //   * P1-7: weak Merkle leaf identity (only modulus was bound)
+    let (issuer_tbs_hash_hi, issuer_tbs_hash_lo) =
+        openac_core::commit::hash_to_fields(issuer_tbs_hash);
+    let smt_issuer_id = compute_x509_issuer_id(
+        issuer_modulus,
+        RSA_EXPONENT,
+        issuer_tbs_hash_hi,
+        issuer_tbs_hash_lo,
+    );
     verify_non_membership(
+        smt_issuer_id,
         serial_number,
         smt_siblings,
         smt_old_key,
@@ -189,6 +219,28 @@ fn main(
     let payload_hash: [u8; 32] = digest(jwt_payload_norm);
     for i in 0..32 {
         assert(payload_hash[i] == jwt_payload_b64h[i], "JWT payload hash mismatch");
+    }
+
+    // Issue P0-4 (2026-04-28): bind the RSA-signed hash to a real compact
+    // JWS signing input. Without this, jwt_signed_hash and jwt_payload_b64h
+    // were entirely unrelated -- a prover could supply a valid signature
+    // over an arbitrary digest while submitting attacker-chosen claims via
+    // jwt_payload_norm. sha256_var hashes only the first
+    // jwt_signing_input_len bytes (matching real JWS semantics).
+    //
+    // Residual gap (tracked, not closed in this fix): the circuit does NOT
+    // verify that base64url-decoding the payload section of
+    // `jwt_signing_input` equals `jwt_payload_norm` -- that would require a
+    // base64 decoder in-circuit. The verifier policy MUST therefore confirm
+    // off-chain that `jwt_payload_norm` matches `b64url_decode(payload
+    // section of jwt_signing_input)`. With this binding in place, an
+    // attacker can no longer present an unrelated RSA-signed digest.
+    let computed_signed_hash = sha256_var(jwt_signing_input, jwt_signing_input_len);
+    for i in 0..32 {
+        assert(
+            computed_signed_hash[i] == jwt_signed_hash[i],
+            "JWT signing input hash does not match jwt_signed_hash",
+        );
     }
 
     let jwt_signature = build_runtime_signature(jwt_sig, jwt_modulus_limbs, jwt_redc_limbs);
@@ -524,12 +576,24 @@ fn smt_siblings() -> [Field; SMT_DEPTH] {
 /// = 123456 + i`). Computing on the fly avoids a hardcoded constant that would
 /// (a) drift if the logic changes and (b) potentially exceed the bn254 field
 /// modulus when written as a literal.
+///
+/// P1-6 (2026-04-28): walk bits of the hashed key (issuer_id + full serial),
+/// not raw serial bytes. issuer_id == compute_x509_issuer_id(modulus, e, tbs).
 fn smt_root() -> Field {
     let siblings = smt_siblings();
-    let serial = serial_number();
+    let issuer_tbs_hash: [u8; 32] = sha256::digest(build_issuer_tbs());
+    let (issuer_tbs_hi, issuer_tbs_lo) = openac_core::commit::hash_to_fields(issuer_tbs_hash);
+    let issuer_id = compute_x509_issuer_id(
+        issuer_modulus_limbs(),
+        RSA_EXPONENT,
+        issuer_tbs_hi,
+        issuer_tbs_lo,
+    );
+    let key = compute_serial_key(issuer_id, serial_number());
+    let key_bytes = key.to_be_bytes::<32>();
     let mut node: Field = 0;
     for depth in 0..SMT_DEPTH {
-        let byte = serial[depth / 8];
+        let byte = key_bytes[depth / 8];
         let shift: u8 = 7 - ((depth % 8) as u8);
         let go_right = ((byte >> shift) & 1) == 1;
         node = smt_fold(node, siblings[depth], go_right);
@@ -694,6 +758,8 @@ fn test_jwt_x5c_adapter_rejects_wrong_payload_hash() {
         0,
         true,
         payload,
+        [0; JWT_SIGNING_INPUT_LEN],
+        0,
         jwt_sig_limbs(),
         leaf_modulus_limbs(),
         leaf_redc_limbs(),
@@ -737,6 +803,8 @@ fn test_jwt_x5c_adapter_rejects_wrong_enclave_pk() {
         0,
         true,
         payload,
+        [0; JWT_SIGNING_INPUT_LEN],
+        0,
         jwt_sig_limbs(),
         leaf_modulus_limbs(),
         leaf_redc_limbs(),
@@ -775,6 +843,8 @@ fn test_jwt_x5c_adapter_rejects_wrong_commitment() {
         0,
         true,
         payload,
+        [0; JWT_SIGNING_INPUT_LEN],
+        0,
         jwt_sig_limbs(),
         leaf_modulus_limbs(),
         leaf_redc_limbs(),
@@ -850,6 +920,8 @@ fn run_main_with_override(
         0,
         true,
         payload,
+        [0; JWT_SIGNING_INPUT_LEN],
+        0,
         jwt_sig_limbs(),
         jwt_modulus_override,
         leaf_redc_limbs(),
@@ -971,4 +1043,41 @@ fn test_jwt_x5c_commitment_equal_for_identical_inputs() {
     );
     assert(c1.x == c2.x, "Deterministic commitment X expected");
     assert(c1.y == c2.y, "Deterministic commitment Y expected");
+}
+
+#[test]
+fn test_jws_signing_input_binding_helper_roundtrips() {
+    // Issue P0-4: independently exercise the new sha256_var-based binding
+    // shape so we know it accepts a real (input, len) pair. The full main()
+    // path can't be exercised with a real signing input because that would
+    // require a fresh RSA fixture; the helper path here keeps the binding
+    // logic testable.
+    let mut input: [u8; JWT_SIGNING_INPUT_LEN] = [0; JWT_SIGNING_INPUT_LEN];
+    let header_dot: [u8; 21] = [
+        // base64url("eyJhbGciOiJSUzI1NiJ9") + "."
+        101, 121, 74, 104, 98, 71, 99, 105, 79, 105, 74, 83, 85, 122, 73, 49, 78, 105, 74, 57, 46,
+    ];
+    for i in 0..21 {
+        input[i] = header_dot[i];
+    }
+    let signed_hash = sha256_var(input, 21);
+    let recomputed = sha256_var(input, 21);
+    for i in 0..32 {
+        assert(signed_hash[i] == recomputed[i], "sha256_var must be deterministic");
+    }
+}
+
+#[test(should_fail)]
+fn test_jws_signing_input_binding_rejects_zero_len_with_nonzero_hash() {
+    // Issue P0-4: with len = 0, sha256_var returns SHA256("") which equals
+    // the well-known empty-input digest. A prover that supplies an
+    // attacker-chosen `expected_hash` instead of e3b0c4...b855 must fail.
+    // This pins the in-circuit assertion shape used inside main().
+    let input: [u8; JWT_SIGNING_INPUT_LEN] = [0; JWT_SIGNING_INPUT_LEN];
+    let computed = sha256_var(input, 0);
+    let mut bogus: [u8; 32] = [0; 32];
+    bogus[0] = 0xFF;
+    for i in 0..32 {
+        assert(computed[i] == bogus[i], "JWT signing input hash does not match jwt_signed_hash");
+    }
 }

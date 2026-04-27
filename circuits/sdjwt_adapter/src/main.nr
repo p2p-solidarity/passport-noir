@@ -1,10 +1,16 @@
 use sha256::digest;
 use std::ecdsa_secp256r1::verify_signature;
 use std::embedded_curve_ops::EmbeddedCurvePoint;
+use std::hash::pedersen_hash;
 
 use openac_core::commit::{assert_commitment_eq, commit_attributes_v3, DOMAIN_SDJWT, hash_to_fields};
 use openac_core::device::pk_digest_from_bytes;
 use openac_core::profile::derive_sdjwt_link_rand;
+
+// Issue P0-5 disclosure-root domain separator (ASCII "sdrt"). Folded into
+// the Pedersen hash that produces `out_disclosure_root` so the value is
+// distinguishable from other arity-N pedersen_hash outputs in this circuit.
+global DOMAIN_SDJWT_DISCLOSURE_ROOT: Field = 0x73647274;
 
 // OpenAC SD-JWT Adapter (Prepare Phase, v1 -- Path A)
 //
@@ -37,14 +43,30 @@ use openac_core::profile::derive_sdjwt_link_rand;
 //     and composite_show on the same derivation rule so the two circuits
 //     produce matching commitments for the same (pk_digest, sd_root).
 //
-// Known spec gaps (tracked but not closed in v1):
+// Issue P0-5 (2026-04-28) -- partial fix:
+//   * The full closure (parsing the issuer-signed `_sd` array in-circuit and
+//     proving each disclosure hash inclusion) requires either a base64url
+//     decoder or an issuer-side commitment scheme change. Both are large
+//     changes pending v3.2.
+//   * What this version adds: an `out_disclosure_root` public output that
+//     deterministically commits to the disclosed set via Pedersen hash. The
+//     verifier policy MUST verify off-chain that this root matches an
+//     issuer-published / pre-registered fresh disclosure root (e.g. via
+//     SD-JWT issuer's directory of acceptable disclosure manifests).
+//   * Documented residual gap: the circuit still does not prove that each
+//     disclosure_hash[i] appears in the payload bytes signed by the issuer.
+//     Off-chain policy must compare `out_disclosure_root` against the list
+//     known to belong to the credential the verifier expects.
+//
+// Known v1 spec gaps (still open):
 //   * jwt_payload_raw / jwt_payload_b64h SHA256 binding -- caller passes a
 //     precomputed `jwt_payload_hash` rather than the raw payload bytes. The
 //     adapter trusts this hash; a future version should fold SHA256 over
 //     the base64url-decoded payload in-circuit (spec sec 5).
-//   * `_sd` array model + disclosure_indices -- the current impl binds a
-//     combined hash over MAX_DISCLOSURES fixed slots rather than a
-//     positioned `_sd` array with explicit indices.
+//   * Inclusion of each disclosure hash inside the issuer-signed `_sd`
+//     array bytes (positioned indices). v3.2 will add jwt_payload_norm as
+//     a private input + a base64url encoder (or a Merkle inclusion model
+//     bridged via an issuer-signed sd_root commitment).
 //
 // SD-JWT structure:
 //   - Header.Payload.Signature (JWS Compact)
@@ -125,6 +147,33 @@ fn compute_sdjwt_commitment(
     commit_attributes_v3(DOMAIN_SDJWT, attr_hi, attr_lo, pk_digest, link_rand)
 }
 
+/// Issue P0-5 (2026-04-28): compute a Pedersen disclosure root that
+/// commits to the (count, hash_i) tuple for every disclosed slot. The
+/// resulting root is published as a public output so verifier policy can
+/// match it against an issuer-published manifest of acceptable disclosure
+/// sets. Each "absent" slot folds in a slot-specific zero so the layout
+/// stays length-bound.
+fn compute_disclosure_root(
+    disclosure_count: u8,
+    expected_disclosure_hashes: [[u8; 32]; MAX_DISCLOSURES],
+) -> Field {
+    // Layout: [DOMAIN, count, slot_0_hi, slot_0_lo, ..., slot_N_hi, slot_N_lo]
+    // = 1 + 1 + 2 * MAX_DISCLOSURES = 18 inputs (with MAX_DISCLOSURES=8).
+    let mut inputs: [Field; 1 + 1 + 2 * MAX_DISCLOSURES] = [0; 1 + 1 + 2 * MAX_DISCLOSURES];
+    inputs[0] = DOMAIN_SDJWT_DISCLOSURE_ROOT;
+    inputs[1] = disclosure_count as Field;
+    for i in 0..MAX_DISCLOSURES {
+        let (hi, lo) = if (i as u8) < disclosure_count {
+            hash_to_fields(expected_disclosure_hashes[i])
+        } else {
+            (0, 0)
+        };
+        inputs[2 + i * 2] = hi;
+        inputs[3 + i * 2] = lo;
+    }
+    pedersen_hash(inputs)
+}
+
 fn main(
     // === ECDSA ES256 signature verification inputs ===
     // `jwt_payload_hash` is PUBLIC so the verifier can independently confirm
@@ -158,6 +207,12 @@ fn main(
     // commitment would bind to it.
     out_sd_root_hi: pub Field,
     out_sd_root_lo: pub Field,
+    // P0-5 (2026-04-28): also expose a Pedersen-based disclosure root that
+    // commits to the (count, slot_hashes...) tuple. Verifier policy SHOULD
+    // compare this value against an issuer-published manifest off-chain;
+    // this is a partial closure of the audit-flagged gap pending the
+    // base64url-decoder + payload-binding work scheduled for v3.2.
+    out_disclosure_root: pub Field,
 ) {
     // Step 1: Verify ECDSA ES256 signature (issuer attested to the payload).
     let sig_valid = verify_signature(issuer_pk_x, issuer_pk_y, signature, jwt_payload_hash);
@@ -189,6 +244,16 @@ fn main(
     let (sd_root_hi, sd_root_lo) = hash_to_fields(combined_hash);
     assert(sd_root_hi == out_sd_root_hi, "out_sd_root_hi must match derived sd_root hi");
     assert(sd_root_lo == out_sd_root_lo, "out_sd_root_lo must match derived sd_root lo");
+
+    // Step 7 (P0-5): compute and expose the disclosure root. Verifier
+    // policy uses this to assert the disclosure set is one the issuer
+    // pre-registered, even though we cannot yet prove inclusion in the
+    // issuer-signed _sd array bytes.
+    let disclosure_root = compute_disclosure_root(disclosure_count, expected_disclosure_hashes);
+    assert(
+        disclosure_root == out_disclosure_root,
+        "out_disclosure_root must match Pedersen-bound disclosure root",
+    );
 }
 
 // ============================================================
@@ -411,6 +476,7 @@ fn test_invalid_signature_fails() {
         0,
         0,
         0,
+        0,
     );
 }
 
@@ -581,4 +647,42 @@ fn test_main_rejects_mismatched_sd_root_output() {
         sd_root_hi == 0,
         "Fixture expected non-zero sd_root_hi; binding assertion in main catches wrong outputs",
     );
+}
+
+#[test]
+fn test_disclosure_root_changes_with_count() {
+    // P0-5: out_disclosure_root MUST move when the disclosure_count changes,
+    // so verifier policy that pins a specific count cannot be confused by a
+    // prover who pads the slots with attacker-chosen hashes and reduces
+    // count.
+    let mut hashes: [[u8; 32]; MAX_DISCLOSURES] = [[0; 32]; MAX_DISCLOSURES];
+    hashes[0] = [0x11; 32];
+    hashes[1] = [0x22; 32];
+    let r1 = compute_disclosure_root(1, hashes);
+    let r2 = compute_disclosure_root(2, hashes);
+    assert(r1 != r2, "Disclosure root must reflect disclosure_count");
+}
+
+#[test]
+fn test_disclosure_root_changes_with_slot_hash() {
+    // P0-5: a single slot hash flip MUST move the root.
+    let mut hashes_a: [[u8; 32]; MAX_DISCLOSURES] = [[0; 32]; MAX_DISCLOSURES];
+    let mut hashes_b: [[u8; 32]; MAX_DISCLOSURES] = [[0; 32]; MAX_DISCLOSURES];
+    hashes_a[0] = [0x11; 32];
+    hashes_b[0] = [0x11; 32];
+    hashes_b[0][0] ^= 0x01;
+    let r_a = compute_disclosure_root(1, hashes_a);
+    let r_b = compute_disclosure_root(1, hashes_b);
+    assert(r_a != r_b, "Disclosure root must bind every slot hash byte");
+}
+
+#[test]
+fn test_disclosure_root_deterministic() {
+    let mut hashes: [[u8; 32]; MAX_DISCLOSURES] = [[0; 32]; MAX_DISCLOSURES];
+    hashes[0] = [0x11; 32];
+    hashes[1] = [0x22; 32];
+    hashes[2] = [0x33; 32];
+    let r1 = compute_disclosure_root(3, hashes);
+    let r2 = compute_disclosure_root(3, hashes);
+    assert(r1 == r2, "Disclosure root must be deterministic for identical inputs");
 }
