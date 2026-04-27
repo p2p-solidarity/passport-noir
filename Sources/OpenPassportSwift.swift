@@ -749,6 +749,72 @@ public struct OpenACV3ShowPresentation: Equatable, Sendable {
     }
 }
 
+/// Issue P0-1 / P0-2 / Task 1+2 follow-up (2026-04-28): describes where each
+/// expected public input lives in a Honk proof's public-input prefix.
+/// Mirrors `mopro_binding::openac_v3::PrepareLayoutV3` so the Swift verifier
+/// applies the same strict ABI-aware checks as the Rust verifier. Build via
+/// the adapter-specific helpers (e.g. `OpenACPrepareLayoutV3.passport`).
+public struct OpenACPrepareLayoutV3: Equatable, Sendable {
+    /// Total number of public-input field elements in the proof prefix.
+    public let numPublicInputs: Int
+    /// Index of `out_commitment_x` in the public-input array.
+    public let commitmentXIndex: Int
+    /// Index of `out_commitment_y` in the public-input array.
+    public let commitmentYIndex: Int
+    /// Each pair `(field_index, expected_field_bytes_be32)` is enforced at
+    /// its known ABI index. Includes adapter-specific trust anchors
+    /// (csca_root, dsc_smt_root, exponent, expected_disclosure_root, ...).
+    public let extraPinnedFields: [OpenACPinnedField]
+
+    public init(
+        numPublicInputs: Int,
+        commitmentXIndex: Int,
+        commitmentYIndex: Int,
+        extraPinnedFields: [OpenACPinnedField]
+    ) {
+        self.numPublicInputs = numPublicInputs
+        self.commitmentXIndex = commitmentXIndex
+        self.commitmentYIndex = commitmentYIndex
+        self.extraPinnedFields = extraPinnedFields
+    }
+}
+
+public struct OpenACShowLayoutV3: Equatable, Sendable {
+    public let numPublicInputs: Int
+    public let commitmentXIndex: Int
+    public let commitmentYIndex: Int
+    /// Field index where `nonce_hash[0]` sits. Each subsequent byte
+    /// occupies the next slot. `nil` means the layout does not bind
+    /// nonce_hash bytes (only used for synthetic test layouts).
+    public let nonceHashFirstByteIndex: Int?
+    public let extraPinnedFields: [OpenACPinnedField]
+
+    public init(
+        numPublicInputs: Int,
+        commitmentXIndex: Int,
+        commitmentYIndex: Int,
+        nonceHashFirstByteIndex: Int?,
+        extraPinnedFields: [OpenACPinnedField]
+    ) {
+        self.numPublicInputs = numPublicInputs
+        self.commitmentXIndex = commitmentXIndex
+        self.commitmentYIndex = commitmentYIndex
+        self.nonceHashFirstByteIndex = nonceHashFirstByteIndex
+        self.extraPinnedFields = extraPinnedFields
+    }
+}
+
+public struct OpenACPinnedField: Equatable, Sendable {
+    public let fieldIndex: Int
+    /// 32-byte big-endian Field encoding.
+    public let expected: Data
+
+    public init(fieldIndex: Int, expected: Data) {
+        self.fieldIndex = fieldIndex
+        self.expected = expected
+    }
+}
+
 public struct OpenACV3Policy: Equatable, Sendable {
     public let linkMode: OpenACLinkMode
     public let linkScope: Data?
@@ -758,6 +824,12 @@ public struct OpenACV3Policy: Equatable, Sendable {
     public let expectedNonceHash: Data
     public let prepareVkHash: Data
     public let showVkHash: Data
+    /// REQUIRED (Task 1+2 follow-up): adapter-specific layouts. The Swift
+    /// verifier does ABI-aware comparison against these layouts; there is
+    /// no fallback path. Build via `OpenACPrepareLayoutV3.passport(...)` /
+    /// `OpenACShowLayoutV3.openacShow(...)` etc.
+    public let prepareLayout: OpenACPrepareLayoutV3
+    public let showLayout: OpenACShowLayoutV3
 
     public init(
         linkMode: OpenACLinkMode,
@@ -767,7 +839,9 @@ public struct OpenACV3Policy: Equatable, Sendable {
         expectedChallenge: Data,
         expectedNonceHash: Data,
         prepareVkHash: Data,
-        showVkHash: Data
+        showVkHash: Data,
+        prepareLayout: OpenACPrepareLayoutV3,
+        showLayout: OpenACShowLayoutV3
     ) {
         self.linkMode = linkMode
         self.linkScope = linkScope
@@ -777,6 +851,8 @@ public struct OpenACV3Policy: Equatable, Sendable {
         self.expectedNonceHash = expectedNonceHash
         self.prepareVkHash = prepareVkHash
         self.showVkHash = showVkHash
+        self.prepareLayout = prepareLayout
+        self.showLayout = showLayout
     }
 }
 
@@ -800,6 +876,255 @@ public enum OpenACV3Error: Error, Equatable {
     case prepareCommitmentNotInProof
     case showCommitmentNotInProof
     case nonceHashNotInProof
+    case proofTooShortForPublicInputs
+    case preparePublicInputMismatch
+    case showPublicInputMismatch
+}
+
+// MARK: - OpenAC v3 Field encoding helpers
+
+/// Encode a single byte (0..=255) in the right-most slot of a 32-byte BE
+/// Field. Used for `[u8; N]` ABI inputs where every byte occupies its own
+/// Field slot.
+public func openACByteAsField(_ byte: UInt8) -> Data {
+    var out = Data(repeating: 0, count: 32)
+    out[31] = byte
+    return out
+}
+
+public func openACBoolAsField(_ value: Bool) -> Data {
+    openACByteAsField(value ? 1 : 0)
+}
+
+/// Encode a UInt32 as a 32-byte BE Field with the value in the low 4 bytes.
+public func openACU32AsField(_ value: UInt32) -> Data {
+    var out = Data(repeating: 0, count: 32)
+    out[28] = UInt8((value >> 24) & 0xFF)
+    out[29] = UInt8((value >> 16) & 0xFF)
+    out[30] = UInt8((value >> 8) & 0xFF)
+    out[31] = UInt8(value & 0xFF)
+    return out
+}
+
+/// Build (field_index, expected_field) pairs that pin every byte of a
+/// `[u8; N]` ABI input into its own consecutive Field slot.
+public func openACPinByteArray(baseFieldIndex: Int, bytes: Data) -> [OpenACPinnedField] {
+    var out: [OpenACPinnedField] = []
+    out.reserveCapacity(bytes.count)
+    for (i, b) in bytes.enumerated() {
+        out.append(OpenACPinnedField(fieldIndex: baseFieldIndex + i, expected: openACByteAsField(b)))
+    }
+    return out
+}
+
+// MARK: - OpenAC v3 Adapter-specific layout builders (Task 3)
+//
+// Mirror of `mopro_binding::openac_v3::*_layout_*` constructors. Each builder
+// takes the off-chain policy values as required typed arguments so callers
+// cannot construct a layout that silently skips a critical pin.
+
+public extension OpenACPrepareLayoutV3 {
+    /// passport_adapter v3.1 layout (5 fields, see Rust `prepare_layout_passport`).
+    static func passport(
+        cscaRoot: Data,
+        dscSmtRoot: Data
+    ) -> OpenACPrepareLayoutV3 {
+        OpenACPrepareLayoutV3(
+            numPublicInputs: 5,
+            commitmentXIndex: 3,
+            commitmentYIndex: 4,
+            extraPinnedFields: [
+                OpenACPinnedField(fieldIndex: 0, expected: cscaRoot),
+                OpenACPinnedField(fieldIndex: 1, expected: dscSmtRoot),
+                OpenACPinnedField(fieldIndex: 2, expected: openACU32AsField(65537)),
+            ]
+        )
+    }
+
+    /// sdjwt_adapter v3 layout (101 fields). `expectedDisclosureRoot` is
+    /// REQUIRED (P0-5 off-chain policy anchor).
+    static func sdjwt(
+        jwtPayloadHash: Data,
+        issuerPkX: Data,
+        issuerPkY: Data,
+        expectedSdRootHi: Data,
+        expectedSdRootLo: Data,
+        expectedDisclosureRoot: Data
+    ) -> OpenACPrepareLayoutV3 {
+        var pins: [OpenACPinnedField] = []
+        pins.append(contentsOf: openACPinByteArray(baseFieldIndex: 0, bytes: jwtPayloadHash))
+        pins.append(contentsOf: openACPinByteArray(baseFieldIndex: 32, bytes: issuerPkX))
+        pins.append(contentsOf: openACPinByteArray(baseFieldIndex: 64, bytes: issuerPkY))
+        pins.append(OpenACPinnedField(fieldIndex: 98, expected: expectedSdRootHi))
+        pins.append(OpenACPinnedField(fieldIndex: 99, expected: expectedSdRootLo))
+        pins.append(OpenACPinnedField(fieldIndex: 100, expected: expectedDisclosureRoot))
+        return OpenACPrepareLayoutV3(
+            numPublicInputs: 101,
+            commitmentXIndex: 96,
+            commitmentYIndex: 97,
+            extraPinnedFields: pins
+        )
+    }
+
+    /// jwt_x5c_adapter v3.1 layout (86 fields). `expectedJwtPayloadB64h`
+    /// and `expectedJwtSignedHash` are REQUIRED (P0-4 residual gap pins).
+    static func jwtX5c(
+        expectedJwtPayloadB64h: Data,
+        expectedJwtSignedHash: Data,
+        issuerModulusLimbs: [UInt64],  // 18 limbs as low-64-bit pairs
+        issuerModulusLimbsHigh: [UInt64],
+        expectedSmtRoot: Data,
+        expectedIssuerFormatTag: Data
+    ) -> OpenACPrepareLayoutV3 {
+        var pins: [OpenACPinnedField] = []
+        pins.append(contentsOf: openACPinByteArray(baseFieldIndex: 0, bytes: expectedJwtPayloadB64h))
+        pins.append(contentsOf: openACPinByteArray(baseFieldIndex: 32, bytes: expectedJwtSignedHash))
+        // Encode each u128 limb as a 32-byte BE field with the 16-byte limb
+        // packed at the LSB end.
+        for i in 0..<18 {
+            var field = Data(repeating: 0, count: 32)
+            let high = issuerModulusLimbsHigh[i]
+            let low = issuerModulusLimbs[i]
+            for j in 0..<8 {
+                field[16 + j] = UInt8((high >> (8 * (7 - j))) & 0xFF)
+            }
+            for j in 0..<8 {
+                field[24 + j] = UInt8((low >> (8 * (7 - j))) & 0xFF)
+            }
+            pins.append(OpenACPinnedField(fieldIndex: 64 + i, expected: field))
+        }
+        pins.append(OpenACPinnedField(fieldIndex: 82, expected: expectedSmtRoot))
+        pins.append(OpenACPinnedField(fieldIndex: 83, expected: expectedIssuerFormatTag))
+        return OpenACPrepareLayoutV3(
+            numPublicInputs: 86,
+            commitmentXIndex: 84,
+            commitmentYIndex: 85,
+            extraPinnedFields: pins
+        )
+    }
+}
+
+public extension OpenACShowLayoutV3 {
+    /// openac_show v3 (passport-only) layout (85 fields). Pins the
+    /// challenge/link public outputs as well as link policy fields so
+    /// metadata cannot be decoupled from proof public inputs.
+    static func openacShow(
+        expectedLinkMode: Bool,
+        expectedLinkScope: Data,
+        expectedEpoch: Data,
+        expectedEpochField: Data,
+        expectedChallengeDigest: Data,
+        expectedLinkTag: Data
+    ) -> OpenACShowLayoutV3 {
+        var pins: [OpenACPinnedField] = [
+            OpenACPinnedField(fieldIndex: 0, expected: openACByteAsField(0x01)),
+            OpenACPinnedField(fieldIndex: 33, expected: openACBoolAsField(expectedLinkMode)),
+            OpenACPinnedField(fieldIndex: 34, expected: expectedLinkScope),
+            OpenACPinnedField(fieldIndex: 39, expected: expectedEpochField),
+            OpenACPinnedField(fieldIndex: 80, expected: expectedLinkTag),
+        ]
+        pins.append(contentsOf: openACPinByteArray(baseFieldIndex: 35, bytes: expectedEpoch))
+        pins.append(contentsOf: openACPinByteArray(baseFieldIndex: 48, bytes: expectedChallengeDigest))
+        return OpenACShowLayoutV3(
+            numPublicInputs: 85,
+            commitmentXIndex: 46,
+            commitmentYIndex: 47,
+            nonceHashFirstByteIndex: 1,
+            extraPinnedFields: pins
+        )
+    }
+
+    /// x509_show v3 layout (41 fields). Pins target-domain policy plus
+    /// challenge/link public outputs.
+    static func x509Show(
+        expectedTargetDomainHash: Data,
+        expectedLinkMode: Bool,
+        expectedLinkScope: Data,
+        expectedEpoch: Data,
+        expectedLinkTag: Data,
+        expectedChallengeDigest: Data
+    ) -> OpenACShowLayoutV3 {
+        OpenACShowLayoutV3(
+            numPublicInputs: 41,
+            commitmentXIndex: 0,
+            commitmentYIndex: 1,
+            nonceHashFirstByteIndex: 2,
+            extraPinnedFields: [
+                OpenACPinnedField(fieldIndex: 34, expected: expectedTargetDomainHash),
+                OpenACPinnedField(fieldIndex: 35, expected: openACBoolAsField(expectedLinkMode)),
+                OpenACPinnedField(fieldIndex: 36, expected: expectedLinkScope),
+                OpenACPinnedField(fieldIndex: 37, expected: expectedEpoch),
+                OpenACPinnedField(fieldIndex: 38, expected: expectedLinkTag),
+                OpenACPinnedField(fieldIndex: 40, expected: expectedChallengeDigest),
+            ]
+        )
+    }
+
+    /// composite_show v3 layout (49 fields). Pins both passport (0,1) and
+    /// aux (2,3) commitments + aux_domain + target_aux_hash + challenge/link
+    /// outputs.
+    static func compositeShow(
+        auxCommitment: PedersenPoint,
+        auxDomain: Data,
+        expectedTargetAuxHash: Data,
+        expectedLinkMode: Bool,
+        expectedLinkScope: Data,
+        expectedEpoch: Data,
+        expectedLinkTag: Data,
+        expectedChallengeDigest: Data
+    ) -> OpenACShowLayoutV3 {
+        OpenACShowLayoutV3(
+            numPublicInputs: 49,
+            commitmentXIndex: 0,
+            commitmentYIndex: 1,
+            nonceHashFirstByteIndex: 5,
+            extraPinnedFields: [
+                OpenACPinnedField(fieldIndex: 2, expected: auxCommitment.x),
+                OpenACPinnedField(fieldIndex: 3, expected: auxCommitment.y),
+                OpenACPinnedField(fieldIndex: 4, expected: auxDomain),
+                OpenACPinnedField(fieldIndex: 41, expected: expectedTargetAuxHash),
+                OpenACPinnedField(fieldIndex: 42, expected: openACBoolAsField(expectedLinkMode)),
+                OpenACPinnedField(fieldIndex: 43, expected: expectedLinkScope),
+                OpenACPinnedField(fieldIndex: 44, expected: expectedEpoch),
+                OpenACPinnedField(fieldIndex: 45, expected: expectedLinkTag),
+                OpenACPinnedField(fieldIndex: 48, expected: expectedChallengeDigest),
+            ]
+        )
+    }
+}
+
+// MARK: - OpenAC v3 strict public-input decoder
+
+fileprivate func openACDecodePublicInputs(
+    proof: Data,
+    numFields: Int
+) throws -> [Data] {
+    let needed = numFields * 32
+    guard proof.count >= needed else {
+        throw OpenACV3Error.proofTooShortForPublicInputs
+    }
+    var out: [Data] = []
+    out.reserveCapacity(numFields)
+    for i in 0..<numFields {
+        let start = proof.startIndex + i * 32
+        out.append(proof.subdata(in: start..<(start + 32)))
+    }
+    return out
+}
+
+fileprivate func openACAssertPinned(
+    publicInputs: [Data],
+    pinned: [OpenACPinnedField],
+    error: OpenACV3Error
+) throws {
+    for pin in pinned {
+        guard pin.fieldIndex < publicInputs.count else {
+            throw error
+        }
+        if publicInputs[pin.fieldIndex] != pin.expected {
+            throw error
+        }
+    }
 }
 
 private enum OpenACV3Domain {
@@ -960,27 +1285,73 @@ public func verifyOpenACv3(
         throw OpenACV3Error.expiredPrepare
     }
 
-    // 4. Commitment in proof (both phases).
-    let prepareCommitment = PedersenPoint(x: prepare.commitmentX, y: prepare.commitmentY)
-    let showCommitment = PedersenPoint(x: show.commitmentX, y: show.commitmentY)
-    if !containsCommitment(proof: prepare.proof, commitment: prepareCommitment) {
-        throw OpenACV3Error.prepareCommitmentNotInProof
+    // 4. Public-input prefix checks (Task 1+2 follow-up). The Swift
+    //    verifier mirrors the Rust strict-mode path: each expected value
+    //    is pinned at its known ABI field index. The legacy "scan for
+    //    bytes anywhere" fallback was removed.
+    let preparePublicInputs = try openACDecodePublicInputs(
+        proof: prepare.proof,
+        numFields: policy.prepareLayout.numPublicInputs
+    )
+    try openACAssertPinned(
+        publicInputs: preparePublicInputs,
+        pinned: [
+            OpenACPinnedField(
+                fieldIndex: policy.prepareLayout.commitmentXIndex,
+                expected: prepare.commitmentX
+            ),
+            OpenACPinnedField(
+                fieldIndex: policy.prepareLayout.commitmentYIndex,
+                expected: prepare.commitmentY
+            ),
+        ],
+        error: .prepareCommitmentNotInProof
+    )
+    try openACAssertPinned(
+        publicInputs: preparePublicInputs,
+        pinned: policy.prepareLayout.extraPinnedFields,
+        error: .preparePublicInputMismatch
+    )
+
+    let showPublicInputs = try openACDecodePublicInputs(
+        proof: show.proof,
+        numFields: policy.showLayout.numPublicInputs
+    )
+    try openACAssertPinned(
+        publicInputs: showPublicInputs,
+        pinned: [
+            OpenACPinnedField(
+                fieldIndex: policy.showLayout.commitmentXIndex,
+                expected: show.commitmentX
+            ),
+            OpenACPinnedField(
+                fieldIndex: policy.showLayout.commitmentYIndex,
+                expected: show.commitmentY
+            ),
+        ],
+        error: .showCommitmentNotInProof
+    )
+    if let base = policy.showLayout.nonceHashFirstByteIndex {
+        try openACAssertPinned(
+            publicInputs: showPublicInputs,
+            pinned: openACPinByteArray(baseFieldIndex: base, bytes: show.nonceHash),
+            error: .nonceHashNotInProof
+        )
     }
-    if !containsCommitment(proof: show.proof, commitment: showCommitment) {
-        throw OpenACV3Error.showCommitmentNotInProof
-    }
+    try openACAssertPinned(
+        publicInputs: showPublicInputs,
+        pinned: policy.showLayout.extraPinnedFields,
+        error: .showPublicInputMismatch
+    )
 
     // 5. Commitment equality
     if prepare.commitmentX != show.commitmentX || prepare.commitmentY != show.commitmentY {
         throw OpenACV3Error.commitmentMismatch
     }
 
-    // 6. pk_digest equality + nonce_hash-in-show-proof
+    // 6. pk_digest equality.
     if prepare.pkDigest != show.pkDigest {
         throw OpenACV3Error.pkDigestMismatch
-    }
-    if !containsField(proof: show.proof, target: show.nonceHash) {
-        throw OpenACV3Error.nonceHashNotInProof
     }
 
     // 7. Challenge binding

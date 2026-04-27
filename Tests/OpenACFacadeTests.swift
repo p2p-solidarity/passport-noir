@@ -189,6 +189,22 @@ final class OpenACFacadeTests: XCTestCase {
     ) -> OpenACV3Policy {
         let prepareVkHash = (try? computeSHA256(prepared.vk)) ?? Data()
         let showVkHash = (try? computeSHA256(presentation.vk)) ?? Data()
+        // Layouts matching the synthetic mock proofs built by
+        // makeProofBlobContaining*: commitment lives at field indices 0/1,
+        // and (for show) nonce_hash bytes start at field index 3.
+        let prepareLayout = OpenACPrepareLayoutV3(
+            numPublicInputs: 2,
+            commitmentXIndex: 0,
+            commitmentYIndex: 1,
+            extraPinnedFields: []
+        )
+        let showLayout = OpenACShowLayoutV3(
+            numPublicInputs: 35,
+            commitmentXIndex: 0,
+            commitmentYIndex: 1,
+            nonceHashFirstByteIndex: 3,
+            extraPinnedFields: []
+        )
         return OpenACV3Policy(
             linkMode: .unlinkable,
             linkScope: nil,
@@ -197,13 +213,19 @@ final class OpenACFacadeTests: XCTestCase {
             expectedChallenge: presentation.challenge,
             expectedNonceHash: presentation.nonceHash,
             prepareVkHash: prepareVkHash,
-            showVkHash: showVkHash
+            showVkHash: showVkHash,
+            prepareLayout: prepareLayout,
+            showLayout: showLayout
         )
     }
 
     private func makeProofBlobContaining(commitmentX cx: Data, commitmentY cy: Data) -> Data {
-        // verify_openac_v3 scans for `cx || cy` on 32-byte boundaries.
-        var blob = Data(repeating: 0, count: 32)
+        // Strict layout (Task 1+2 follow-up): commitment must live at field
+        // indices 0 and 1 (byte offsets 0 and 32). Earlier versions buried
+        // the commitment after a 32-byte zero prefix to verify the scanner
+        // could find it anywhere; the strict verifier no longer scans, so
+        // the layout is anchored.
+        var blob = Data()
         blob.append(cx)
         blob.append(cy)
         blob.append(Data(repeating: 0, count: 32))
@@ -215,10 +237,19 @@ final class OpenACFacadeTests: XCTestCase {
         commitmentY cy: Data,
         nonceHash: Data
     ) -> Data {
-        var blob = Data(repeating: 0, count: 32)
+        // Strict layout (Task 1+2 follow-up): proof prefix lays out the
+        // public inputs in field-index order. For the show fixture:
+        //   field 0: cx
+        //   field 1: cy
+        //   field 2: pk_digest (zero in this fixture)
+        //   field 3..35: nonce_hash bytes (each byte its own 32-byte Field)
+        var blob = Data()
         blob.append(cx)
         blob.append(cy)
-        blob.append(nonceHash)
+        blob.append(Data(repeating: 0, count: 32))
+        for b in nonceHash {
+            blob.append(openACByteAsField(b))
+        }
         blob.append(Data(repeating: 0, count: 32))
         return blob
     }

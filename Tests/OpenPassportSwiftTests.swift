@@ -169,6 +169,59 @@ final class OpenPassportSwiftTests: XCTestCase {
         )
     }
 
+
+    /// Layout helper: matches the synthetic strict-format mock proof built
+    /// by `v3FullFixture`. v3Fixture (which exercises only the linking
+    /// helper) does not actually use these layouts, but `OpenACV3Policy`
+    /// requires them so we provide a sensible default that lines up with
+    /// the v3FullFixture mock.
+    private func testEmptyPrepareLayout() -> OpenACPrepareLayoutV3 {
+        OpenACPrepareLayoutV3(
+            numPublicInputs: 2,
+            commitmentXIndex: 0,
+            commitmentYIndex: 1,
+            extraPinnedFields: []
+        )
+    }
+
+    private func testEmptyShowLayout() -> OpenACShowLayoutV3 {
+        OpenACShowLayoutV3(
+            numPublicInputs: 35,
+            commitmentXIndex: 0,
+            commitmentYIndex: 1,
+            nonceHashFirstByteIndex: 3,
+            extraPinnedFields: []
+        )
+    }
+
+    func testOpenACShowLayoutPinsChallengeDigestAndLinkTag() {
+        let scope = Data(repeating: 0x55, count: 32)
+        let epoch = Data([0x20, 0x26, 0x04, 0x28])
+        let epochField = Data(repeating: 0x66, count: 32)
+        let digest = Data(repeating: 0x77, count: 32)
+        let tag = Data(repeating: 0x88, count: 32)
+
+        let layout = OpenACShowLayoutV3.openacShow(
+            expectedLinkMode: true,
+            expectedLinkScope: scope,
+            expectedEpoch: epoch,
+            expectedEpochField: epochField,
+            expectedChallengeDigest: digest,
+            expectedLinkTag: tag
+        )
+
+        XCTAssertTrue(layout.extraPinnedFields.contains(OpenACPinnedField(fieldIndex: 33, expected: openACBoolAsField(true))))
+        XCTAssertTrue(layout.extraPinnedFields.contains(OpenACPinnedField(fieldIndex: 34, expected: scope)))
+        XCTAssertTrue(layout.extraPinnedFields.contains(OpenACPinnedField(fieldIndex: 39, expected: epochField)))
+        XCTAssertTrue(layout.extraPinnedFields.contains(OpenACPinnedField(fieldIndex: 80, expected: tag)))
+        for pin in openACPinByteArray(baseFieldIndex: 35, bytes: epoch) {
+            XCTAssertTrue(layout.extraPinnedFields.contains(pin))
+        }
+        for pin in openACPinByteArray(baseFieldIndex: 48, bytes: digest) {
+            XCTAssertTrue(layout.extraPinnedFields.contains(pin))
+        }
+    }
+
     // MARK: - OpenAC v3 (Path A)
 
     private func v3Fixture(
@@ -223,6 +276,22 @@ final class OpenPassportSwiftTests: XCTestCase {
             vk: Data()
         )
 
+        // Synthetic strict layouts that match the empty-proof test fixture.
+        // Real callers build adapter-specific layouts via the
+        // OpenACPrepareLayoutV3.passport/sdjwt/jwtX5c builders.
+        let prepareLayout = OpenACPrepareLayoutV3(
+            numPublicInputs: 0,
+            commitmentXIndex: 0,
+            commitmentYIndex: 1,
+            extraPinnedFields: []
+        )
+        let showLayout = OpenACShowLayoutV3(
+            numPublicInputs: 0,
+            commitmentXIndex: 0,
+            commitmentYIndex: 1,
+            nonceHashFirstByteIndex: nil,
+            extraPinnedFields: []
+        )
         let policy = OpenACV3Policy(
             linkMode: linkMode,
             linkScope: linkScope,
@@ -231,7 +300,9 @@ final class OpenPassportSwiftTests: XCTestCase {
             expectedChallenge: challenge,
             expectedNonceHash: nonceHash,
             prepareVkHash: Data(repeating: 0, count: 32),
-            showVkHash: Data(repeating: 0, count: 32)
+            showVkHash: Data(repeating: 0, count: 32),
+            prepareLayout: prepareLayout,
+            showLayout: showLayout
         )
 
         return (prepare, show, policy)
@@ -319,7 +390,9 @@ final class OpenPassportSwiftTests: XCTestCase {
             expectedChallenge: policy.expectedChallenge,
             expectedNonceHash: Data(repeating: 0x00, count: 32),
             prepareVkHash: policy.prepareVkHash,
-            showVkHash: policy.showVkHash
+            showVkHash: policy.showVkHash,
+            prepareLayout: testEmptyPrepareLayout(),
+            showLayout: testEmptyShowLayout()
         )
         XCTAssertThrowsError(
             try verifyOpenAcV3Linking(prepare: prepare, show: show, policy: mutatedPolicy)
@@ -338,7 +411,9 @@ final class OpenPassportSwiftTests: XCTestCase {
             expectedChallenge: policy.expectedChallenge,
             expectedNonceHash: policy.expectedNonceHash,
             prepareVkHash: policy.prepareVkHash,
-            showVkHash: policy.showVkHash
+            showVkHash: policy.showVkHash,
+            prepareLayout: policy.prepareLayout,
+            showLayout: policy.showLayout
         )
         XCTAssertThrowsError(
             try verifyOpenAcV3Linking(prepare: prepare, show: show, policy: latePolicy)
@@ -357,7 +432,9 @@ final class OpenPassportSwiftTests: XCTestCase {
             expectedChallenge: show.challenge,
             expectedNonceHash: show.nonceHash,
             prepareVkHash: Data(repeating: 0, count: 32),
-            showVkHash: Data(repeating: 0, count: 32)
+            showVkHash: Data(repeating: 0, count: 32),
+            prepareLayout: testEmptyPrepareLayout(),
+            showLayout: testEmptyShowLayout()
         )
         XCTAssertThrowsError(
             try verifyOpenAcV3Linking(prepare: prepare, show: show, policy: unlinkablePolicy)
@@ -595,6 +672,12 @@ final class OpenPassportSwiftTests: XCTestCase {
         let prepareVk = Data([0x01, 0x02, 0x03])
         let showVk = Data([0x04, 0x05, 0x06])
 
+        // Strict-mode mock (Task 1+2 follow-up, 2026-04-28): the proof
+        // prefix encodes each public input as a 32-byte BE Field. For the
+        // synthetic test fixture we use a small layout matching real Noir
+        // ABI semantics:
+        //   prepare: [commitmentX | commitmentY | suffix]
+        //   show:    [commitmentX | commitmentY | pkDigest | nonceHash[0..32] (each byte a Field) | suffix]
         var prepareProof = Data()
         prepareProof.append(commitmentX)
         prepareProof.append(commitmentY)
@@ -604,7 +687,9 @@ final class OpenPassportSwiftTests: XCTestCase {
         showProof.append(commitmentX)
         showProof.append(commitmentY)
         showProof.append(pkDigest)
-        showProof.append(nonceHash)
+        for b in nonceHash {
+            showProof.append(openACByteAsField(b))
+        }
         showProof.append(Data([40, 50, 60]))
 
         let linkTag: Data
@@ -642,6 +727,20 @@ final class OpenPassportSwiftTests: XCTestCase {
             vk: showVk
         )
 
+        // Layouts that match the strict-format mock above.
+        let prepareLayout = OpenACPrepareLayoutV3(
+            numPublicInputs: 2,
+            commitmentXIndex: 0,
+            commitmentYIndex: 1,
+            extraPinnedFields: []
+        )
+        let showLayout = OpenACShowLayoutV3(
+            numPublicInputs: 35,
+            commitmentXIndex: 0,
+            commitmentYIndex: 1,
+            nonceHashFirstByteIndex: 3,
+            extraPinnedFields: []
+        )
         let policy = OpenACV3Policy(
             linkMode: linkMode,
             linkScope: linkScope,
@@ -650,7 +749,9 @@ final class OpenPassportSwiftTests: XCTestCase {
             expectedChallenge: challenge,
             expectedNonceHash: nonceHash,
             prepareVkHash: sha256Hash(prepareVk),
-            showVkHash: sha256Hash(showVk)
+            showVkHash: sha256Hash(showVk),
+            prepareLayout: prepareLayout,
+            showLayout: showLayout
         )
 
         let verifier: OpenACNoirVerifier = { _, _ in true }
@@ -674,7 +775,9 @@ final class OpenPassportSwiftTests: XCTestCase {
             expectedChallenge: policy.expectedChallenge,
             expectedNonceHash: policy.expectedNonceHash,
             prepareVkHash: Data(repeating: 0x99, count: 32),
-            showVkHash: policy.showVkHash
+            showVkHash: policy.showVkHash,
+            prepareLayout: testEmptyPrepareLayout(),
+            showLayout: testEmptyShowLayout()
         )
         XCTAssertThrowsError(
             try verifyOpenACv3(prepare: prepare, show: show, policy: tamperedPolicy, verifier: verifier)
@@ -685,14 +788,16 @@ final class OpenPassportSwiftTests: XCTestCase {
 
     func testOpenACv3NonceHashNotInProofRejected() throws {
         let (prepare, show, policy, verifier) = try v3FullFixture()
-        // Rebuild the show proof WITHOUT the nonce_hash slot to trigger the scan miss.
-        var stripped = Data()
-        stripped.append(show.commitmentX)
-        stripped.append(show.commitmentY)
-        stripped.append(show.pkDigest)
-        stripped.append(Data([40, 50, 60]))
+        // Tamper a byte INSIDE the nonce-hash region (each byte of nonce
+        // occupies its own 32-byte Field slot, starting at field index 3
+        // == byte offset 96). Flipping the LSB of the field at index 3
+        // changes nonce_hash[0] to a different byte, so the strict layout
+        // check fires `nonceHashNotInProof`.
+        var tampered = show.proof
+        let nonceFieldStart = 3 * 32
+        tampered[nonceFieldStart + 31] ^= 0x01
 
-        let strippedShow = OpenACV3ShowPresentation(
+        let tamperedShow = OpenACV3ShowPresentation(
             commitmentX: show.commitmentX,
             commitmentY: show.commitmentY,
             pkDigest: show.pkDigest,
@@ -700,12 +805,12 @@ final class OpenPassportSwiftTests: XCTestCase {
             challenge: show.challenge,
             challengeDigest: show.challengeDigest,
             linkTag: show.linkTag,
-            proof: stripped,
+            proof: tampered,
             vk: show.vk
         )
 
         XCTAssertThrowsError(
-            try verifyOpenACv3(prepare: prepare, show: strippedShow, policy: policy, verifier: verifier)
+            try verifyOpenACv3(prepare: prepare, show: tamperedShow, policy: policy, verifier: verifier)
         ) { err in
             XCTAssertEqual(err as? OpenACV3Error, .nonceHashNotInProof)
         }
@@ -1261,7 +1366,9 @@ final class OpenPassportSwiftTests: XCTestCase {
             expectedChallenge: policy.expectedChallenge,
             expectedNonceHash: policy.expectedNonceHash,
             prepareVkHash: policy.prepareVkHash,
-            showVkHash: policy.showVkHash
+            showVkHash: policy.showVkHash,
+            prepareLayout: policy.prepareLayout,
+            showLayout: policy.showLayout
         )
         XCTAssertThrowsError(
             try verifyOpenACv3(prepare: prepare, show: show, policy: earlyPolicy, verifier: verifier)
@@ -1280,7 +1387,9 @@ final class OpenPassportSwiftTests: XCTestCase {
             expectedChallenge: policy.expectedChallenge,
             expectedNonceHash: policy.expectedNonceHash,
             prepareVkHash: policy.prepareVkHash,
-            showVkHash: policy.showVkHash
+            showVkHash: policy.showVkHash,
+            prepareLayout: policy.prepareLayout,
+            showLayout: policy.showLayout
         )
         XCTAssertThrowsError(
             try verifyOpenACv3(prepare: prepare, show: show, policy: latePolicy, verifier: verifier)
@@ -1299,7 +1408,9 @@ final class OpenPassportSwiftTests: XCTestCase {
             expectedChallenge: policy.expectedChallenge,
             expectedNonceHash: policy.expectedNonceHash,
             prepareVkHash: policy.prepareVkHash,
-            showVkHash: Data(repeating: 0xCD, count: 32)
+            showVkHash: Data(repeating: 0xCD, count: 32),
+            prepareLayout: testEmptyPrepareLayout(),
+            showLayout: testEmptyShowLayout()
         )
         XCTAssertThrowsError(
             try verifyOpenACv3(prepare: prepare, show: show, policy: mutated, verifier: verifier)
@@ -1374,9 +1485,14 @@ final class OpenPassportSwiftTests: XCTestCase {
 
     func testOpenACv3PrepareCommitmentNotInProofRejected() throws {
         let (prepare, show, policy, verifier) = try v3FullFixture()
-        // Strip the commitment prefix from the prepare proof so the
-        // 64-byte aligned scan misses it.
-        let stripped = OpenACV3PrepareArtifact(
+        // Strict layout (Task 1+2 follow-up): tamper the commitment.x slot
+        // bytes inside the prepare proof so the ABI-known field index 0
+        // no longer matches the prepare.commitment.x. This is the precise
+        // analog of the legacy "scan miss" -- now caught at the exact
+        // ABI position rather than anywhere in the proof bytes.
+        var tampered = prepare.proof
+        tampered[0] ^= 0x01
+        let tamperedPrepare = OpenACV3PrepareArtifact(
             createdAtUnix: prepare.createdAtUnix,
             expiresAtUnix: prepare.expiresAtUnix,
             credentialType: prepare.credentialType,
@@ -1384,11 +1500,11 @@ final class OpenPassportSwiftTests: XCTestCase {
             commitmentY: prepare.commitmentY,
             pkDigest: prepare.pkDigest,
             linkRand: prepare.linkRand,
-            proof: Data([0xFF, 0xEE, 0xDD]),
+            proof: tampered,
             vk: prepare.vk
         )
         XCTAssertThrowsError(
-            try verifyOpenACv3(prepare: stripped, show: show, policy: policy, verifier: verifier)
+            try verifyOpenACv3(prepare: tamperedPrepare, show: show, policy: policy, verifier: verifier)
         ) { err in
             XCTAssertEqual(err as? OpenACV3Error, .prepareCommitmentNotInProof)
         }
@@ -1396,12 +1512,12 @@ final class OpenPassportSwiftTests: XCTestCase {
 
     func testOpenACv3ShowCommitmentNotInProofRejected() throws {
         let (prepare, show, policy, verifier) = try v3FullFixture()
-        // Show proof retains nonce_hash + pk_digest but drops commitment x||y.
-        var stripped = Data()
-        stripped.append(show.pkDigest)
-        stripped.append(show.nonceHash)
-        stripped.append(Data([40, 50, 60]))
-        let strippedShow = OpenACV3ShowPresentation(
+        // Strict layout: tamper the commitment.x slot inside the show
+        // proof. The ABI-known field index 0 no longer holds the value
+        // the verifier expects, so the strict check fires.
+        var tampered = show.proof
+        tampered[0] ^= 0x01
+        let tamperedShow = OpenACV3ShowPresentation(
             commitmentX: show.commitmentX,
             commitmentY: show.commitmentY,
             pkDigest: show.pkDigest,
@@ -1409,11 +1525,11 @@ final class OpenPassportSwiftTests: XCTestCase {
             challenge: show.challenge,
             challengeDigest: show.challengeDigest,
             linkTag: show.linkTag,
-            proof: stripped,
+            proof: tampered,
             vk: show.vk
         )
         XCTAssertThrowsError(
-            try verifyOpenACv3(prepare: prepare, show: strippedShow, policy: policy, verifier: verifier)
+            try verifyOpenACv3(prepare: prepare, show: tamperedShow, policy: policy, verifier: verifier)
         ) { err in
             XCTAssertEqual(err as? OpenACV3Error, .showCommitmentNotInProof)
         }
@@ -1429,7 +1545,9 @@ final class OpenPassportSwiftTests: XCTestCase {
             expectedChallenge: Data(repeating: 0xFA, count: 32),
             expectedNonceHash: policy.expectedNonceHash,
             prepareVkHash: policy.prepareVkHash,
-            showVkHash: policy.showVkHash
+            showVkHash: policy.showVkHash,
+            prepareLayout: testEmptyPrepareLayout(),
+            showLayout: testEmptyShowLayout()
         )
         XCTAssertThrowsError(
             try verifyOpenACv3(prepare: prepare, show: show, policy: mutated, verifier: verifier)
@@ -1475,7 +1593,9 @@ final class OpenPassportSwiftTests: XCTestCase {
             expectedChallenge: show.challenge,
             expectedNonceHash: show.nonceHash,
             prepareVkHash: sha256Hash(prepare.vk),
-            showVkHash: sha256Hash(show.vk)
+            showVkHash: sha256Hash(show.vk),
+            prepareLayout: testEmptyPrepareLayout(),
+            showLayout: testEmptyShowLayout()
         )
         XCTAssertThrowsError(
             try verifyOpenACv3(prepare: prepare, show: show, policy: unlinkablePolicy, verifier: verifier)
@@ -1494,7 +1614,9 @@ final class OpenPassportSwiftTests: XCTestCase {
             expectedChallenge: show.challenge,
             expectedNonceHash: show.nonceHash,
             prepareVkHash: sha256Hash(prepare.vk),
-            showVkHash: sha256Hash(show.vk)
+            showVkHash: sha256Hash(show.vk),
+            prepareLayout: testEmptyPrepareLayout(),
+            showLayout: testEmptyShowLayout()
         )
         XCTAssertThrowsError(
             try verifyOpenACv3(prepare: prepare, show: show, policy: invalidPolicy, verifier: verifier)
@@ -1536,7 +1658,9 @@ final class OpenPassportSwiftTests: XCTestCase {
             expectedChallenge: policy.expectedChallenge,
             expectedNonceHash: policy.expectedNonceHash,
             prepareVkHash: policy.prepareVkHash,
-            showVkHash: policy.showVkHash
+            showVkHash: policy.showVkHash,
+            prepareLayout: policy.prepareLayout,
+            showLayout: policy.showLayout
         )
         XCTAssertTrue(
             try verifyOpenAcV3Linking(prepare: prepare, show: show, policy: boundaryPolicy)
