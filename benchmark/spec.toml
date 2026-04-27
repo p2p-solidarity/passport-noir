@@ -75,6 +75,11 @@ bignum = "v0.9.2"
 # ============================================================
 # Circuit: data_integrity
 # ============================================================
+# SOD hash hard constraint (do NOT remove without coordinating with iOS pipeline):
+#   sod_hash = SHA256(dg0_hash || dg1_hash || dg2_hash || dg3_hash)
+# Unused DG slots are zero-padded (32 bytes each). This is raw concatenation,
+# not the ICAO 9303 LDS Security Object TLV-encoded signedAttrs. The iOS app
+# must normalize NFC chip data to this layout before feeding the circuit.
 [circuits.data_integrity]
 type = "bin"
 description = "DG hash chain verification (DG1-DG4 -> SOD hash)"
@@ -124,8 +129,17 @@ public_input_types = [
 private_inputs = ["mrz_data"]
 private_input_types = ["[u8; 88]"]
 
+# main_with_challenge() helper binds a verifier challenge to mrz_hash.
+# Domain MUST differ from show_link's "openac.show.v1" because preimage
+# layouts diverge (mrz_hash vs prepare_commitment) — sharing a domain
+# would let an external verifier confuse digests across the two circuits.
+domain_separators = [
+  { name = "disclosure_challenge", value = "openac.disclosure.v1", bytes = 20 },
+]
+
 assertions = [
   "MRZ hash mismatch",
+  "Challenge digest mismatch",
 ]
 
 constants = { MRZ_LINE_LEN = 44, MRZ_TOTAL_LEN = 88 }
@@ -492,20 +506,34 @@ description = "OpenAC SD-JWT adapter (v3): ES256 issuer ECDSA + disclosure hash 
 source = "circuits/sdjwt_adapter/src/main.nr"
 version = "v3"
 
-public_inputs = ["issuer_pk_x", "issuer_pk_y", "out_commitment_x", "out_commitment_y"]
-public_input_types = ["[u8; 32]", "[u8; 32]", "Field", "Field"]
+# `jwt_payload_hash` is `pub` so the verifier can independently confirm which
+# payload the issuer signed (a private payload hash would let a prover swap
+# the signed payload silently). `out_sd_root_{hi,lo}` are `pub` so the verifier
+# can externally link which disclosure set was committed.
+public_inputs = [
+  "jwt_payload_hash",
+  "issuer_pk_x", "issuer_pk_y",
+  "out_commitment_x", "out_commitment_y",
+  "out_sd_root_hi", "out_sd_root_lo",
+]
+public_input_types = [
+  "[u8; 32]",
+  "[u8; 32]", "[u8; 32]",
+  "Field", "Field",
+  "Field", "Field",
+]
 
 # v3 adds `enclave_pk_x`, `enclave_pk_y` as private witnesses so the
 # commitment binds `pk_digest`. The show phase re-derives pk_digest via
 # in-circuit ECDSA against a fresh nonce.
 private_inputs = [
-  "jwt_payload_hash", "signature",
+  "signature",
   "disclosure_count", "disclosure_salts", "claim_values", "claim_lengths", "expected_disclosure_hashes",
   "link_rand_p",
   "enclave_pk_x", "enclave_pk_y",
 ]
 private_input_types = [
-  "[u8; 32]", "[u8; 64]",
+  "[u8; 64]",
   "u8", "[[u8; 16]; 8]", "[[u8; 64]; 8]", "[u32; 8]", "[[u8; 32]; 8]",
   "Field",
   "[u8; 32]", "[u8; 32]",
@@ -525,7 +553,7 @@ constants = { MAX_DISCLOSURES = 8, MAX_CLAIM_SIZE = 64, SALT_SIZE = 16 }
 min_positive_tests = 5
 min_negative_tests = 2
 
-exports = { out_commitment_x = "Field", out_commitment_y = "Field" }
+exports = { out_commitment_x = "Field", out_commitment_y = "Field", out_sd_root_hi = "Field", out_sd_root_lo = "Field" }
 
 # ============================================================
 # Circuit: mdoc_adapter (v2 — Path A mDoc / mDL prepare, Direction D)

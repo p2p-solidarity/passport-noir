@@ -8,6 +8,13 @@ use sha256::digest;
 //
 // ICAO 9303 specifies that each data group is individually hashed,
 // and the collection of hashes is stored in the SOD's LDS Security Object.
+//
+// SOD hash format (hard constraint, deviates from ICAO 9303):
+//   sod_hash = SHA256(dg0_hash || dg1_hash || dg2_hash || dg3_hash)
+// Each slot is 32 bytes; unused slots (when dg_count < MAX_DG_COUNT) are
+// zero-padded. This is raw concatenation, NOT the ICAO 9303 LDS Security
+// Object's TLV-encoded signedAttrs. Callers (iOS pipeline + passport_verifier)
+// must normalize NFC chip data to this layout before consuming this circuit.
 
 // Maximum number of data groups we support (ICAO defines up to 16)
 global MAX_DG_COUNT: u32 = 4;
