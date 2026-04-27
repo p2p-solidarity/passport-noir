@@ -15,6 +15,21 @@ pub global DOMAIN_MDL: Field = 0x04;
 // explicit-domain pattern used elsewhere in this library.
 pub global DOMAIN_SMT_NODE: Field = 0x736d7431;
 
+// Issue P1-6 (2026-04-28): revocation-list SMT key derivation domain
+// (ASCII "rkey"). Used by openac_core::smt::compute_serial_key to bind both
+// issuer identity and the full 20-byte serial into the SMT path key, so a
+// non-membership proof under one issuer can never be replayed against
+// another issuer's snapshot.
+pub global DOMAIN_REVOC_KEY: Field = 0x726b6579;
+
+// Issue P1-7 (2026-04-28): canonical issuer-identity domain. The CSCA /
+// X.509 trust roots used to commit the leaf as `pedersen_hash([leaf_modulus
+// limbs])`, which only bound the RSA modulus -- not country, subject,
+// validity, key-usage, or even the RSA exponent. compute_x509_issuer_id
+// (openac_core::smt) folds these into a single Field so the Merkle leaf is
+// a true cert identity hash.
+pub global DOMAIN_X509_ISSUER: Field = 0x78353039;
+
 // CSCA Master List Merkle tree domain separators. ASCII "cscn" / "cscl".
 // Internal-node hash uses DOMAIN_CSCA_NODE (arity-3). Leaf pre-image uses
 // DOMAIN_CSCA_LEAF with the 18 RSA modulus limbs to derive a single Field

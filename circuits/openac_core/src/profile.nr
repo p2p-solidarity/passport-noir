@@ -41,6 +41,67 @@ pub fn compute_link_tag(link_rand: Field, link_scope: Field, epoch: Field) -> Fi
     pedersen_hash([LINK_TAG_DOMAIN, link_rand, link_scope, epoch])
 }
 
+/// Issue P1-9 (2026-04-28): commitment-bound challenge digest used by
+/// x509_show / composite_show. Folding the credential commitment into the
+/// transcript prevents a presentation from being replayed against a
+/// different credential (same nonce, same scope) -- the audit flagged this
+/// as a missing binding in the previous Pedersen-based show circuits.
+pub fn compute_show_challenge_digest_v2(
+    nonce_hash: [u8; 32],
+    commitment_x: Field,
+    commitment_y: Field,
+    link_rand: Field,
+) -> Field {
+    let (nonce_hi, nonce_lo) = hash_to_fields(nonce_hash);
+    pedersen_hash(
+        [CHALLENGE_DOMAIN, nonce_hi, nonce_lo, commitment_x, commitment_y, link_rand],
+    )
+}
+
+/// Issue P1-9: commitment-bound challenge digest for composite presentations
+/// (passport + aux). Both commitments are folded into the transcript so a
+/// composite presentation under one credential bundle can never be replayed
+/// against a different bundle.
+pub fn compute_composite_challenge_digest(
+    nonce_hash: [u8; 32],
+    passport_commitment_x: Field,
+    passport_commitment_y: Field,
+    aux_commitment_x: Field,
+    aux_commitment_y: Field,
+    link_rand_p: Field,
+) -> Field {
+    let (nonce_hi, nonce_lo) = hash_to_fields(nonce_hash);
+    pedersen_hash([
+        CHALLENGE_DOMAIN,
+        nonce_hi,
+        nonce_lo,
+        passport_commitment_x,
+        passport_commitment_y,
+        aux_commitment_x,
+        aux_commitment_y,
+        link_rand_p,
+    ])
+}
+
+/// Issue P1-9 (2026-04-28): scoped link tag with explicit unlinkable-mode
+/// support. When `link_mode == false` the tag is forced to 0 and the caller
+/// must also pin link_scope == 0 (mirroring openac_core::show::verify_show).
+/// This is the first place where x509_show / composite_show can emit a 0
+/// tag; previously they always published a tag, so the verifier had to
+/// trust off-chain metadata for the unlinkable case.
+pub fn compute_link_tag_with_mode(
+    link_rand: Field,
+    link_scope: Field,
+    epoch: Field,
+    link_mode: bool,
+) -> Field {
+    if link_mode {
+        compute_link_tag(link_rand, link_scope, epoch)
+    } else {
+        0
+    }
+}
+
 pub fn pack_passport_profile(
     sod_hash: [u8; 32],
     dg1_hash: [u8; 32],
@@ -153,4 +214,44 @@ fn test_link_challenge_digest_changes_with_nonce() {
 fn test_pack_x509_domain_rejects_oversized_input() {
     let domain: [u8; MAX_DOMAIN_LEN] = [1; MAX_DOMAIN_LEN];
     let _ = pack_x509_domain(domain, 32);
+}
+
+#[test]
+fn test_show_challenge_digest_v2_changes_with_commitment() {
+    let a = compute_show_challenge_digest_v2([1; 32], 100, 200, 42);
+    let b = compute_show_challenge_digest_v2([1; 32], 101, 200, 42);
+    assert(a != b, "Folding the commitment must change the challenge digest");
+}
+
+#[test]
+fn test_show_challenge_digest_v2_changes_with_nonce() {
+    let a = compute_show_challenge_digest_v2([1; 32], 100, 200, 42);
+    let b = compute_show_challenge_digest_v2([2; 32], 100, 200, 42);
+    assert(a != b, "Different nonce must change the challenge digest");
+}
+
+#[test]
+fn test_composite_challenge_digest_separates_from_v2() {
+    // Composite digest must differ from v2 even when c_aux is zero -- the
+    // arity-8 vs. arity-6 pedersen_hash form already gives separation, so
+    // adapters cannot accidentally swap the two helpers.
+    let v2 = compute_show_challenge_digest_v2([1; 32], 100, 200, 42);
+    let composite = compute_composite_challenge_digest([1; 32], 100, 200, 0, 0, 42);
+    assert(v2 != composite, "Composite digest must be domain-separated from v2");
+}
+
+#[test]
+fn test_compute_link_tag_with_mode_unlinkable_returns_zero() {
+    // Issue P1-9: unlinkable mode forces the tag to 0 inside the helper so
+    // x509_show / composite_show callers cannot accidentally emit a non-zero
+    // tag while the verifier policy says "unlinkable".
+    let tag = compute_link_tag_with_mode(123, 456, 789, false);
+    assert(tag == 0, "Unlinkable mode must yield zero link tag");
+}
+
+#[test]
+fn test_compute_link_tag_with_mode_linkable_matches_compute_link_tag() {
+    let with_mode = compute_link_tag_with_mode(123, 456, 789, true);
+    let direct = compute_link_tag(123, 456, 789);
+    assert(with_mode == direct, "Linkable mode must match compute_link_tag");
 }
