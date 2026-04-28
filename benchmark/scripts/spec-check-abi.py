@@ -79,6 +79,41 @@ def parse_abi_inputs(circuit_json_path: Path) -> tuple[list[dict], list[dict]] |
     return public_params, private_params
 
 
+def abi_type_to_str(t: dict) -> str:
+    """Convert a Noir ABI type dict to the canonical source-style string used
+    in spec.toml (e.g. ``[u128; 18]``, ``[[u8; 32]; 4]``, ``Field``).
+
+    The 2026-04-28 P2-10 follow-up: spec-check previously only compared
+    public-input *names* against spec.toml. Type drift (e.g. ``u8`` -> ``u32``,
+    ``[u8; 32]`` -> ``[u8; 64]``) silently slipped through. Converting the
+    nested ABI type to a canonical string lets us flag those drifts as
+    clearly as ordering/name drifts.
+    """
+    kind = t.get("kind")
+    if kind == "field":
+        return "Field"
+    if kind == "boolean":
+        return "bool"
+    if kind == "integer":
+        sign = t.get("sign", "unsigned")
+        width = t.get("width", 0)
+        prefix = "u" if sign == "unsigned" else "i"
+        return f"{prefix}{width}"
+    if kind == "array":
+        length = t.get("length", 0)
+        inner = abi_type_to_str(t.get("type", {}))
+        return f"[{inner}; {length}]"
+    if kind == "string":
+        length = t.get("length", 0)
+        return f"str<{length}>"
+    if kind == "struct":
+        # struct names are not stable across compilations; fall back to the
+        # struct's path so any drift surfaces, even if the message is verbose.
+        path = t.get("path") or ""
+        return f"struct<{path}>"
+    return f"<unknown:{kind}>"
+
+
 def check_circuit(name: str, spec: dict[str, Any], target_dir: Path, issues: list[str]) -> None:
     json_path = target_dir / f"{name}.json"
     parsed = parse_abi_inputs(json_path)
@@ -87,10 +122,19 @@ def check_circuit(name: str, spec: dict[str, Any], target_dir: Path, issues: lis
         return
     public_params, _private_params = parsed
     abi_names = [p["name"] for p in public_params]
+    abi_types = [abi_type_to_str(p["type"]) for p in public_params]
     spec_names = spec.get("public_inputs") or []
+    spec_types = spec.get("public_input_types") or []
 
-    if abi_names == spec_names:
-        ok(f"{name}: public-input ABI matches spec.toml ({len(abi_names)} inputs)")
+    name_match = abi_names == spec_names
+    type_match = abi_types == spec_types
+    type_known = bool(spec_types)
+
+    if name_match and (not type_known or type_match):
+        if type_known:
+            ok(f"{name}: public-input ABI matches spec.toml ({len(abi_names)} inputs, names + types)")
+        else:
+            ok(f"{name}: public-input ABI names match spec.toml ({len(abi_names)} inputs); spec.public_input_types missing -- add it for stricter drift checks")
         return
 
     # Detailed diagnostic: report length mismatch, then ordering or naming
@@ -101,18 +145,42 @@ def check_circuit(name: str, spec: dict[str, Any], target_dir: Path, issues: lis
             f"{name}: public-input count mismatch -- spec={len(spec_names)} abi={len(abi_names)}",
             issues=issues,
         )
-    diffs: list[str] = []
+    name_diffs: list[str] = []
     for idx, (a, s) in enumerate(zip(abi_names, spec_names)):
         if a != s:
-            diffs.append(f"index {idx}: spec={s!r} abi={a!r}")
+            name_diffs.append(f"index {idx}: spec={s!r} abi={a!r}")
     extra_abi = abi_names[len(spec_names):]
     extra_spec = spec_names[len(abi_names):]
-    if diffs:
-        fail(f"{name}: public-input ordering/name drift: {'; '.join(diffs)}", issues=issues)
+    if name_diffs:
+        fail(f"{name}: public-input ordering/name drift: {'; '.join(name_diffs)}", issues=issues)
     if extra_abi:
         fail(f"{name}: ABI has extra public inputs not in spec: {extra_abi}", issues=issues)
     if extra_spec:
         fail(f"{name}: spec lists public inputs missing from ABI: {extra_spec}", issues=issues)
+
+    # Type drift check (only emitted when names line up; otherwise ordering
+    # diff above is the right signal).
+    if type_known and name_match and not type_match:
+        type_diffs: list[str] = []
+        for idx, (a_t, s_t) in enumerate(zip(abi_types, spec_types)):
+            if a_t != s_t:
+                type_diffs.append(f"index {idx} ({abi_names[idx]}): spec={s_t!r} abi={a_t!r}")
+        if type_diffs:
+            fail(
+                f"{name}: public-input type drift: {'; '.join(type_diffs)}",
+                issues=issues,
+            )
+        if len(spec_types) != len(abi_types):
+            fail(
+                f"{name}: public_input_types length mismatch -- spec={len(spec_types)} abi={len(abi_types)}",
+                issues=issues,
+            )
+    elif type_known and not name_match:
+        # When names already drifted, surface paired type info so the operator
+        # can fix both in one pass.
+        warn(
+            f"{name}: type comparison skipped because names drifted; fix names first then re-run"
+        )
 
 
 def main(argv: list[str]) -> int:
