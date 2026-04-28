@@ -9,6 +9,12 @@ on:
 
 jobs:
   test-ios-package:
+    # Skip the version-bump commit produced by `scripts/release.sh`. That
+    # commit pins Package.swift to a release URL (e.g. v0.2.1) which the
+    # tag-driven `release.yml` workflow has not finished publishing yet, so
+    # SwiftPM resolution 404s on the xcframework zip. The next regular push
+    # (or `gh workflow run`) re-tests against the now-published xcframework.
+    if: "!startsWith(github.event.head_commit.message, 'chore: bump Package.swift to v')"
     runs-on: macos-latest
     steps:
       - name: Checkout
