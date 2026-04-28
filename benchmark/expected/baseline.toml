@@ -1,10 +1,15 @@
 # Benchmark Baseline
 # Generated: 2026-04-01; refreshed 2026-04-26 after openac_core security fixes.
+# 2026-04-28: refreshed again after closing P0-5 (sdjwt_adapter base64url
+# inclusion proof of disclosure hashes inside the issuer-signed payload) and
+# P1-4 (jwt_x5c_adapter base64url binding of the JWS signing-input payload
+# section to jwt_payload_norm). Both close audit-flagged off-chain policy
+# gaps and intentionally raise the gate count.
 # Update this after confirmed improvements via: make bench-update-baseline
 
 [meta]
 created = "2026-04-01"
-updated = "2026-04-27"
+updated = "2026-04-28"
 nargo_version = "1.0.0-beta.19"
 
 # Minimum test counts per circuit (fail if below)
@@ -20,9 +25,14 @@ openac_show = { positive = 6, negative = 4, total = 10 }
 # passport_adapter v3.1: +CSCA chain tests (+1 pos +3 neg) + DSC revocation (+1 pos +1 neg)
 passport_adapter = { positive = 11, negative = 5, total = 16 }
 device_binding = { positive = 1, negative = 3, total = 4 }
-sdjwt_adapter = { positive = 6, negative = 2, total = 8 }
-# jwt_x5c_adapter v3.1 multi-issuer: +Apple + MS positive tests (v1 total 9 -> 11)
-jwt_x5c_adapter = { positive = 7, negative = 4, total = 11 }
+# sdjwt_adapter v3.2 (P0-5 closure): +2 positive (assert_disclosures_in_payload
+# pass + skip-inactive) + +2 negative (missing disclosure, position past active
+# bytes) for the base64url inclusion proof.
+sdjwt_adapter = { positive = 8, negative = 4, total = 12 }
+# jwt_x5c_adapter v3.1 multi-issuer + v3.2 P1-4 (closure): adds 1 positive
+# (b64 binding round-trip) + 4 negative (missing dot, offset drift, norm drift,
+# truncated window) covering the JWS payload <-> jwt_payload_norm binding.
+jwt_x5c_adapter = { positive = 8, negative = 8, total = 16 }
 x509_show = { positive = 3, negative = 2, total = 5 }
 composite_show = { positive = 1, negative = 3, total = 4 }
 # mdoc_adapter v2 (Direction D + validUntil + deviceKey extraction, 2026-04-27).
@@ -35,7 +45,7 @@ composite_show = { positive = 1, negative = 3, total = 4 }
 mdoc_adapter = { positive = 13, negative = 15, total = 28 }
 
 [tests.total]
-minimum = 199
+minimum = 217
 
 # Gate count baselines (ACIR opcodes, warn if > 10% regression)
 # Measured: 2026-04-17, nargo 1.0.0-beta.19
@@ -49,9 +59,15 @@ show_link = 757
 passport_adapter = 36247   # v3.1 (+10498): CSCA->DSC RSA chain + depth-8 Merkle inclusion + DSC revocation SMT (4/26: +24 from 0cd7bb7 path_index range-check)
 openac_show = 1802         # 4/26: +50 from 879f68e binding birth_year/month/day/nationality to commitment attr_hash (security fix)
 device_binding = 162
-sdjwt_adapter = 5841       # new baseline (first Pedersen v3 adapter measurement); 4/26: +34 from openac_core changes
-# Path A v3 additions (2026-04-17); jwt_x5c_adapter v3.1 optimisation 2026-04-17
-jwt_x5c_adapter = 20879    # v3.1 multi-issuer dispatch; 4/26: +20 from openac_core path_index range-check
+# 4/28 P0-5 closure: jwt_payload_raw + sha256_var binding to jwt_payload_hash
+# + base64url-encoded disclosure inclusion proof at witnessed offsets (8 slots
+# x 43 chars). Adds ~30k gates vs prior 5841 baseline.
+sdjwt_adapter = 35885
+# Path A v3 additions (2026-04-17); jwt_x5c_adapter v3.1 optimisation 2026-04-17;
+# 4/28 P1-4 closure: in-circuit base64url decode of payload section (1024-byte
+# decoded buffer) + byte-equality with jwt_payload_norm. Adds ~115k gates vs
+# prior 20879 baseline; gate_budget bumped to 200000 in spec.toml.
+jwt_x5c_adapter = 136440
 x509_show = 549            # NEW — within 5,000 spec budget
 composite_show = 815       # 4/26: +131 from openac_core/predicate.nr + commit.nr changes (security fixes flow through imports). Main fn unchanged.
 mdoc_adapter = 692381      # 4/27: Direction D v2 (+validUntil prefix/parse + deviceKey extraction from mso). v1 was 441471, v0 was 7512.
@@ -67,13 +83,14 @@ show_link = 73746
 passport_adapter = 1473390   # v3.1: CSCA chain + SMT added
 openac_show = 178000          # 4/26: +10668 from 879f68e (birth_year binding); within 7% of prior
 device_binding = 7351
-sdjwt_adapter = 229000       # 4/26: +11578 from openac_core changes
-# Path A v3 additions (2026-04-17); jwt_x5c_adapter v3.1 optimisation 2026-04-17
-jwt_x5c_adapter = 1312940   # v3.1 multi-issuer (+11575 bytes vs. single-issuer)
+# 4/28 P0-5: jwt_payload_raw + b64 inclusion proof drove artifact ~3.4x.
+sdjwt_adapter = 781000
+# 4/28 P1-4: in-circuit b64 decode + byte-equality drove artifact ~2.3x.
+jwt_x5c_adapter = 3120000
 x509_show = 112000           # 4/26: +9962
 composite_show = 133000      # 4/26: +15188 from new test cases ab6add8 + openac_core changes
 mdoc_adapter = 10115613      # 4/27: Direction D v2 (+validUntil + deviceKey). v1 was 6441164.
-total = 14857613             # 4/27: 4742000 + 10115613 (mdoc_adapter v2)
+total = 17008873             # 4/28: previous 14857613 + 781000 - 229000 + 3120000 - 1312940 (sdjwt + jwt_x5c grew)
 
 # Bytes per gate (lower = more compact artifact representation)
 # Grade: A(≤10) B(≤30) C(≤60) D(≤100) F(>100)
@@ -86,10 +103,11 @@ show_link = 97
 passport_adapter = 40   # 4/26: 1473390/36247 = 40.6
 openac_show = 98        # 4/26: 178000/1802 = 98.7
 device_binding = 45
-sdjwt_adapter = 39      # 4/26: 229000/5841 = 39.2
-# v3.1: fewer gates -> artifact overhead dominates ratio; grade D acceptable
-# until further artifact trimming lands (e.g. strip debug symbols in release build).
-jwt_x5c_adapter = 62   # 4/26: 1312940/20879 = 62.8
+# 4/28 P0-5: 781000 / 35885 = 21.8 -> grade B (better ratio than v3.1).
+sdjwt_adapter = 22
+# 4/28 P1-4: 3120000 / 136440 = 22.9 -> grade B (gate-count growth absorbed
+# the artifact overhead, ratio improved vs v3.1's grade C).
+jwt_x5c_adapter = 23
 x509_show = 204        # 4/26: 112000/549 = 204
 composite_show = 163   # 4/26: 133000/815 = 163; main fn unchanged, regression from openac_core security fixes
 mdoc_adapter = 14      # 4/27: 10115613/692381 = 14.6 -> grade B (v2 maintains ratio; main-fn-dominant artifact)

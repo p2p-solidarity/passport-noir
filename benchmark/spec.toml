@@ -515,22 +515,22 @@ min_positive_tests = 1
 min_negative_tests = 1
 
 # ============================================================
-# Circuit: sdjwt_adapter (v3 — Path A SD-JWT prepare)
+# Circuit: sdjwt_adapter (v3.2 — Path A SD-JWT prepare with inclusion proof)
 # ============================================================
 [circuits.sdjwt_adapter]
 type = "bin"
-description = "OpenAC SD-JWT adapter (v3): ES256 issuer ECDSA + disclosure hash chain + Pedersen v3 commitment bound to enclave pk_digest"
+description = "OpenAC SD-JWT adapter (v3.2): ES256 issuer ECDSA + disclosure hash chain + base64url-inclusion proof against issuer-signed payload + Pedersen v3 commitment bound to enclave pk_digest"
 source = "circuits/sdjwt_adapter/src/main.nr"
-version = "v3"
+version = "v3.2"
 
 # `jwt_payload_hash` is `pub` so the verifier can independently confirm which
 # payload the issuer signed (a private payload hash would let a prover swap
 # the signed payload silently). `out_sd_root_{hi,lo}` are `pub` so the verifier
 # can externally link which disclosure set was committed.
-# 2026-04-28 P0-5 (partial): out_disclosure_root publishes a Pedersen
-# commitment over (count, slot_hashes...) so verifier policy can match the
-# disclosed set against an issuer-published manifest off-chain. Full
-# inclusion-in-issuer-_sd-array binding is tracked for v3.2.
+# 2026-04-28 P0-5 (closed): the circuit now binds `jwt_payload_raw` to
+# `jwt_payload_hash` via sha256_var and proves each disclosure hash, base64url-
+# encoded, appears in the issuer-signed payload bytes at a witnessed offset.
+# `out_disclosure_root` is retained for off-chain manifest pinning.
 public_inputs = [
   "jwt_payload_hash",
   "issuer_pk_x", "issuer_pk_y",
@@ -546,18 +546,20 @@ public_input_types = [
   "Field",
 ]
 
-# v3 adds `enclave_pk_x`, `enclave_pk_y` as private witnesses so the
-# commitment binds `pk_digest`. The show phase re-derives pk_digest via
-# in-circuit ECDSA against a fresh nonce.
+# v3.2 adds `jwt_payload_raw`, `jwt_payload_raw_len`, `disclosure_positions`
+# private witnesses for the base64url inclusion proof closing P0-5. v3 still
+# requires `enclave_pk_x` / `enclave_pk_y` for pk_digest derivation.
 private_inputs = [
   "signature",
   "disclosure_count", "disclosure_salts", "claim_values", "claim_lengths", "expected_disclosure_hashes",
+  "jwt_payload_raw", "jwt_payload_raw_len", "disclosure_positions",
   "link_rand_p",
   "enclave_pk_x", "enclave_pk_y",
 ]
 private_input_types = [
   "[u8; 64]",
   "u8", "[[u8; 16]; 8]", "[[u8; 64]; 8]", "[u32; 8]", "[[u8; 32]; 8]",
+  "[u8; 1024]", "u32", "[u32; 8]",
   "Field",
   "[u8; 32]", "[u8; 32]",
 ]
@@ -567,12 +569,17 @@ assertions = [
   "Too many disclosures",
   "Claim length exceeds maximum",
   "SD-JWT disclosure hash mismatch",
+  "jwt_payload_raw_len exceeds JWT_PAYLOAD_LEN",
+  "jwt_payload_raw hash does not match issuer-signed jwt_payload_hash",
+  "Disclosure position window past payload buffer",
+  "Disclosure position window past active payload bytes",
+  "Disclosure hash not present in issuer-signed payload at witnessed offset",
   "Commitment X mismatch",
   "Commitment Y mismatch",
   "out_disclosure_root must match Pedersen-bound disclosure root",
 ]
 
-constants = { MAX_DISCLOSURES = 8, MAX_CLAIM_SIZE = 64, SALT_SIZE = 16 }
+constants = { MAX_DISCLOSURES = 8, MAX_CLAIM_SIZE = 64, SALT_SIZE = 16, JWT_PAYLOAD_LEN = 1024 }
 
 min_positive_tests = 8
 min_negative_tests = 2
@@ -663,7 +670,13 @@ version = "v3.1"
 # DOMAIN_SMT_NODE, SMT_DEPTH 128 -> 32, JWT_PAYLOAD_LEN 4096 -> 1024,
 # fixed-offset issuer claim extraction dispatched by `issuer_format_tag`.
 # See spec/x509-benchmark.md sec. 3 / sec. 9 and spec/x509-migration.md sec. 9.
-gate_budget = 65000
+# v3.2 (2026-04-28, P1-4 closure): gate budget raised to 200k to absorb the
+# ~115k-gate cost of in-circuit base64url decoding of the JWS payload section
+# + byte-equality with jwt_payload_norm. The cost is mandatory: without it
+# the issuer-signed bytes and the claims that feed the commitment are
+# unrelated, so verifier policy could not enforce that the issuer attested
+# to the claims being committed.
+gate_budget = 200000
 gate_budget_status = "within_budget"
 
 public_inputs = [
@@ -688,6 +701,7 @@ private_inputs = [
   "smt_siblings", "smt_old_key", "smt_old_value", "smt_is_old0",
   "jwt_payload_norm",
   "jwt_signing_input", "jwt_signing_input_len",
+  "payload_b64_offset", "payload_b64_len", "payload_norm_len",
   "jwt_sig",
   "jwt_modulus_limbs", "jwt_redc_limbs", "issuer_redc_limbs",
   "link_rand_p",
@@ -700,6 +714,7 @@ private_input_types = [
   "[Field; 32]", "Field", "Field", "bool",
   "[u8; 1024]",
   "[u8; 1536]", "u32",
+  "u32", "u32", "u32",
   "[u128; 18]",
   "[u128; 18]", "[u128; 18]", "[u128; 18]",
   "Field",
@@ -707,11 +722,13 @@ private_input_types = [
 ]
 
 # 2026-04-28 P0-4: jwt_signing_input + jwt_signing_input_len are private
-# witnesses that bind sha256_var(input, len) == jwt_signed_hash, closing the
-# gap where jwt_signed_hash and jwt_payload_b64h were unrelated. Residual
-# gap (tracked, not yet closed): the circuit does NOT verify base64url
-# decoding of the payload section back to jwt_payload_norm. Verifier policy
-# must do that off-chain.
+# witnesses that bind sha256_var(input, len) == jwt_signed_hash.
+# 2026-04-28 P1-4 (closed): payload_b64_offset / payload_b64_len /
+# payload_norm_len locate the payload section of the JWS signing input. The
+# circuit base64url-decodes that section in-circuit and asserts byte-equality
+# with jwt_payload_norm, so the bytes the issuer RSA-signed (covered by
+# jwt_signed_hash) provably decode to the canonical payload that feeds the
+# commitment.
 assertions = [
   "Leaf certificate signature verification failed",
   "Issuer certificate signature verification failed",
@@ -723,6 +740,11 @@ assertions = [
   "Normalized JWT domain missing value",
   "JWT payload hash mismatch",
   "JWT signing input hash does not match jwt_signed_hash",
+  "jwt_signing_input_len exceeds JWT_SIGNING_INPUT_LEN",
+  "payload b64 window past signing input",
+  "payload b64 must follow header.dot",
+  "payload b64 must follow a '.' separator",
+  "jwt_payload_norm does not match base64url-decoded signing-input payload",
   "JWT signature verification failed",
   "Commitment X mismatch",
   "Commitment Y mismatch",
