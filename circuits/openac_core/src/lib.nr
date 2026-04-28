@@ -40,3 +40,9 @@ pub mod smt;
 /// Fixed-depth Merkle inclusion primitive for CSCA Master List anchors.
 /// Provides: verify_inclusion_depth_8, compute_csca_leaf.
 pub mod merkle;
+
+/// Base64url encoder / decoder (RFC 4648 sec. 5, no padding) shared by the
+/// SD-JWT and JWT-X5C adapters so disclosure-hash inclusion proofs and
+/// JWS signing-input <-> normalized-payload bindings can both happen
+/// in-circuit. Closes audit issues P0-5 and P1-4 (2026-04-28).
+pub mod base64;
