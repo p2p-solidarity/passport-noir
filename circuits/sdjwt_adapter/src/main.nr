@@ -1,8 +1,9 @@
-use sha256::digest;
+use sha256::{digest, sha256_var};
 use std::ecdsa_secp256r1::verify_signature;
 use std::embedded_curve_ops::EmbeddedCurvePoint;
 use std::hash::pedersen_hash;
 
+use openac_core::base64::{b64url_encode_hash32, B64URL_HASH_CHAR_LEN};
 use openac_core::commit::{assert_commitment_eq, commit_attributes_v3, DOMAIN_SDJWT, hash_to_fields};
 use openac_core::device::pk_digest_from_bytes;
 use openac_core::profile::derive_sdjwt_link_rand;
@@ -12,7 +13,7 @@ use openac_core::profile::derive_sdjwt_link_rand;
 // distinguishable from other arity-N pedersen_hash outputs in this circuit.
 global DOMAIN_SDJWT_DISCLOSURE_ROOT: Field = 0x73647274;
 
-// OpenAC SD-JWT Adapter (Prepare Phase, v1 -- Path A)
+// OpenAC SD-JWT Adapter (Prepare Phase, v3.2 -- Path A)
 //
 // Verifies an SD-JWT credential with ES256 (ECDSA P-256) signature and
 // produces a v3 Pedersen commitment (5-arg, binds an enclave pk_digest)
@@ -43,30 +44,26 @@ global DOMAIN_SDJWT_DISCLOSURE_ROOT: Field = 0x73647274;
 //     and composite_show on the same derivation rule so the two circuits
 //     produce matching commitments for the same (pk_digest, sd_root).
 //
-// Issue P0-5 (2026-04-28) -- partial fix:
-//   * The full closure (parsing the issuer-signed `_sd` array in-circuit and
-//     proving each disclosure hash inclusion) requires either a base64url
-//     decoder or an issuer-side commitment scheme change. Both are large
-//     changes pending v3.2.
-//   * What this version adds: an `out_disclosure_root` public output that
-//     deterministically commits to the disclosed set via Pedersen hash. The
-//     verifier policy MUST verify off-chain that this root matches an
-//     issuer-published / pre-registered fresh disclosure root (e.g. via
-//     SD-JWT issuer's directory of acceptable disclosure manifests).
-//   * Documented residual gap: the circuit still does not prove that each
-//     disclosure_hash[i] appears in the payload bytes signed by the issuer.
-//     Off-chain policy must compare `out_disclosure_root` against the list
-//     known to belong to the credential the verifier expects.
-//
-// Known v1 spec gaps (still open):
-//   * jwt_payload_raw / jwt_payload_b64h SHA256 binding -- caller passes a
-//     precomputed `jwt_payload_hash` rather than the raw payload bytes. The
-//     adapter trusts this hash; a future version should fold SHA256 over
-//     the base64url-decoded payload in-circuit (spec sec 5).
-//   * Inclusion of each disclosure hash inside the issuer-signed `_sd`
-//     array bytes (positioned indices). v3.2 will add jwt_payload_norm as
-//     a private input + a base64url encoder (or a Merkle inclusion model
-//     bridged via an issuer-signed sd_root commitment).
+// Issue P0-5 closure (2026-04-28, v3.2):
+//   * `jwt_payload_raw` / `jwt_payload_raw_len` are now private witnesses.
+//     The circuit asserts `sha256_var(jwt_payload_raw, jwt_payload_raw_len)
+//     == jwt_payload_hash`, so the bytes the issuer ECDSA-signed are
+//     provably the bytes carried in `jwt_payload_raw`.
+//   * `disclosure_positions[i]` is a private witness pointing to where the
+//     base64url encoding of `expected_disclosure_hashes[i]` lives inside
+//     `jwt_payload_raw`. The circuit b64url-encodes the disclosure hash
+//     and checks every byte at that offset, proving each disclosure hash
+//     appears in the issuer-signed payload bytes.
+//   * Residual gap (documented, not blocking): the circuit does not assert
+//     the surrounding JSON syntax (e.g. that the encoded hash sits inside
+//     a `_sd: [...]` array specifically). A malicious payload that places
+//     the encoded hash in a different JSON key would still satisfy this
+//     check. Verifier policy SHOULD constrain payload shape externally
+//     (issuer template / VC schema). This is intentionally lighter than a
+//     full JSON parser; the cryptographic binding "issuer signed bytes
+//     containing this disclosure hash" is now closed in-circuit.
+//   * `out_disclosure_root` is retained as a public output so verifier
+//     policy can also pin the disclosure manifest off-chain.
 //
 // SD-JWT structure:
 //   - Header.Payload.Signature (JWS Compact)
@@ -79,6 +76,11 @@ global MAX_DISCLOSURES: u32 = 8;
 global MAX_CLAIM_SIZE: u32 = 64;
 // Salt size for SD-JWT (typically 128-bit = 16 bytes)
 global SALT_SIZE: u32 = 16;
+// Issue P0-5 (2026-04-28): payload byte buffer for disclosure-inclusion
+// proof. SD-JWT issuer-signed payloads are typically 200-800 bytes; 1024
+// matches the JWT_PAYLOAD_LEN budget shared with jwt_x5c_adapter so the
+// off-circuit test fixtures pipeline can reuse the same buffer length.
+global JWT_PAYLOAD_LEN: u32 = 1024;
 
 /// Verify SD-JWT disclosure hashes: each claim's salt+value hashes to the expected hash.
 /// Returns the combined hash of all disclosure hashes for commitment computation.
@@ -174,6 +176,46 @@ fn compute_disclosure_root(
     pedersen_hash(inputs)
 }
 
+/// Issue P0-5 closure (2026-04-28, v3.2): assert each active disclosure
+/// hash, base64url-encoded to its 43-byte canonical form, sits at the
+/// witnessed offset inside the issuer-signed payload bytes. This proves
+/// the disclosure is something the issuer actually committed to, not just
+/// a hash the prover chose to include in `expected_disclosure_hashes`.
+fn assert_disclosures_in_payload(
+    disclosure_count: u8,
+    expected_disclosure_hashes: [[u8; 32]; MAX_DISCLOSURES],
+    disclosure_positions: [u32; MAX_DISCLOSURES],
+    jwt_payload_raw: [u8; JWT_PAYLOAD_LEN],
+    jwt_payload_raw_len: u32,
+) {
+    for i in 0..MAX_DISCLOSURES {
+        let active = (i as u8) < disclosure_count;
+        if active {
+            let position = disclosure_positions[i];
+            // The encoded slot must fit entirely inside the active payload
+            // region. We check both the buffer bound (so we never read past
+            // the static array) and the active-payload bound (so a prover
+            // cannot shove a fake encoding into the zero-padding tail).
+            assert(
+                position + B64URL_HASH_CHAR_LEN <= JWT_PAYLOAD_LEN as u32,
+                "Disclosure position window past payload buffer",
+            );
+            assert(
+                position + B64URL_HASH_CHAR_LEN <= jwt_payload_raw_len,
+                "Disclosure position window past active payload bytes",
+            );
+
+            let encoded = b64url_encode_hash32(expected_disclosure_hashes[i]);
+            for k in 0..B64URL_HASH_CHAR_LEN {
+                assert(
+                    jwt_payload_raw[position + k] == encoded[k],
+                    "Disclosure hash not present in issuer-signed payload at witnessed offset",
+                );
+            }
+        }
+    }
+}
+
 fn main(
     // === ECDSA ES256 signature verification inputs ===
     // `jwt_payload_hash` is PUBLIC so the verifier can independently confirm
@@ -191,6 +233,16 @@ fn main(
     claim_values: [[u8; MAX_CLAIM_SIZE]; MAX_DISCLOSURES],
     claim_lengths: [u32; MAX_DISCLOSURES],
     expected_disclosure_hashes: [[u8; 32]; MAX_DISCLOSURES],
+    // === Issuer-signed payload bytes for P0-5 inclusion proof ===
+    // `jwt_payload_raw` is the raw bytes the issuer ECDSA-signed (the SD-JWT
+    // payload section, base64url-decoded). The circuit asserts
+    // `sha256_var(jwt_payload_raw, jwt_payload_raw_len) == jwt_payload_hash`
+    // so the bytes carried here are provably what the issuer signed.
+    // `disclosure_positions[i]` points to where the base64url encoding of
+    // `expected_disclosure_hashes[i]` lives inside `jwt_payload_raw`.
+    jwt_payload_raw: [u8; JWT_PAYLOAD_LEN],
+    jwt_payload_raw_len: u32,
+    disclosure_positions: [u32; MAX_DISCLOSURES],
     // === OpenAC commitment inputs ===
     // `link_rand_p` is the root randomness shared across credentials from the
     // same device; the SD-JWT-specific randomness is derived internally.
@@ -209,9 +261,7 @@ fn main(
     out_sd_root_lo: pub Field,
     // P0-5 (2026-04-28): also expose a Pedersen-based disclosure root that
     // commits to the (count, slot_hashes...) tuple. Verifier policy SHOULD
-    // compare this value against an issuer-published manifest off-chain;
-    // this is a partial closure of the audit-flagged gap pending the
-    // base64url-decoder + payload-binding work scheduled for v3.2.
+    // compare this value against an issuer-published manifest off-chain.
     out_disclosure_root: pub Field,
 ) {
     // Step 1: Verify ECDSA ES256 signature (issuer attested to the payload).
@@ -227,28 +277,54 @@ fn main(
         expected_disclosure_hashes,
     );
 
-    // Step 3: Derive pk_digest from enclave pk (Path A v3, no ECDSA check
+    // Step 3 (P0-5 closure): bind `jwt_payload_raw` to the issuer-signed
+    // hash. Without this, the inclusion proof below could run against any
+    // attacker-chosen payload. `sha256_var` truncates the input to the
+    // first `jwt_payload_raw_len` bytes (matches RFC 7515 JWS payload
+    // semantics).
+    assert(
+        jwt_payload_raw_len <= JWT_PAYLOAD_LEN as u32,
+        "jwt_payload_raw_len exceeds JWT_PAYLOAD_LEN",
+    );
+    let payload_hash = sha256_var(jwt_payload_raw, jwt_payload_raw_len);
+    for i in 0..32 {
+        assert(
+            payload_hash[i] == jwt_payload_hash[i],
+            "jwt_payload_raw hash does not match issuer-signed jwt_payload_hash",
+        );
+    }
+
+    // Step 4 (P0-5 closure): assert each disclosure hash, base64url-encoded,
+    // appears in the issuer-signed payload bytes at the witnessed offset.
+    assert_disclosures_in_payload(
+        disclosure_count,
+        expected_disclosure_hashes,
+        disclosure_positions,
+        jwt_payload_raw,
+        jwt_payload_raw_len,
+    );
+
+    // Step 5: Derive pk_digest from enclave pk (Path A v3, no ECDSA check
     // over a nonce happens here -- the show circuit performs that check).
     let pk_digest = pk_digest_from_bytes(enclave_pk_x, enclave_pk_y);
 
-    // Step 4: Derive the SD-JWT link randomness from the root via the shared
+    // Step 6: Derive the SD-JWT link randomness from the root via the shared
     //    helper so composite_show and sdjwt_adapter stay on one rule.
     let link_rand_s = derive_sdjwt_link_rand(link_rand_p);
 
-    // Step 5: Compute v3 Pedersen commitment.
+    // Step 7: Compute v3 Pedersen commitment.
     let commitment = compute_sdjwt_commitment(combined_hash, pk_digest, link_rand_s);
     assert_commitment_eq(commitment, out_commitment_x, out_commitment_y);
 
-    // Step 6: Expose the sd_root derived inside the circuit so the verifier
+    // Step 8: Expose the sd_root derived inside the circuit so the verifier
     // can bind the commitment to a specific disclosure set externally.
     let (sd_root_hi, sd_root_lo) = hash_to_fields(combined_hash);
     assert(sd_root_hi == out_sd_root_hi, "out_sd_root_hi must match derived sd_root hi");
     assert(sd_root_lo == out_sd_root_lo, "out_sd_root_lo must match derived sd_root lo");
 
-    // Step 7 (P0-5): compute and expose the disclosure root. Verifier
-    // policy uses this to assert the disclosure set is one the issuer
-    // pre-registered, even though we cannot yet prove inclusion in the
-    // issuer-signed _sd array bytes.
+    // Step 9 (P0-5): compute and expose the disclosure root. Retained as a
+    // belt-and-braces signal so verifier policy can also pin the disclosure
+    // manifest off-chain in addition to the in-circuit inclusion check.
     let disclosure_root = compute_disclosure_root(disclosure_count, expected_disclosure_hashes);
     assert(
         disclosure_root == out_disclosure_root,
@@ -458,6 +534,8 @@ fn test_invalid_signature_fails() {
     let claims: [[u8; MAX_CLAIM_SIZE]; MAX_DISCLOSURES] = [[0; MAX_CLAIM_SIZE]; MAX_DISCLOSURES];
     let lengths: [u32; MAX_DISCLOSURES] = [0; MAX_DISCLOSURES];
     let hashes: [[u8; 32]; MAX_DISCLOSURES] = [[0; 32]; MAX_DISCLOSURES];
+    let payload_raw: [u8; JWT_PAYLOAD_LEN] = [0; JWT_PAYLOAD_LEN];
+    let positions: [u32; MAX_DISCLOSURES] = [0; MAX_DISCLOSURES];
 
     main(
         msg_hash,
@@ -469,6 +547,9 @@ fn test_invalid_signature_fails() {
         claims,
         lengths,
         hashes,
+        payload_raw,
+        0,
+        positions,
         42,
         test_enclave_pk_x(),
         test_enclave_pk_y(),
@@ -478,6 +559,126 @@ fn test_invalid_signature_fails() {
         0,
         0,
     );
+}
+
+// --- Inclusion proof tests (P0-5 closure) ---
+
+/// Build a synthetic payload that places the base64url encoding of each
+/// active disclosure hash at `payload_offset_for(i)`. Returns
+/// (payload_raw, payload_len, disclosure_positions).
+fn build_payload_with_disclosures(
+    disclosure_count: u8,
+    expected_disclosure_hashes: [[u8; 32]; MAX_DISCLOSURES],
+) -> ([u8; JWT_PAYLOAD_LEN], u32, [u32; MAX_DISCLOSURES]) {
+    let mut payload: [u8; JWT_PAYLOAD_LEN] = [0; JWT_PAYLOAD_LEN];
+    let mut positions: [u32; MAX_DISCLOSURES] = [0; MAX_DISCLOSURES];
+
+    // Mimic a minimal `_sd` array layout: `{"_sd":["<hash0>","<hash1>",...]}`.
+    // We don't enforce JSON structure in-circuit, but tests build a
+    // realistic layout so off-circuit policy can also validate it.
+    let prefix: [u8; 8] = [123, 34, 95, 115, 100, 34, 58, 91]; // '{"_sd":['
+    for i in 0..8 {
+        payload[i] = prefix[i];
+    }
+    let mut cursor: u32 = 8;
+
+    for i in 0..MAX_DISCLOSURES {
+        if (i as u8) < disclosure_count {
+            // Opening quote.
+            payload[cursor] = 34;
+            cursor += 1;
+            positions[i] = cursor;
+            let encoded = b64url_encode_hash32(expected_disclosure_hashes[i]);
+            for k in 0..B64URL_HASH_CHAR_LEN {
+                payload[cursor + k] = encoded[k];
+            }
+            cursor += B64URL_HASH_CHAR_LEN;
+            // Closing quote.
+            payload[cursor] = 34;
+            cursor += 1;
+            // Comma between entries (intentionally trailing on the last
+            // entry too -- the syntactic rejection is the verifier's job).
+            payload[cursor] = 44;
+            cursor += 1;
+        }
+    }
+    // Suffix `]}` so a JSON parser would see a closed array.
+    payload[cursor] = 93;
+    cursor += 1;
+    payload[cursor] = 125;
+    cursor += 1;
+
+    (payload, cursor, positions)
+}
+
+#[test]
+fn test_assert_disclosures_in_payload_passes_for_correct_layout() {
+    let (_, _, _, hash1) = build_disclosure_fixture(0x10, 0x20, 16);
+    let (_, _, _, hash2) = build_disclosure_fixture(0x30, 0x40, 48);
+    let mut hashes: [[u8; 32]; MAX_DISCLOSURES] = [[0; 32]; MAX_DISCLOSURES];
+    hashes[0] = hash1;
+    hashes[1] = hash2;
+
+    let (payload, len, positions) = build_payload_with_disclosures(2, hashes);
+    assert_disclosures_in_payload(2, hashes, positions, payload, len);
+}
+
+#[test(should_fail)]
+fn test_assert_disclosures_in_payload_rejects_missing_disclosure() {
+    // Build a payload that holds only the FIRST disclosure but claim two.
+    // The second disclosure's witnessed offset points to zero bytes, which
+    // do not match its base64url encoding.
+    let (_, _, _, hash1) = build_disclosure_fixture(0x10, 0x20, 16);
+    let (_, _, _, hash2) = build_disclosure_fixture(0x30, 0x40, 48);
+    let mut hashes: [[u8; 32]; MAX_DISCLOSURES] = [[0; 32]; MAX_DISCLOSURES];
+    hashes[0] = hash1;
+
+    let (payload, len, mut positions) = build_payload_with_disclosures(1, hashes);
+    // Now upgrade to 2 disclosures with hash2 in slot 1, but the payload
+    // doesn't contain hash2's encoding -- the assertion must fire.
+    hashes[1] = hash2;
+    positions[1] = 100; // arbitrary location with zero bytes after the payload
+    assert_disclosures_in_payload(2, hashes, positions, payload, len);
+}
+
+#[test(should_fail)]
+fn test_assert_disclosures_in_payload_rejects_position_past_active_bytes() {
+    // A prover trying to point at the zero-padded tail of jwt_payload_raw
+    // must fail-closed. Without the active-payload bound check, an attacker
+    // could prepend the encoded hash bytes to the trailing zero region.
+    let (_, _, _, hash1) = build_disclosure_fixture(0x10, 0x20, 16);
+    let mut hashes: [[u8; 32]; MAX_DISCLOSURES] = [[0; 32]; MAX_DISCLOSURES];
+    hashes[0] = hash1;
+
+    let (mut payload, _len, mut positions) = build_payload_with_disclosures(1, hashes);
+    // Place the encoding far past where active payload ended.
+    let stash_offset: u32 = 800;
+    let encoded = b64url_encode_hash32(hash1);
+    for k in 0..B64URL_HASH_CHAR_LEN {
+        payload[stash_offset + k] = encoded[k];
+    }
+    positions[0] = stash_offset;
+    // jwt_payload_raw_len is the original active length -- below the stash.
+    // The assertion `position + LEN <= jwt_payload_raw_len` must fire.
+    let active_len: u32 = 200;
+    assert_disclosures_in_payload(1, hashes, positions, payload, active_len);
+}
+
+#[test]
+fn test_assert_disclosures_in_payload_skips_inactive_slots() {
+    // disclosure_count = 1 means slot 1+'s positions are ignored even when
+    // they point at zero / past-active-bytes. This exercises the active-mask
+    // branch so we know it actually short-circuits.
+    let (_, _, _, hash1) = build_disclosure_fixture(0x10, 0x20, 16);
+    let mut hashes: [[u8; 32]; MAX_DISCLOSURES] = [[0; 32]; MAX_DISCLOSURES];
+    hashes[0] = hash1;
+    // hashes[1..] left zero, but the prover claims a wild position for them.
+    let (payload, len, mut positions) = build_payload_with_disclosures(1, hashes);
+    for i in 1..MAX_DISCLOSURES {
+        positions[i] = 9999; // would normally fail bound check
+    }
+    // Active count = 1 -- the slot-1+ checks must be skipped.
+    assert_disclosures_in_payload(1, hashes, positions, payload, len);
 }
 
 #[test(should_fail)]
