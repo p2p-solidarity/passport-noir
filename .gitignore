@@ -17,6 +17,7 @@ mopro-binding/target/
 mopro-binding/build/
 mopro-binding/Cargo.lock
 mopro-binding/MoproiOSBindings/
+mopro-binding/MoproAndroidBindings/
 
 # Local generated vectors
 mopro-binding/test-vectors/

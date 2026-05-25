@@ -22,6 +22,10 @@ name = "ios"
 path = "src/bin/ios.rs"
 
 [[bin]]
+name = "android"
+path = "src/bin/android.rs"
+
+[[bin]]
 name = "gen_srs"
 path = "src/bin/gen_srs.rs"
 
