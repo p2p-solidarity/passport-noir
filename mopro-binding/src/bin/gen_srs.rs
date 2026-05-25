@@ -105,19 +105,40 @@ fn extract_bytecode(circuit_path: &Path) -> Result<String, String> {
         .ok_or_else(|| format!("Circuit JSON {} missing 'bytecode'", circuit_path.display()))
 }
 
+/// UltraHonk SRS overhead multiplier — matches
+/// `noir-rs/.../barretenberg/srs/mod.rs::ULTRA_HONK_SRS_MULTIPLIER`.
+/// The prover needs SRS points not just for the gate trace but also
+/// for the witness / permutation / lookup polynomials, which
+/// empirically runs ~8× the dyadic gate count for standard UltraHonk
+/// configurations. Without applying it here the bundled SRS is the
+/// right SHAPE but short by 8× — barretenberg then panics inside
+/// `generate_noir_proof` with `range end index <N> out of range for
+/// slice of length <N/8>` and the prover crashes before producing a
+/// proof.
+const ULTRA_HONK_SRS_MULTIPLIER: u32 = 8;
+
 fn generate_one(circuit_path: &Path, output_path: &Path, recursive: bool) -> Result<(), String> {
     let bytecode = extract_bytecode(circuit_path)?;
     let subgroup_size = get_subgroup_size(&bytecode, recursive);
+    let prover_size = subgroup_size
+        .checked_mul(ULTRA_HONK_SRS_MULTIPLIER)
+        .ok_or_else(|| {
+            format!(
+                "subgroup_size {} * {} overflows u32",
+                subgroup_size, ULTRA_HONK_SRS_MULTIPLIER
+            )
+        })?;
     println!(
-        "{}: subgroup_size = {} (recursive={})",
+        "{}: subgroup_size = {} → prover SRS points = {} (recursive={})",
         circuit_path.display(),
         subgroup_size,
+        prover_size,
         recursive
     );
 
     // Downloads SRS from the public points service unless a cache hit is
     // available. None for srs_path means "use the library's default cache".
-    let srs = get_srs(subgroup_size, None);
+    let srs = get_srs(prover_size, None);
     let local = LocalSrs(srs);
 
     if let Some(parent) = output_path.parent() {

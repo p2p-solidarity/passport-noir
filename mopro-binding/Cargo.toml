@@ -10,6 +10,12 @@ noir_rs = { package = "noir", git = "https://github.com/zkmopro/noir-rs", featur
 serde_json = "1.0"
 thiserror = "2.0"
 sha2 = "0.10"
+# Needed only by `bin/android_zig.rs` for the UniFFI bindings step.
+# `uniffi` itself is reached via `mopro_ffi::*` (mopro-ffi does
+# `pub use uniffi::*;`) to avoid the macro vs direct-extern name
+# clash that `mopro_ffi::app!()` triggers when uniffi appears as a
+# direct dep.
+camino = "1.1"
 
 [build-dependencies]
 mopro-ffi = "0.3"
@@ -24,6 +30,17 @@ path = "src/bin/ios.rs"
 [[bin]]
 name = "android"
 path = "src/bin/android.rs"
+
+# Zig-linked variant — links our cdylib with `zig cc` so the bundled
+# upstream libc++ (the same `__1`-namespaced ABI that AztecProtocol's
+# prebuilt `libbb-external.a` was built against) is statically linked
+# into the .so. The default `android` bin uses cargo-ndk + NDK libc++
+# which has the wrong inline namespace and produces a .so that can't
+# dlopen on device. See KNOWN_ISSUES.md in the passport-zk Nitro
+# module for the full diagnosis.
+[[bin]]
+name = "android_zig"
+path = "src/bin/android_zig.rs"
 
 [[bin]]
 name = "gen_srs"
