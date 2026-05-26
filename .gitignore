@@ -19,6 +19,9 @@ mopro-binding/Cargo.lock
 mopro-binding/MoproiOSBindings/
 mopro-binding/MoproAndroidBindings/
 
+# Zig build artifacts
+mopro-binding/build-zig/
+
 # Local generated vectors
 mopro-binding/test-vectors/
 
