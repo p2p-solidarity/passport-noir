@@ -62,6 +62,28 @@ pub struct PrepareLayoutV3 {
     pub extra_pinned_fields: Vec<(usize, [u8; FIELD_BYTES])>,
 }
 
+/// How the show circuit's challenge digest is checked by the verifier.
+///
+/// Different show circuits compute the digest with different primitives:
+///   * `openac_show` (passport) emits `SHA256("openac.show.v2" || cx || cy ||
+///     challenge || epoch)` — the verifier can recompute it (step 7).
+///   * `x509_show` / `composite_show` emit a **Pedersen** digest
+///     (`openac_core::profile::compute_show_challenge_digest_v2`), which the
+///     Rust side cannot recompute without a Grumpkin Pedersen implementation.
+///     For these the caller supplies the expected digest as a pinned public
+///     input (`extra_pinned_fields`), and the SHA256 recomputation in step 7
+///     MUST be skipped — otherwise verification always fails with
+///     `invalid_challenge_digest`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChallengeDigestCheck {
+    /// Recompute SHA256("openac.show.v2" || cx || cy || challenge || epoch)
+    /// and compare against `ShowPresentationV3.challenge_digest`.
+    Sha256,
+    /// Digest is a Pedersen hash already pinned at a known public-input index
+    /// via `extra_pinned_fields`; skip the SHA256 recomputation.
+    PinnedInProof,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShowLayoutV3 {
     pub num_public_inputs: usize,
@@ -75,6 +97,8 @@ pub struct ShowLayoutV3 {
     /// Optional adapter-specific pins: link tag, challenge digest, link
     /// scope, epoch, etc.
     pub extra_pinned_fields: Vec<(usize, [u8; FIELD_BYTES])>,
+    /// How step 7 verifies the challenge digest for this show circuit.
+    pub challenge_digest: ChallengeDigestCheck,
 }
 
 /// Encode a single byte (0..=255) in the right-most position of a 32-byte
@@ -331,6 +355,8 @@ pub fn show_layout_openac(
         commitment_y_index: 47,
         nonce_hash_first_byte_index: Some(1),
         extra_pinned_fields: pins,
+        // openac_show emits a SHA256 challenge digest (domain openac.show.v2).
+        challenge_digest: ChallengeDigestCheck::Sha256,
     }
 }
 
@@ -366,6 +392,8 @@ pub fn show_layout_x509(
         commitment_y_index: 1,
         nonce_hash_first_byte_index: Some(2),
         extra_pinned_fields: pins,
+        // x509_show emits a Pedersen challenge digest, pinned at index 40 above.
+        challenge_digest: ChallengeDigestCheck::PinnedInProof,
     }
 }
 
@@ -420,6 +448,8 @@ pub fn show_layout_composite(
         commitment_y_index: 1,
         nonce_hash_first_byte_index: Some(5),
         extra_pinned_fields: pins,
+        // composite_show emits a Pedersen challenge digest, pinned at index 48.
+        challenge_digest: ChallengeDigestCheck::PinnedInProof,
     }
 }
 
@@ -658,10 +688,26 @@ where
     if show.nonce_hash != policy.expected_nonce_hash {
         return Err(verification_error("invalid_nonce_hash"));
     }
-    let expected_digest =
-        compute_challenge_digest_v3(&show.commitment, &policy.expected_challenge, &policy.epoch);
-    if show.challenge_digest != expected_digest {
-        return Err(verification_error("invalid_challenge_digest"));
+    // The SHA256 recomputation only applies to circuits that emit a SHA256
+    // digest (openac_show / passport). x509_show and composite_show emit a
+    // Pedersen digest that this Rust layer cannot recompute; for them the
+    // digest is enforced via the pinned public input in step 4
+    // (extra_pinned_fields), so we skip the SHA256 comparison here. Running it
+    // unconditionally would reject every x509/composite proof.
+    match policy.show_layout.challenge_digest {
+        ChallengeDigestCheck::Sha256 => {
+            let expected_digest = compute_challenge_digest_v3(
+                &show.commitment,
+                &policy.expected_challenge,
+                &policy.epoch,
+            );
+            if show.challenge_digest != expected_digest {
+                return Err(verification_error("invalid_challenge_digest"));
+            }
+        }
+        ChallengeDigestCheck::PinnedInProof => {
+            // Verified via show_layout.extra_pinned_fields (Pedersen digest).
+        }
     }
 
     // 8. Scope / linkability
@@ -770,6 +816,7 @@ mod tests {
             commitment_y_index: 1,
             nonce_hash_first_byte_index: Some(3),
             extra_pinned_fields: Vec::new(),
+            challenge_digest: ChallengeDigestCheck::Sha256,
         };
         (prepare_layout, show_layout)
     }
@@ -1052,6 +1099,7 @@ mod tests {
             commitment_y_index: 1,
             nonce_hash_first_byte_index: Some(2),
             extra_pinned_fields: vec![(34, csca_root)],
+            challenge_digest: ChallengeDigestCheck::Sha256,
         };
         (prepare, show, policy)
     }
@@ -1061,6 +1109,35 @@ mod tests {
         let (prepare, show, policy) = fixture_with_strict_layout();
         verify_openac_v3_with_verifier(&prepare, &show, &policy, &always_valid)
             .expect("strict layout should verify");
+    }
+
+    #[test]
+    fn test_pinned_challenge_digest_skips_sha256_recompute() {
+        // Regression (X.509 path, 2026-06-10): x509_show / composite_show emit
+        // a Pedersen challenge digest that this Rust layer cannot recompute.
+        // With ChallengeDigestCheck::PinnedInProof the SHA256 step must be
+        // skipped, so a presentation whose `challenge_digest` is NOT the
+        // SHA256 value still verifies (the digest is enforced via the pinned
+        // public input instead). Before the fix this returned
+        // `invalid_challenge_digest` for every x509/composite proof.
+        let (prepare, mut show, mut policy) = fixture_with_strict_layout();
+        policy.show_layout.challenge_digest = ChallengeDigestCheck::PinnedInProof;
+        // A Pedersen digest is not the SHA256 value; simulate that mismatch.
+        show.challenge_digest = [0xAB; 32];
+        verify_openac_v3_with_verifier(&prepare, &show, &policy, &always_valid)
+            .expect("pinned-digest layout must skip the SHA256 recompute");
+    }
+
+    #[test]
+    fn test_sha256_challenge_digest_still_enforced() {
+        // Dual of the above: when the layout declares Sha256, a tampered
+        // challenge_digest MUST still be rejected.
+        let (prepare, mut show, policy) = fixture_with_strict_layout();
+        assert_eq!(policy.show_layout.challenge_digest, ChallengeDigestCheck::Sha256);
+        show.challenge_digest = [0xAB; 32];
+        let err = verify_openac_v3_with_verifier(&prepare, &show, &policy, &always_valid)
+            .expect_err("sha256 layout must reject a wrong challenge digest");
+        assert!(err.to_string().contains("invalid_challenge_digest"));
     }
 
     #[test]

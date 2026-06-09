@@ -23,8 +23,16 @@ pub fn check_age_above(
     assert(current_year >= birth_year, "Birth year cannot be after current year");
     let mut age = current_year - birth_year;
 
-    // Adjust if birthday hasn't occurred yet this year
-    if (current_month < birth_month) | ((current_month == birth_month) & (current_day < birth_day)) {
+    // Adjust if birthday hasn't occurred yet this year.
+    // Security (HIGH-2, 2026-06-10): `age` is u32, so `age -= 1` would WRAP to
+    // ~4.29e9 when age == 0 (birth_year == current_year, birthday in the future).
+    // That wrapped value trivially satisfies `age >= threshold`, letting a
+    // same-year newborn forge an "over 18" proof. Only subtract when age > 0;
+    // an effectively-negative age stays at 0, which is below any positive
+    // threshold, so the predicate correctly returns false.
+    let birthday_not_yet = (current_month < birth_month)
+        | ((current_month == birth_month) & (current_day < birth_day));
+    if birthday_not_yet & (age > 0) {
         age -= 1;
     }
 
@@ -333,4 +341,29 @@ fn test_sdjwt_predicate_check_mismatch() {
         sdjwt_predicate_check(attr_hi, attr_lo, wrong_target) == 0,
         "Non-matching hash should return 0",
     );
+}
+
+// Security regression (HIGH-2, 2026-06-10): a holder born this calendar year
+// whose birthday has not yet arrived must NOT pass any positive age threshold.
+// Before the underflow guard, `age -= 1` wrapped u32 0 to ~4.29e9, which
+// satisfied every threshold.
+#[test]
+fn test_age_same_year_future_birthday_no_underflow() {
+    // Born 2026-06-15, "today" 2026-03-01: age is effectively -1, must be < 18.
+    assert(
+        !check_age_above(2026, 6, 15, 2026, 3, 1, 18),
+        "Same-year future birthday must not satisfy threshold 18",
+    );
+    // Must also fail even threshold 1 (genuinely zero years old, not 4 billion).
+    assert(
+        !check_age_above(2026, 6, 15, 2026, 3, 1, 1),
+        "Same-year future birthday must not satisfy threshold 1",
+    );
+}
+
+#[test]
+fn test_age_same_year_birthday_passed() {
+    // Born 2026-01-10, "today" 2026-06-01: 0 years old, passes threshold 0 only.
+    assert(check_age_above(2026, 1, 10, 2026, 6, 1, 0), "0yo satisfies threshold 0");
+    assert(!check_age_above(2026, 1, 10, 2026, 6, 1, 1), "0yo must not satisfy threshold 1");
 }

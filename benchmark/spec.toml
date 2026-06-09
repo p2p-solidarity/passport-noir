@@ -255,12 +255,12 @@ version = "v3"
 # (`profile`), the revocation SMT (`smt`), and the CSCA Master List Merkle
 # verifier (`merkle`). All seven modules are first-class and shipped via
 # `lib.nr`.
-modules = ["commit", "device", "show", "predicate", "profile", "smt", "merkle"]
+modules = ["commit", "device", "show", "predicate", "profile", "smt", "merkle", "base64"]
 
 [circuits.openac_core.module_commit]
 source = "circuits/openac_core/src/commit.nr"
 functions = ["commit_attributes", "commit_attributes_v3", "hash_to_fields", "assert_commitment_eq"]
-domain_constants = { DOMAIN_PASSPORT = "0x01", DOMAIN_X509 = "0x02", DOMAIN_SDJWT = "0x03", DOMAIN_MDL = "0x04", DOMAIN_SMT_NODE = "0x736d7431", DOMAIN_CSCA_NODE = "0x6373636e", DOMAIN_CSCA_LEAF = "0x6373636c" }
+domain_constants = { DOMAIN_PASSPORT = "0x01", DOMAIN_X509 = "0x02", DOMAIN_SDJWT = "0x03", DOMAIN_MDL = "0x04", DOMAIN_SMT_NODE = "0x736d7431", DOMAIN_CSCA_NODE = "0x6373636e", DOMAIN_CSCA_LEAF = "0x6373636c", DOMAIN_REVOC_KEY = "0x726b6579", DOMAIN_X509_ISSUER = "0x78353039" }
 assertions = ["Commitment X mismatch", "Commitment Y mismatch"]
 min_positive_tests = 4
 min_negative_tests = 1
@@ -313,7 +313,7 @@ min_negative_tests = 1
 
 [circuits.openac_core.module_smt]
 source = "circuits/openac_core/src/smt.nr"
-functions = ["verify_non_membership", "compute_serial_key", "hash_field_pair", "smt_fold"]
+functions = ["verify_non_membership", "compute_serial_key", "hash_field_pair", "smt_fold", "pack_serial", "compute_x509_issuer_id"]
 constants = { SMT_DEPTH = 32, SERIAL_KEY_BYTES = 4 }
 assertions = ["Revocation witness matches blocked serial", "Revocation SMT root mismatch"]
 min_positive_tests = 2
@@ -321,11 +321,23 @@ min_negative_tests = 2
 
 [circuits.openac_core.module_merkle]
 source = "circuits/openac_core/src/merkle.nr"
-functions = ["verify_inclusion_depth_8", "compute_csca_leaf"]
+functions = ["verify_inclusion_depth_8", "compute_csca_leaf", "compute_csca_leaf_v2"]
 constants = { CSCA_MERKLE_DEPTH = 8 }
 assertions = ["CSCA Merkle root mismatch"]
 min_positive_tests = 2
 min_negative_tests = 3
+
+[circuits.openac_core.module_base64]
+source = "circuits/openac_core/src/base64.nr"
+# base64url helpers used by the in-circuit JWS payload-inclusion proofs
+# (sdjwt_adapter P0-5, jwt_x5c_adapter P1-4). b64url_encode_hash32 encodes a
+# 32-byte disclosure hash to its 43-char base64url form; b64url_decode_into
+# decodes a payload span back to bytes for byte-equality binding.
+functions = ["b64url_value_to_char", "b64url_char_to_value", "b64url_encode_hash32", "b64url_decode_into"]
+constants = { B64URL_HASH_BYTES = 32, B64URL_HASH_CHAR_LEN = 43 }
+assertions = ["Invalid base64url character", "base64url out_len must match b64_len mod-4 layout"]
+min_positive_tests = 4
+min_negative_tests = 2
 
 # ============================================================
 # Circuit: passport_adapter (v3.1 — Path A combined prepare with CSCA chain)
@@ -982,18 +994,10 @@ to = "composite_show"
 via = "out_commitment_y"
 type = "Field"
 
-[[cross_circuit.v3_commitment_chain.links]]
-from = "sdjwt_adapter"
-to = "openac_show"
-via = "out_commitment_x"
-type = "Field"
-
-[[cross_circuit.v3_commitment_chain.links]]
-from = "sdjwt_adapter"
-to = "openac_show"
-via = "out_commitment_y"
-type = "Field"
-
+# NOTE (2026-06-10): sdjwt_adapter does NOT link to openac_show. openac_show
+# hard-asserts credential_type == DOMAIN_PASSPORT (P1-8), so an SD-JWT
+# (DOMAIN_SDJWT) commitment can never be opened there. SD-JWT commitments flow
+# only into composite_show (links below). See spec/v3-security-size-balance.md §4.
 [[cross_circuit.v3_commitment_chain.links]]
 from = "sdjwt_adapter"
 to = "composite_show"

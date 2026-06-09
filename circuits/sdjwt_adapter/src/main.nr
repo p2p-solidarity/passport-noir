@@ -92,6 +92,13 @@ fn verify_disclosure_hashes(
     expected_disclosure_hashes: [[u8; 32]; MAX_DISCLOSURES],
 ) -> [u8; 32] {
     assert(disclosure_count as u32 <= MAX_DISCLOSURES, "Too many disclosures");
+    // Security (HIGH-5, 2026-06-10): reject disclosure_count == 0. With zero
+    // disclosures the loop below never executes, so `combined_preimage` stays
+    // all-zero and the commitment binds to SHA256([0; N]) -- a prover holding a
+    // validly-signed JWT could commit to NO real claims and still produce a
+    // valid proof. Require at least one disclosure (matches mdoc_adapter's
+    // `claim_count > 0` check).
+    assert(disclosure_count > 0, "SD-JWT must disclose at least one claim");
 
     let mut combined_preimage: [u8; MAX_DISCLOSURES * 32] = [0; MAX_DISCLOSURES * 32];
 
@@ -848,6 +855,18 @@ fn test_main_rejects_mismatched_sd_root_output() {
         sd_root_hi == 0,
         "Fixture expected non-zero sd_root_hi; binding assertion in main catches wrong outputs",
     );
+}
+
+// Security regression (HIGH-5, 2026-06-10): disclosure_count == 0 must be
+// rejected. Otherwise the commitment binds to SHA256([0; N]) and a prover with
+// a validly-signed JWT can commit to zero real claims.
+#[test(should_fail_with = "SD-JWT must disclose at least one claim")]
+fn test_disclosure_count_zero_rejected() {
+    let salts: [[u8; SALT_SIZE]; MAX_DISCLOSURES] = [[0; SALT_SIZE]; MAX_DISCLOSURES];
+    let claims: [[u8; MAX_CLAIM_SIZE]; MAX_DISCLOSURES] = [[0; MAX_CLAIM_SIZE]; MAX_DISCLOSURES];
+    let lengths: [u32; MAX_DISCLOSURES] = [0; MAX_DISCLOSURES];
+    let hashes: [[u8; 32]; MAX_DISCLOSURES] = [[0; 32]; MAX_DISCLOSURES];
+    let _ = verify_disclosure_hashes(0, salts, claims, lengths, hashes);
 }
 
 #[test]

@@ -42,7 +42,7 @@
 |---|---|
 | §2-F 文檔 drift | 是 repo-wide 問題，需要建立「每次 app / circuit 改動必同步 spec」的工程紀律。目前只在 CLAUDE.md 的 Rules 段落有「先讀再改」，沒有自動化檢查 |
 | §3-D 多裝置 holder 模型 | Path A 明確放棄；列為 Phase 7 research。若需要改支援 iCloud cross-device，需要重做 `pk_digest` 邊界 |
-| P0-E passport revocation SMT | 只在 contract / migration 層級談；Noir circuit 側尚未實作（order of ship phase 6） |
+| ~~P0-E passport revocation SMT~~ | ✅ 已解決 (v3.1)：`passport_adapter` 已實作 `dsc_smt_root` 公開輸入 + `openac_core::smt::verify_non_membership`（depth-32 DSC 吊銷 SMT）。原「Noir circuit 側尚未實作」描述已過時。 |
 | In-circuit Mozilla Root Merkle（P0-F v2） | Research scope；v1 仍用 off-chain snapshot |
 
 ### 下一個 Review cycle 建議

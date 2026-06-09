@@ -58,10 +58,24 @@ fn evaluate_predicates(
             age_threshold,
         );
         assert(is_older == out_is_older, "Age predicate output mismatch");
+    } else {
+        // Security (CRITICAL-2, 2026-06-10): when age is NOT disclosed the
+        // public output must be pinned to a sentinel. Otherwise it is a free
+        // witness and a prover can publish `out_is_older = true` for an
+        // underage holder. Mirrors show_link's zero-scope/zero-tag enforcement.
+        assert(!out_is_older, "out_is_older must be false when age not disclosed");
     }
 
     if disclose_nationality {
         assert(check_bytes3_eq(nationality, out_nationality), "Nationality output mismatch");
+    } else {
+        // Security (CRITICAL-2): pin undisclosed nationality output to zero so
+        // a verifier reading the public output cannot be fed an unconstrained
+        // (forged) nationality code.
+        assert(
+            check_bytes3_eq(out_nationality, [0, 0, 0]),
+            "out_nationality must be zero when nationality not disclosed",
+        );
     }
 }
 
@@ -428,6 +442,103 @@ fn test_show_unlinkable_no_disclosure() {
         0, // zero link tag
         false, // age not disclosed
         [0, 0, 0], // nationality not disclosed
+    );
+}
+
+// Security regression (CRITICAL-2, 2026-06-10): with disclose_age = false the
+// prover must not be able to publish out_is_older = true. Before the fix
+// out_is_older was a free witness when age was undisclosed.
+#[test(should_fail_with = "out_is_older must be false when age not disclosed")]
+fn test_show_rejects_forged_is_older_when_age_undisclosed() {
+    let ctype = DOMAIN_PASSPORT;
+    let (attr_hi, attr_lo) = test_packed_profile(2010, 1, 15, [84, 87, 78]); // 16yo
+    let rand: Field = 42;
+    let challenge = sample_challenge();
+    let epoch = sample_epoch();
+    let epoch_f = sample_epoch_field();
+
+    let pk_digest = pk_digest_from_bytes(test_enclave_pk_x(), test_enclave_pk_y());
+    let c = commit_attributes_v3(ctype, attr_hi, attr_lo, pk_digest, rand);
+    let digest = compute_challenge_digest(c.x, c.y, challenge, epoch);
+
+    invoke_main_legacy(
+        ctype,
+        attr_hi,
+        attr_lo,
+        rand,
+        test_enclave_pk_x(),
+        test_enclave_pk_y(),
+        test_signature(),
+        challenge,
+        2010,
+        1,
+        15,
+        [84, 87, 78],
+        test_nonce_hash(),
+        false,
+        0,
+        epoch,
+        epoch_f,
+        2026,
+        4,
+        1,
+        18,
+        false,
+        false, // no disclosure
+        c.x,
+        c.y,
+        digest,
+        0,
+        true, // FORGED: claim over-18 without disclosing age
+        [0, 0, 0],
+    );
+}
+
+// Security regression (CRITICAL-2): with disclose_nationality = false the
+// nationality output must be pinned to zero, not a forged code.
+#[test(should_fail_with = "out_nationality must be zero when nationality not disclosed")]
+fn test_show_rejects_forged_nationality_when_undisclosed() {
+    let ctype = DOMAIN_PASSPORT;
+    let (attr_hi, attr_lo) = test_packed_profile(2000, 1, 15, [84, 87, 78]);
+    let rand: Field = 42;
+    let challenge = sample_challenge();
+    let epoch = sample_epoch();
+    let epoch_f = sample_epoch_field();
+
+    let pk_digest = pk_digest_from_bytes(test_enclave_pk_x(), test_enclave_pk_y());
+    let c = commit_attributes_v3(ctype, attr_hi, attr_lo, pk_digest, rand);
+    let digest = compute_challenge_digest(c.x, c.y, challenge, epoch);
+
+    invoke_main_legacy(
+        ctype,
+        attr_hi,
+        attr_lo,
+        rand,
+        test_enclave_pk_x(),
+        test_enclave_pk_y(),
+        test_signature(),
+        challenge,
+        2000,
+        1,
+        15,
+        [84, 87, 78],
+        test_nonce_hash(),
+        false,
+        0,
+        epoch,
+        epoch_f,
+        2026,
+        4,
+        1,
+        18,
+        false, // nationality not disclosed
+        false,
+        c.x,
+        c.y,
+        digest,
+        0,
+        false,
+        [85, 83, 65], // FORGED: publish USA while not disclosing nationality
     );
 }
 

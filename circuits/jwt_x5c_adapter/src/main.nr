@@ -175,6 +175,16 @@ fn main(
     let leaf_tbs_hash: [u8; 32] = digest(leaf_tbs);
     let issuer_tbs_hash: [u8; 32] = digest(issuer_tbs);
 
+    // VERIFIER CONTRACT (security review HIGH-3, 2026-06-10):
+    // `issuer_modulus` is a PUBLIC INPUT and is NOT proven to chain to any
+    // trust anchor inside this circuit (unlike passport_adapter, which proves
+    // CSCA Merkle inclusion in-circuit). Both the leaf TBS and issuer TBS are
+    // verified under this same modulus -- i.e. the circuit proves "this leaf
+    // was signed by `issuer_modulus` and `issuer_modulus` is self-consistent",
+    // NOT "issuer_modulus is trusted". A relying verifier MUST pin
+    // `issuer_modulus` against its Mozilla-Root snapshot (x509-contract.md
+    // sec.5) out-of-circuit before accepting the proof. In-circuit Mozilla-Root
+    // Merkle is deferred research (P0-F, Phase 7).
     let leaf_signature = build_runtime_signature(leaf_sig, issuer_modulus, issuer_redc_limbs);
     assert(
         verify_sha256_pkcs1v15(leaf_tbs_hash, leaf_signature, RSA_EXPONENT),

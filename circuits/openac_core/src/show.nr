@@ -73,6 +73,14 @@ pub fn compute_challenge_digest(
 ///
 /// Uses Pedersen hash (algebraic, on Grumpkin) for efficiency.
 /// tag = pedersen_hash([commitment_x, commitment_y, link_scope, epoch_field])
+///
+/// NAMESPACE NOTE (security review HIGH-4, 2026-06-10): this passport tag is
+/// keyed on the commitment coordinates, while `profile::compute_link_tag` keys
+/// the X.509 / SD-JWT tag on `link_rand`. The two tag spaces are therefore
+/// disjoint BY CONSTRUCTION -- a passport tag and an X.509 tag for the same
+/// holder/scope/epoch never collide, and are never cross-comparable. The
+/// protocol relies on per-credential-type tag namespaces; do NOT attempt to
+/// compare tags across the two functions for cross-credential linking.
 pub fn compute_link_tag(
     commitment_x: Field,
     commitment_y: Field,

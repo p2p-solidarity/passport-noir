@@ -68,6 +68,14 @@ fn main(
     // 3. Domain predicate. We only surface 0/1; the opened attributes stay
     //    private. The adapter is responsible for packing the domain into
     //    (attr_hi, attr_lo) the same way the verifier packs `target_domain_hash`.
+    //
+    // VERIFIER CONTRACT (security review HIGH-1, 2026-06-10): a proof with
+    // `out_domain_match == 0` is a VALID proof (the holder's domain simply did
+    // not match the target). The circuit does not require a match. A relying
+    // verifier that wants "domain matched" semantics MUST check
+    // `out_domain_match == 1` as an explicit post-proof policy step -- and
+    // compare for equality to 1, never `!= 0`, since the boolean constraint
+    // only guarantees the value is 0 or 1.
     let computed_domain_hash = decode_domain(attr_hi, attr_lo);
     let expected_match = if computed_domain_hash == target_domain_hash {
         1
