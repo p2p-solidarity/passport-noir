@@ -1,38 +1,42 @@
-use openac_core::commit::{assert_commitment_eq, commit_attributes_v3, DOMAIN_PASSPORT};
+use openac_core::commit::{assert_commitment_eq, commit_passport_v3_1, DOMAIN_PASSPORT};
 use openac_core::device::verify_device_binding;
 use openac_core::predicate::{check_age_above, check_bytes3_eq};
-use openac_core::profile::unpack_passport_profile;
-use openac_core::show::{EPOCH_BYTES, HASH_LEN, verify_show};
+use openac_core::profile::unpack_passport_claims;
+use openac_core::show::{HASH_LEN, verify_show};
 
-// Generic OpenAC Show Circuit (v3 -- Path A, passport only)
+// Generic OpenAC Show Circuit (v3.1 -- Path A, passport only)
 //
-// v3 changes relative to v2:
-//   * commitment re-open uses `commit_attributes_v3` (5-arg Pedersen that binds
-//     an enclave pk_digest).
-//   * In-circuit ECDSA-P256 device binding: the circuit verifies the enclave's
-//     signature over `nonce_hash` (public input) and derives the same
-//     `pk_digest` that was bound into the commitment during Prepare. This
-//     replaces the external `device_binding` circuit for the passport show
-//     flow.
+// v3.1 changes relative to v3 (spec/upgrade-plan-v3.1.md):
+//   * The in-circuit SHA256 challenge digest was REMOVED (P-1/P-2/P-3).
+//     Freshness rides on `nonce_hash`: it is a public input the verifier
+//     pins against the nonce it issued, and it is the ECDSA-P256 message of
+//     the in-circuit device binding. UltraHonk binds all public inputs into
+//     the proof transcript, so a separate digest added no security and cost
+//     two SHA256 blocks per presentation on the mobile hot path.
+//   * `challenge[32]`, `epoch[u8;4]` and `epoch_field` are gone; `epoch` is
+//     a single public Field (P-5).
+//   * Commitment opening uses arity-8 `commit_passport_v3_1`: full-width
+//     SOD / DG1 hashes instead of the truncated 32-byte pack (P-6), and the
+//     predicate inputs come from one packed `claims` Field -- no separate
+//     birth/nationality witnesses with binding asserts.
+//   * Link tag uses the unified credential_type-keyed construction from
+//     `openac_core::show` (P-4 / HIGH-4).
 //
-// Issue P1-8 fix (2026-04-28): `credential_type` is now a PUBLIC input and is
-// asserted equal to `DOMAIN_PASSPORT` in-circuit. Before this fix it was a
-// private witness, so a verifier could not require the proof to be a passport
-// credential -- a prover could supply DOMAIN_X509 / DOMAIN_SDJWT and still
-// satisfy the commitment opening (with attacker-chosen attr_hi/attr_lo). The
-// in-circuit assertion now hardcodes the policy: openac_show only accepts
-// passport credentials. composite_show is the place to do multi-credential
-// presentations (it accepts aux_domain in {X509, SDJWT}).
+// Issue P1-8 (2026-04-28, retained): `credential_type` is a PUBLIC input and
+// asserted equal to `DOMAIN_PASSPORT` in-circuit, so verifiers can require
+// passport-only semantics from this circuit. Multi-credential presentations
+// live in composite_show.
 //
 // Linking:
 //   Verifier checks: prepare.out_commitment == show.out_commitment
-//   Same (credential_type, attr_hash, pk_digest, link_rand) -> same Grumpkin point.
-//   Same enclave_pk + fresh verifier nonce -> same pk_digest plus a fresh
-//   ECDSA signature proving holder possession of the private key.
+//   Same (claims, sod/dg1 hashes, pk_digest, link_rand) -> same Grumpkin
+//   point. Same enclave_pk + fresh verifier nonce -> same pk_digest plus a
+//   fresh ECDSA signature proving holder possession of the private key.
 
 /// Evaluate age and nationality predicates, asserting outputs match.
-/// When a disclosure flag is false, the corresponding output is unconstrained
-/// to prevent information leakage.
+/// When a disclosure flag is false, the corresponding output is pinned to a
+/// zero sentinel (CRITICAL-2, 2026-06-10) so a prover cannot publish forged
+/// values through unconstrained outputs.
 fn evaluate_predicates(
     birth_year: u32,
     birth_month: u32,
@@ -62,7 +66,7 @@ fn evaluate_predicates(
         // Security (CRITICAL-2, 2026-06-10): when age is NOT disclosed the
         // public output must be pinned to a sentinel. Otherwise it is a free
         // witness and a prover can publish `out_is_older = true` for an
-        // underage holder. Mirrors show_link's zero-scope/zero-tag enforcement.
+        // underage holder.
         assert(!out_is_older, "out_is_older must be false when age not disclosed");
     }
 
@@ -80,31 +84,23 @@ fn evaluate_predicates(
 }
 
 fn main(
-    // === Commitment re-computation (MUST match prepare) ===
-    attr_hash_hi: Field,
-    attr_hash_lo: Field,
+    // === Commitment opening witnesses (private, MUST match prepare) ===
+    claims: Field,
+    sod_hash_hi: Field,
+    sod_hash_lo: Field,
+    dg1_hash_hi: Field,
+    dg1_hash_lo: Field,
     link_rand: Field,
     // === Path A device-binding witnesses (private) ===
     enclave_pk_x: [u8; 32],
     enclave_pk_y: [u8; 32],
     signature: [u8; 64],
-    // === Challenge binding ===
-    challenge: [u8; HASH_LEN],
-    // === Predicate inputs (private credential attributes) ===
-    birth_year: u32,
-    birth_month: u32,
-    birth_day: u32,
-    nationality: [u8; 3],
     // === Public inputs ===
-    // Issue P1-8 (2026-04-28): credential_type is now PUBLIC + asserted equal
-    // to DOMAIN_PASSPORT in-circuit, so verifiers can require passport-only
-    // semantics from this circuit.
     credential_type: pub Field,
     nonce_hash: pub [u8; HASH_LEN],
     link_mode: pub bool,
     link_scope: pub Field,
-    epoch: pub [u8; EPOCH_BYTES],
-    epoch_field: pub Field,
+    epoch: pub Field,
     current_year: pub u32,
     current_month: pub u32,
     current_day: pub u32,
@@ -114,79 +110,52 @@ fn main(
     // === Public outputs ===
     out_commitment_x: pub Field,
     out_commitment_y: pub Field,
-    out_challenge_digest: pub [u8; HASH_LEN],
     out_link_tag: pub Field,
     out_is_older: pub bool,
     out_nationality: pub [u8; 3],
 ) {
-    // Issue P1-8: lock the circuit to passport credentials. A verifier that
-    // accepts an openac_show proof must be able to rely on `credential_type`
-    // being DOMAIN_PASSPORT; without this assertion the prover could re-open
-    // the same commitment with any credential domain and still satisfy
-    // `commit_attributes_v3`.
+    // Issue P1-8: lock the circuit to passport credentials.
     assert(
         credential_type == DOMAIN_PASSPORT,
         "openac_show only accepts DOMAIN_PASSPORT credentials",
     );
 
-    // Step 1: In-circuit ECDSA-P256 device binding. Verifies the enclave
-    // signature over nonce_hash and returns the canonical pk_digest that
-    // must have been bound into the prepare-phase commitment.
+    // Step 1: In-circuit ECDSA-P256 device binding over the verifier-issued
+    // nonce_hash. This is the v3.1 freshness anchor: a stale presentation
+    // carries a signature over an old nonce, and the verifier rejects the
+    // pinned `nonce_hash` public input before ever reaching the proof.
     let pk_digest = verify_device_binding(enclave_pk_x, enclave_pk_y, signature, nonce_hash);
 
-    // Step 2: Re-compute Pedersen commitment with pk_digest bound in
-    // (must match prepare proof's v3 commitment).
-    let commitment = commit_attributes_v3(
-        credential_type,
-        attr_hash_hi,
-        attr_hash_lo,
+    // Step 2: Re-open the arity-8 v3.1 Pedersen commitment (must match the
+    // prepare proof). Full-width SOD / DG1 hashes -- no truncation.
+    let commitment = commit_passport_v3_1(
+        claims,
+        sod_hash_hi,
+        sod_hash_lo,
+        dg1_hash_hi,
+        dg1_hash_lo,
         pk_digest,
         link_rand,
     );
     assert_commitment_eq(commitment, out_commitment_x, out_commitment_y);
 
-    // Step 2b: Bind predicate inputs to the committed attribute hash. Without
-    // this, the prover could produce a valid commitment (and signature) yet
-    // feed the predicate evaluator arbitrary birth/nationality values, so
-    // "age >= 18" would be proven against witnesses the issuer never signed.
-    // `unpack_passport_profile` is the inverse of `pack_passport_profile`
-    // used at issuance, so the derived tuple is exactly what was packed into
-    // (attr_hash_hi, attr_hash_lo) and therefore into the commitment.
-    let (bound_year, bound_month, bound_day, bound_nationality) =
-        unpack_passport_profile(attr_hash_hi, attr_hash_lo);
-    assert(birth_year == bound_year, "birth_year not bound to commitment attr_hash");
-    assert(birth_month == bound_month, "birth_month not bound to commitment attr_hash");
-    assert(birth_day == bound_day, "birth_day not bound to commitment attr_hash");
-    assert(
-        nationality[0] == bound_nationality[0],
-        "nationality[0] not bound to commitment attr_hash",
-    );
-    assert(
-        nationality[1] == bound_nationality[1],
-        "nationality[1] not bound to commitment attr_hash",
-    );
-    assert(
-        nationality[2] == bound_nationality[2],
-        "nationality[2] not bound to commitment attr_hash",
-    );
+    // Step 3: Unpack the committed claims. `unpack_passport_claims`
+    // range-constrains the claims Field, and the values feeding the
+    // predicates are exactly the ones the issuer packed at prepare time --
+    // no separate witnesses to re-bind.
+    let (birth_year, birth_month, birth_day, nationality) = unpack_passport_claims(claims);
 
-    // Step 3: Show-phase verification (challenge + linking).
-    // The challenge digest folds in the commitment coordinates (which now
-    // depend on nonce_hash via pk_digest), so `challenge` + `nonce_hash`
-    // jointly determine `out_challenge_digest`.
+    // Step 4: Scoped linking (unified v3.1 tag; unlinkable mode pins zeros).
     verify_show(
-        commitment.x,
-        commitment.y,
-        challenge,
-        epoch,
-        epoch_field,
+        credential_type,
+        link_rand,
         link_mode,
         link_scope,
-        out_challenge_digest,
+        epoch,
         out_link_tag,
     );
 
-    // Step 4: Predicate evaluation.
+    // Step 5: Predicate evaluation.
     evaluate_predicates(
         birth_year,
         birth_month,
@@ -209,30 +178,39 @@ fn main(
 
 use openac_core::commit::DOMAIN_X509;
 use openac_core::device::pk_digest_from_bytes;
-use openac_core::profile::pack_passport_profile;
-use openac_core::show::{compute_challenge_digest, compute_link_tag};
+use openac_core::profile::pack_passport_claims;
+use openac_core::show::compute_link_tag;
+use std::embedded_curve_ops::EmbeddedCurvePoint;
 
-/// Test helper that mirrors the pre-P1-8 main() argument order so existing
-/// passport-domain tests keep their original layout. It forwards into the
-/// new `main()` (which puts `credential_type` as a public input).
-fn invoke_main_legacy(
+/// Canonical full-width fingerprint fixture (arbitrary but fixed bytes so
+/// commitments are reproducible across tests).
+fn test_sod_fields() -> (Field, Field) {
+    openac_core::commit::hash_to_fields([0xAA; 32])
+}
+
+fn test_dg1_fields() -> (Field, Field) {
+    openac_core::commit::hash_to_fields([0xBB; 32])
+}
+
+/// Build the v3.1 passport commitment for the canonical enclave fixture.
+fn test_commitment(claims: Field, link_rand: Field) -> EmbeddedCurvePoint {
+    let (sod_hi, sod_lo) = test_sod_fields();
+    let (dg1_hi, dg1_lo) = test_dg1_fields();
+    let pk_digest = pk_digest_from_bytes(test_enclave_pk_x(), test_enclave_pk_y());
+    commit_passport_v3_1(claims, sod_hi, sod_lo, dg1_hi, dg1_lo, pk_digest, link_rand)
+}
+
+/// Invoke main() with the fixture fingerprints, exposing only the inputs a
+/// test wants to vary.
+fn invoke_main(
     credential_type: Field,
-    attr_hash_hi: Field,
-    attr_hash_lo: Field,
+    claims: Field,
     link_rand: Field,
-    enclave_pk_x: [u8; 32],
-    enclave_pk_y: [u8; 32],
     signature: [u8; 64],
-    challenge: [u8; HASH_LEN],
-    birth_year: u32,
-    birth_month: u32,
-    birth_day: u32,
-    nationality: [u8; 3],
     nonce_hash: [u8; HASH_LEN],
     link_mode: bool,
     link_scope: Field,
-    epoch: [u8; EPOCH_BYTES],
-    epoch_field: Field,
+    epoch: Field,
     current_year: u32,
     current_month: u32,
     current_day: u32,
@@ -241,29 +219,27 @@ fn invoke_main_legacy(
     disclose_age: bool,
     out_commitment_x: Field,
     out_commitment_y: Field,
-    out_challenge_digest: [u8; HASH_LEN],
     out_link_tag: Field,
     out_is_older: bool,
     out_nationality: [u8; 3],
 ) {
+    let (sod_hi, sod_lo) = test_sod_fields();
+    let (dg1_hi, dg1_lo) = test_dg1_fields();
     main(
-        attr_hash_hi,
-        attr_hash_lo,
+        claims,
+        sod_hi,
+        sod_lo,
+        dg1_hi,
+        dg1_lo,
         link_rand,
-        enclave_pk_x,
-        enclave_pk_y,
+        test_enclave_pk_x(),
+        test_enclave_pk_y(),
         signature,
-        challenge,
-        birth_year,
-        birth_month,
-        birth_day,
-        nationality,
         credential_type,
         nonce_hash,
         link_mode,
         link_scope,
         epoch,
-        epoch_field,
         current_year,
         current_month,
         current_day,
@@ -272,34 +248,13 @@ fn invoke_main_legacy(
         disclose_age,
         out_commitment_x,
         out_commitment_y,
-        out_challenge_digest,
         out_link_tag,
         out_is_older,
         out_nationality,
     );
 }
 
-/// Test helper: canonical packed passport profile for the ECDSA fixture enclave.
-/// The inner hashes are arbitrary but fixed so commitments are reproducible.
-fn test_packed_profile(
-    birth_year: u32,
-    birth_month: u32,
-    birth_day: u32,
-    nationality: [u8; 3],
-) -> (Field, Field) {
-    let sod_hash: [u8; 32] = [0xAA; 32];
-    let dg1_hash: [u8; 32] = [0xBB; 32];
-    pack_passport_profile(
-        sod_hash,
-        dg1_hash,
-        birth_year,
-        birth_month,
-        birth_day,
-        nationality,
-    )
-}
-
-/// Canonical P-256 enclave test fixture (matches device_binding/src/main.nr).
+/// Canonical P-256 enclave test fixture (matches openac_core::device).
 fn test_enclave_pk_x() -> [u8; 32] {
     [
         0x43, 0xa3, 0x93, 0x7c, 0xff, 0x2b, 0xcb, 0x51, 0xd0, 0x93, 0xf0, 0x01, 0x7c, 0x32, 0x99,
@@ -326,6 +281,7 @@ fn test_signature() -> [u8; 64] {
     ]
 }
 
+/// The nonce_hash the canonical fixture signature was produced over.
 fn test_nonce_hash() -> [u8; HASH_LEN] {
     [
         0xd6, 0xe9, 0xef, 0x3f, 0xc3, 0x44, 0x1a, 0xb5, 0x33, 0xb3, 0x84, 0x31, 0xda, 0x4c, 0xa9,
@@ -334,65 +290,37 @@ fn test_nonce_hash() -> [u8; HASH_LEN] {
     ]
 }
 
-fn sample_challenge() -> [u8; HASH_LEN] {
-    let mut out: [u8; HASH_LEN] = [0; HASH_LEN];
-    for i in 0..HASH_LEN {
-        out[i] = (i as u8) + 0x40;
-    }
-    out
-}
-
-fn sample_epoch() -> [u8; EPOCH_BYTES] {
-    [0x20, 0x26, 0x04, 0x01]
-}
-
-fn sample_epoch_field() -> Field {
+fn sample_epoch() -> Field {
     0x20260401
 }
 
 #[test]
 fn test_show_full_disclosure_linkable() {
-    let ctype = DOMAIN_PASSPORT;
-    let (attr_hi, attr_lo) = test_packed_profile(2000, 1, 15, [84, 87, 78]);
+    let claims = pack_passport_claims(2000, 1, 15, [84, 87, 78]);
     let rand: Field = 42;
-    let challenge = sample_challenge();
     let epoch = sample_epoch();
-    let epoch_f = sample_epoch_field();
     let scope: Field = 99;
 
-    // Pre-compute expected outputs (same pk_digest as the device-binding fixture).
-    let pk_digest = pk_digest_from_bytes(test_enclave_pk_x(), test_enclave_pk_y());
-    let c = commit_attributes_v3(ctype, attr_hi, attr_lo, pk_digest, rand);
-    let digest = compute_challenge_digest(c.x, c.y, challenge, epoch);
-    let tag = compute_link_tag(c.x, c.y, scope, epoch_f);
+    let c = test_commitment(claims, rand);
+    let tag = compute_link_tag(DOMAIN_PASSPORT, rand, scope, epoch);
 
-    invoke_main_legacy(
-        ctype,
-        attr_hi,
-        attr_lo,
+    invoke_main(
+        DOMAIN_PASSPORT,
+        claims,
         rand,
-        test_enclave_pk_x(),
-        test_enclave_pk_y(),
         test_signature(),
-        challenge,
-        2000,
-        1,
-        15, // birth: 2000-01-15
-        [84, 87, 78], // nationality: TWN
         test_nonce_hash(),
         true,
         scope,
         epoch,
-        epoch_f,
         2026,
         4,
         1,
-        18, // current date + threshold
+        18,
         true,
         true, // disclose both
         c.x,
         c.y,
-        digest,
         tag,
         true, // is_older = true (age 26 >= 18)
         [84, 87, 78], // nationality = TWN
@@ -401,35 +329,19 @@ fn test_show_full_disclosure_linkable() {
 
 #[test]
 fn test_show_unlinkable_no_disclosure() {
-    let ctype = DOMAIN_PASSPORT;
-    let (attr_hi, attr_lo) = test_packed_profile(2000, 1, 15, [84, 87, 78]);
+    let claims = pack_passport_claims(2000, 1, 15, [84, 87, 78]);
     let rand: Field = 42;
-    let challenge = sample_challenge();
-    let epoch = sample_epoch();
-    let epoch_f = sample_epoch_field();
+    let c = test_commitment(claims, rand);
 
-    let pk_digest = pk_digest_from_bytes(test_enclave_pk_x(), test_enclave_pk_y());
-    let c = commit_attributes_v3(ctype, attr_hi, attr_lo, pk_digest, rand);
-    let digest = compute_challenge_digest(c.x, c.y, challenge, epoch);
-
-    invoke_main_legacy(
-        ctype,
-        attr_hi,
-        attr_lo,
+    invoke_main(
+        DOMAIN_PASSPORT,
+        claims,
         rand,
-        test_enclave_pk_x(),
-        test_enclave_pk_y(),
         test_signature(),
-        challenge,
-        2000,
-        1,
-        15,
-        [84, 87, 78],
         test_nonce_hash(),
         false,
         0,
-        epoch,
-        epoch_f, // unlinkable mode
+        sample_epoch(),
         2026,
         4,
         1,
@@ -438,47 +350,118 @@ fn test_show_unlinkable_no_disclosure() {
         false, // no disclosure
         c.x,
         c.y,
-        digest,
         0, // zero link tag
         false, // age not disclosed
         [0, 0, 0], // nationality not disclosed
     );
 }
 
-// Security regression (CRITICAL-2, 2026-06-10): with disclose_age = false the
-// prover must not be able to publish out_is_older = true. Before the fix
-// out_is_older was a free witness when age was undisclosed.
-#[test(should_fail_with = "out_is_older must be false when age not disclosed")]
-fn test_show_rejects_forged_is_older_when_age_undisclosed() {
-    let ctype = DOMAIN_PASSPORT;
-    let (attr_hi, attr_lo) = test_packed_profile(2010, 1, 15, [84, 87, 78]); // 16yo
+#[test]
+fn test_show_age_only_disclosure() {
+    let claims = pack_passport_claims(1990, 6, 15, [85, 83, 65]);
     let rand: Field = 42;
-    let challenge = sample_challenge();
-    let epoch = sample_epoch();
-    let epoch_f = sample_epoch_field();
+    let c = test_commitment(claims, rand);
 
-    let pk_digest = pk_digest_from_bytes(test_enclave_pk_x(), test_enclave_pk_y());
-    let c = commit_attributes_v3(ctype, attr_hi, attr_lo, pk_digest, rand);
-    let digest = compute_challenge_digest(c.x, c.y, challenge, epoch);
-
-    invoke_main_legacy(
-        ctype,
-        attr_hi,
-        attr_lo,
+    invoke_main(
+        DOMAIN_PASSPORT,
+        claims,
         rand,
-        test_enclave_pk_x(),
-        test_enclave_pk_y(),
         test_signature(),
-        challenge,
-        2010,
-        1,
-        15,
-        [84, 87, 78],
         test_nonce_hash(),
         false,
         0,
-        epoch,
-        epoch_f,
+        sample_epoch(),
+        2026,
+        4,
+        1,
+        21,
+        false,
+        true, // age only
+        c.x,
+        c.y,
+        0,
+        true, // is_older = true (age 35 >= 21)
+        [0, 0, 0], // nationality not disclosed
+    );
+}
+
+#[test]
+fn test_show_nationality_only_disclosure() {
+    let claims = pack_passport_claims(2000, 1, 15, [68, 69, 85]);
+    let rand: Field = 42;
+    let c = test_commitment(claims, rand);
+
+    invoke_main(
+        DOMAIN_PASSPORT,
+        claims,
+        rand,
+        test_signature(),
+        test_nonce_hash(),
+        false,
+        0,
+        sample_epoch(),
+        2026,
+        4,
+        1,
+        18,
+        true,
+        false, // nationality only
+        c.x,
+        c.y,
+        0,
+        false, // age not disclosed
+        [68, 69, 85], // nationality = DEU
+    );
+}
+
+#[test]
+fn test_show_commitment_links_to_prepare() {
+    // Same (claims, fingerprints, pk_digest, rand) produces the same Grumpkin
+    // point in prepare and show, which is how the verifier links the proofs.
+    let claims = pack_passport_claims(1990, 6, 15, [85, 83, 65]);
+    let c_prepare = test_commitment(claims, 77);
+    let c_show = test_commitment(claims, 77);
+
+    assert(c_prepare.x == c_show.x, "Commitment X must match between prepare and show");
+    assert(c_prepare.y == c_show.y, "Commitment Y must match between prepare and show");
+}
+
+#[test]
+fn test_show_commitment_changes_with_enclave_pk() {
+    // Path A property: swapping the enclave pk breaks the commitment link
+    // between prepare and show, even when all other inputs stay identical.
+    let claims = pack_passport_claims(1990, 6, 15, [85, 83, 65]);
+    let (sod_hi, sod_lo) = test_sod_fields();
+    let (dg1_hi, dg1_lo) = test_dg1_fields();
+
+    let pk_digest_a = pk_digest_from_bytes(test_enclave_pk_x(), test_enclave_pk_y());
+    let mut pk_x_b = test_enclave_pk_x();
+    pk_x_b[0] ^= 0x01;
+    let pk_digest_b = pk_digest_from_bytes(pk_x_b, test_enclave_pk_y());
+
+    let c_a = commit_passport_v3_1(claims, sod_hi, sod_lo, dg1_hi, dg1_lo, pk_digest_a, 77);
+    let c_b = commit_passport_v3_1(claims, sod_hi, sod_lo, dg1_hi, dg1_lo, pk_digest_b, 77);
+
+    assert(c_a.x != c_b.x, "Different enclave pk must yield different v3.1 commitment");
+}
+
+// Security regression (CRITICAL-2, 2026-06-10): with disclose_age = false the
+// prover must not be able to publish out_is_older = true.
+#[test(should_fail_with = "out_is_older must be false when age not disclosed")]
+fn test_show_rejects_forged_is_older_when_age_undisclosed() {
+    let claims = pack_passport_claims(2010, 1, 15, [84, 87, 78]); // 16yo
+    let rand: Field = 42;
+    let c = test_commitment(claims, rand);
+
+    invoke_main(
+        DOMAIN_PASSPORT,
+        claims,
+        rand,
+        test_signature(),
+        test_nonce_hash(),
+        false,
+        0,
+        sample_epoch(),
         2026,
         4,
         1,
@@ -487,7 +470,6 @@ fn test_show_rejects_forged_is_older_when_age_undisclosed() {
         false, // no disclosure
         c.x,
         c.y,
-        digest,
         0,
         true, // FORGED: claim over-18 without disclosing age
         [0, 0, 0],
@@ -498,35 +480,19 @@ fn test_show_rejects_forged_is_older_when_age_undisclosed() {
 // nationality output must be pinned to zero, not a forged code.
 #[test(should_fail_with = "out_nationality must be zero when nationality not disclosed")]
 fn test_show_rejects_forged_nationality_when_undisclosed() {
-    let ctype = DOMAIN_PASSPORT;
-    let (attr_hi, attr_lo) = test_packed_profile(2000, 1, 15, [84, 87, 78]);
+    let claims = pack_passport_claims(2000, 1, 15, [84, 87, 78]);
     let rand: Field = 42;
-    let challenge = sample_challenge();
-    let epoch = sample_epoch();
-    let epoch_f = sample_epoch_field();
+    let c = test_commitment(claims, rand);
 
-    let pk_digest = pk_digest_from_bytes(test_enclave_pk_x(), test_enclave_pk_y());
-    let c = commit_attributes_v3(ctype, attr_hi, attr_lo, pk_digest, rand);
-    let digest = compute_challenge_digest(c.x, c.y, challenge, epoch);
-
-    invoke_main_legacy(
-        ctype,
-        attr_hi,
-        attr_lo,
+    invoke_main(
+        DOMAIN_PASSPORT,
+        claims,
         rand,
-        test_enclave_pk_x(),
-        test_enclave_pk_y(),
         test_signature(),
-        challenge,
-        2000,
-        1,
-        15,
-        [84, 87, 78],
         test_nonce_hash(),
         false,
         0,
-        epoch,
-        epoch_f,
+        sample_epoch(),
         2026,
         4,
         1,
@@ -535,173 +501,27 @@ fn test_show_rejects_forged_nationality_when_undisclosed() {
         false,
         c.x,
         c.y,
-        digest,
         0,
         false,
         [85, 83, 65], // FORGED: publish USA while not disclosing nationality
     );
 }
 
-#[test]
-fn test_show_commitment_links_to_prepare() {
-    let ctype = DOMAIN_PASSPORT;
-    let (attr_hi, attr_lo) = test_packed_profile(1990, 6, 15, [85, 83, 65]);
-    let rand: Field = 77;
-
-    // Same (ctype, attrs, pk_digest, rand) produces the same Grumpkin point in
-    // prepare and show, which is how the verifier links the two proofs.
-    let pk_digest = pk_digest_from_bytes(test_enclave_pk_x(), test_enclave_pk_y());
-    let c_prepare = commit_attributes_v3(ctype, attr_hi, attr_lo, pk_digest, rand);
-    let c_show = commit_attributes_v3(ctype, attr_hi, attr_lo, pk_digest, rand);
-
-    assert(c_prepare.x == c_show.x, "Commitment X must match between prepare and show");
-    assert(c_prepare.y == c_show.y, "Commitment Y must match between prepare and show");
-}
-
-#[test]
-fn test_show_commitment_changes_with_enclave_pk() {
-    // Path A property: swapping the enclave pk breaks the commitment link
-    // between prepare and show, even when all other inputs stay identical.
-    let ctype = DOMAIN_PASSPORT;
-    let (attr_hi, attr_lo) = test_packed_profile(1990, 6, 15, [85, 83, 65]);
-    let rand: Field = 77;
-
-    let pk_digest_a = pk_digest_from_bytes(test_enclave_pk_x(), test_enclave_pk_y());
-    let mut pk_x_b = test_enclave_pk_x();
-    pk_x_b[0] ^= 0x01;
-    let pk_digest_b = pk_digest_from_bytes(pk_x_b, test_enclave_pk_y());
-
-    let c_a = commit_attributes_v3(ctype, attr_hi, attr_lo, pk_digest_a, rand);
-    let c_b = commit_attributes_v3(ctype, attr_hi, attr_lo, pk_digest_b, rand);
-
-    assert(c_a.x != c_b.x, "Different enclave pk must yield different v3 commitment");
-}
-
-#[test]
-fn test_show_age_only_disclosure() {
-    let ctype = DOMAIN_PASSPORT;
-    // birth 1990-06-15 + USA is packed INTO the commitment so the new binding
-    // assertions pass while the test continues to exercise age-only disclosure.
-    let (attr_hi, attr_lo) = test_packed_profile(1990, 6, 15, [85, 83, 65]);
-    let rand: Field = 42;
-    let challenge = sample_challenge();
-    let epoch = sample_epoch();
-    let epoch_f = sample_epoch_field();
-
-    let pk_digest = pk_digest_from_bytes(test_enclave_pk_x(), test_enclave_pk_y());
-    let c = commit_attributes_v3(ctype, attr_hi, attr_lo, pk_digest, rand);
-    let digest = compute_challenge_digest(c.x, c.y, challenge, epoch);
-
-    invoke_main_legacy(
-        ctype,
-        attr_hi,
-        attr_lo,
-        rand,
-        test_enclave_pk_x(),
-        test_enclave_pk_y(),
-        test_signature(),
-        challenge,
-        1990,
-        6,
-        15, // birth: 1990-06-15
-        [85, 83, 65], // nationality: USA (not disclosed)
-        test_nonce_hash(),
-        false,
-        0,
-        epoch,
-        epoch_f,
-        2026,
-        4,
-        1,
-        21, // threshold: 21
-        false,
-        true, // age only
-        c.x,
-        c.y,
-        digest,
-        0,
-        true, // is_older = true (age 35 >= 21)
-        [0, 0, 0], // nationality not disclosed
-    );
-}
-
-#[test]
-fn test_show_nationality_only_disclosure() {
-    let ctype = DOMAIN_PASSPORT;
-    let (attr_hi, attr_lo) = test_packed_profile(2000, 1, 15, [68, 69, 85]);
-    let rand: Field = 42;
-    let challenge = sample_challenge();
-    let epoch = sample_epoch();
-    let epoch_f = sample_epoch_field();
-
-    let pk_digest = pk_digest_from_bytes(test_enclave_pk_x(), test_enclave_pk_y());
-    let c = commit_attributes_v3(ctype, attr_hi, attr_lo, pk_digest, rand);
-    let digest = compute_challenge_digest(c.x, c.y, challenge, epoch);
-
-    invoke_main_legacy(
-        ctype,
-        attr_hi,
-        attr_lo,
-        rand,
-        test_enclave_pk_x(),
-        test_enclave_pk_y(),
-        test_signature(),
-        challenge,
-        2000,
-        1,
-        15,
-        [68, 69, 85], // nationality: DEU
-        test_nonce_hash(),
-        false,
-        0,
-        epoch,
-        epoch_f,
-        2026,
-        4,
-        1,
-        18,
-        true,
-        false, // nationality only
-        c.x,
-        c.y,
-        digest,
-        0,
-        false, // age not disclosed
-        [68, 69, 85], // nationality = DEU
-    );
-}
-
 #[test(should_fail)]
 fn test_show_fails_wrong_age_output() {
-    let ctype = DOMAIN_PASSPORT;
-    let (attr_hi, attr_lo) = test_packed_profile(2000, 1, 15, [84, 87, 78]);
+    let claims = pack_passport_claims(2000, 1, 15, [84, 87, 78]);
     let rand: Field = 42;
-    let challenge = sample_challenge();
-    let epoch = sample_epoch();
-    let epoch_f = sample_epoch_field();
+    let c = test_commitment(claims, rand);
 
-    let pk_digest = pk_digest_from_bytes(test_enclave_pk_x(), test_enclave_pk_y());
-    let c = commit_attributes_v3(ctype, attr_hi, attr_lo, pk_digest, rand);
-    let digest = compute_challenge_digest(c.x, c.y, challenge, epoch);
-
-    invoke_main_legacy(
-        ctype,
-        attr_hi,
-        attr_lo,
+    invoke_main(
+        DOMAIN_PASSPORT,
+        claims,
         rand,
-        test_enclave_pk_x(),
-        test_enclave_pk_y(),
         test_signature(),
-        challenge,
-        2000,
-        1,
-        15,
-        [84, 87, 78],
         test_nonce_hash(),
         false,
         0,
-        epoch,
-        epoch_f,
+        sample_epoch(),
         2026,
         4,
         1,
@@ -710,7 +530,6 @@ fn test_show_fails_wrong_age_output() {
         true,
         c.x,
         c.y,
-        digest,
         0,
         false, // WRONG: age 26 >= 18 should be true
         [0, 0, 0],
@@ -719,35 +538,19 @@ fn test_show_fails_wrong_age_output() {
 
 #[test(should_fail)]
 fn test_show_fails_wrong_nationality_output() {
-    let ctype = DOMAIN_PASSPORT;
-    let (attr_hi, attr_lo) = test_packed_profile(2000, 1, 15, [84, 87, 78]);
+    let claims = pack_passport_claims(2000, 1, 15, [84, 87, 78]);
     let rand: Field = 42;
-    let challenge = sample_challenge();
-    let epoch = sample_epoch();
-    let epoch_f = sample_epoch_field();
+    let c = test_commitment(claims, rand);
 
-    let pk_digest = pk_digest_from_bytes(test_enclave_pk_x(), test_enclave_pk_y());
-    let c = commit_attributes_v3(ctype, attr_hi, attr_lo, pk_digest, rand);
-    let digest = compute_challenge_digest(c.x, c.y, challenge, epoch);
-
-    invoke_main_legacy(
-        ctype,
-        attr_hi,
-        attr_lo,
+    invoke_main(
+        DOMAIN_PASSPORT,
+        claims,
         rand,
-        test_enclave_pk_x(),
-        test_enclave_pk_y(),
         test_signature(),
-        challenge,
-        2000,
-        1,
-        15,
-        [84, 87, 78], // actual: TWN
         test_nonce_hash(),
         false,
         0,
-        epoch,
-        epoch_f,
+        sample_epoch(),
         2026,
         4,
         1,
@@ -756,54 +559,35 @@ fn test_show_fails_wrong_nationality_output() {
         false,
         c.x,
         c.y,
-        digest,
         0,
         false,
-        [85, 83, 65], // WRONG: claims USA but actual is TWN
+        [85, 83, 65], // WRONG: claims USA but committed nationality is TWN
     );
 }
 
 #[test(should_fail)]
 fn test_show_fails_wrong_commitment() {
-    let ctype = DOMAIN_PASSPORT;
-    let (attr_hi, attr_lo) = test_packed_profile(2000, 1, 15, [84, 87, 78]);
+    let claims = pack_passport_claims(2000, 1, 15, [84, 87, 78]);
     let rand: Field = 42;
-    let challenge = sample_challenge();
-    let epoch = sample_epoch();
-    let epoch_f = sample_epoch_field();
+    let c = test_commitment(claims, rand);
 
-    let pk_digest = pk_digest_from_bytes(test_enclave_pk_x(), test_enclave_pk_y());
-    let c = commit_attributes_v3(ctype, attr_hi, attr_lo, pk_digest, rand);
-    let digest = compute_challenge_digest(c.x, c.y, challenge, epoch);
-
-    // Wrong commitment coordinates
-    invoke_main_legacy(
-        ctype,
-        attr_hi,
-        attr_lo,
+    invoke_main(
+        DOMAIN_PASSPORT,
+        claims,
         rand,
-        test_enclave_pk_x(),
-        test_enclave_pk_y(),
         test_signature(),
-        challenge,
-        2000,
-        1,
-        15,
-        [84, 87, 78],
         test_nonce_hash(),
         false,
         0,
-        epoch,
-        epoch_f,
+        sample_epoch(),
         2026,
         4,
         1,
         18,
         false,
         false,
-        c.x + 1,
-        c.y, // WRONG X
-        digest,
+        c.x + 1, // WRONG X
+        c.y,
         0,
         false,
         [0, 0, 0],
@@ -812,40 +596,23 @@ fn test_show_fails_wrong_commitment() {
 
 #[test(should_fail)]
 fn test_show_fails_on_bad_signature() {
-    // Path A negative test: a tampered ECDSA signature must break
-    // verify_device_binding and prevent the show proof from succeeding.
-    let ctype = DOMAIN_PASSPORT;
-    let (attr_hi, attr_lo) = test_packed_profile(2000, 1, 15, [84, 87, 78]);
+    // A tampered ECDSA signature must break verify_device_binding.
+    let claims = pack_passport_claims(2000, 1, 15, [84, 87, 78]);
     let rand: Field = 42;
-    let challenge = sample_challenge();
-    let epoch = sample_epoch();
-    let epoch_f = sample_epoch_field();
-
-    let pk_digest = pk_digest_from_bytes(test_enclave_pk_x(), test_enclave_pk_y());
-    let c = commit_attributes_v3(ctype, attr_hi, attr_lo, pk_digest, rand);
-    let digest = compute_challenge_digest(c.x, c.y, challenge, epoch);
+    let c = test_commitment(claims, rand);
 
     let mut bad_sig = test_signature();
     bad_sig[0] ^= 0xFF;
 
-    invoke_main_legacy(
-        ctype,
-        attr_hi,
-        attr_lo,
+    invoke_main(
+        DOMAIN_PASSPORT,
+        claims,
         rand,
-        test_enclave_pk_x(),
-        test_enclave_pk_y(),
         bad_sig,
-        challenge,
-        2000,
-        1,
-        15,
-        [84, 87, 78],
         test_nonce_hash(),
         false,
         0,
-        epoch,
-        epoch_f,
+        sample_epoch(),
         2026,
         4,
         1,
@@ -854,7 +621,42 @@ fn test_show_fails_on_bad_signature() {
         false,
         c.x,
         c.y,
-        digest,
+        0,
+        false,
+        [0, 0, 0],
+    );
+}
+
+// v3.1 digest-removal regression: freshness is carried by nonce_hash alone,
+// so a signature produced over an OLD nonce must not verify against a new
+// verifier-issued nonce_hash. This is the in-circuit half of replay
+// protection (the verifier-side half pins nonce_hash as a public input).
+#[test(should_fail)]
+fn test_show_rejects_stale_nonce_signature() {
+    let claims = pack_passport_claims(2000, 1, 15, [84, 87, 78]);
+    let rand: Field = 42;
+    let c = test_commitment(claims, rand);
+
+    let mut fresh_nonce = test_nonce_hash();
+    fresh_nonce[0] ^= 0x01; // verifier issued a new nonce; signature is stale
+
+    invoke_main(
+        DOMAIN_PASSPORT,
+        claims,
+        rand,
+        test_signature(),
+        fresh_nonce,
+        false,
+        0,
+        sample_epoch(),
+        2026,
+        4,
+        1,
+        18,
+        false,
+        false,
+        c.x,
+        c.y,
         0,
         false,
         [0, 0, 0],
@@ -862,39 +664,23 @@ fn test_show_fails_on_bad_signature() {
 }
 
 #[test(should_fail)]
-fn test_show_rejects_forged_birth_year() {
-    // Core security property for issue #1: the commitment binds birth year to
-    // 2000, but the prover tries to pass 1980 as the age witness (so 'age >=
-    // 18' would pass for any threshold). Binding assertion must reject this.
-    let ctype = DOMAIN_PASSPORT;
-    let (attr_hi, attr_lo) = test_packed_profile(2000, 1, 15, [84, 87, 78]);
+fn test_show_rejects_forged_claims() {
+    // The commitment binds claims for birth year 2000; a prover supplying a
+    // 1980 claims Field (to inflate age) must fail the commitment re-open.
+    let committed_claims = pack_passport_claims(2000, 1, 15, [84, 87, 78]);
+    let forged_claims = pack_passport_claims(1980, 1, 15, [84, 87, 78]);
     let rand: Field = 42;
-    let challenge = sample_challenge();
-    let epoch = sample_epoch();
-    let epoch_f = sample_epoch_field();
+    let c = test_commitment(committed_claims, rand);
 
-    let pk_digest = pk_digest_from_bytes(test_enclave_pk_x(), test_enclave_pk_y());
-    let c = commit_attributes_v3(ctype, attr_hi, attr_lo, pk_digest, rand);
-    let digest = compute_challenge_digest(c.x, c.y, challenge, epoch);
-
-    invoke_main_legacy(
-        ctype,
-        attr_hi,
-        attr_lo,
+    invoke_main(
+        DOMAIN_PASSPORT,
+        forged_claims,
         rand,
-        test_enclave_pk_x(),
-        test_enclave_pk_y(),
         test_signature(),
-        challenge,
-        1980, // FORGED: attr_hash commits to 2000, witness claims 1980
-        1,
-        15,
-        [84, 87, 78],
         test_nonce_hash(),
         false,
         0,
-        epoch,
-        epoch_f,
+        sample_epoch(),
         2026,
         4,
         1,
@@ -903,7 +689,6 @@ fn test_show_rejects_forged_birth_year() {
         true,
         c.x,
         c.y,
-        digest,
         0,
         true,
         [0, 0, 0],
@@ -911,89 +696,54 @@ fn test_show_rejects_forged_birth_year() {
 }
 
 #[test(should_fail)]
-fn test_show_rejects_forged_nationality() {
-    // Same attack surface as forged birth year, but targeting nationality.
-    let ctype = DOMAIN_PASSPORT;
-    let (attr_hi, attr_lo) = test_packed_profile(2000, 1, 15, [84, 87, 78]);
+fn test_show_fails_wrong_link_tag() {
+    let claims = pack_passport_claims(2000, 1, 15, [84, 87, 78]);
     let rand: Field = 42;
-    let challenge = sample_challenge();
     let epoch = sample_epoch();
-    let epoch_f = sample_epoch_field();
+    let scope: Field = 99;
+    let c = test_commitment(claims, rand);
+    let tag = compute_link_tag(DOMAIN_PASSPORT, rand, scope, epoch);
 
-    let pk_digest = pk_digest_from_bytes(test_enclave_pk_x(), test_enclave_pk_y());
-    let c = commit_attributes_v3(ctype, attr_hi, attr_lo, pk_digest, rand);
-    let digest = compute_challenge_digest(c.x, c.y, challenge, epoch);
-
-    invoke_main_legacy(
-        ctype,
-        attr_hi,
-        attr_lo,
+    invoke_main(
+        DOMAIN_PASSPORT,
+        claims,
         rand,
-        test_enclave_pk_x(),
-        test_enclave_pk_y(),
         test_signature(),
-        challenge,
-        2000,
-        1,
-        15,
-        [85, 83, 65], // FORGED: attr_hash commits to TWN, witness claims USA
         test_nonce_hash(),
-        false,
-        0,
+        true,
+        scope + 1, // TAMPERED scope without recomputing tag
         epoch,
-        epoch_f,
         2026,
         4,
         1,
         18,
-        true,
+        false,
         false,
         c.x,
         c.y,
-        digest,
-        0,
+        tag,
         false,
-        [85, 83, 65],
+        [0, 0, 0],
     );
 }
 
 #[test(should_fail)]
 fn test_show_rejects_non_passport_credential_type() {
-    // Issue P1-8 (2026-04-28): credential_type is now a public input that
-    // must equal DOMAIN_PASSPORT. A prover that supplies DOMAIN_X509 (with a
-    // matching commitment opening) must be rejected; otherwise verifiers
-    // could not require passport-only semantics from this circuit.
-    let ctype = DOMAIN_X509;
-    let (attr_hi, attr_lo) = test_packed_profile(2000, 1, 15, [84, 87, 78]);
+    // Issue P1-8: a prover that supplies DOMAIN_X509 must be rejected by the
+    // in-circuit DOMAIN_PASSPORT check regardless of commitment validity.
+    let claims = pack_passport_claims(2000, 1, 15, [84, 87, 78]);
     let rand: Field = 42;
-    let challenge = sample_challenge();
-    let epoch = sample_epoch();
-    let epoch_f = sample_epoch_field();
+    let c = test_commitment(claims, rand);
 
-    let pk_digest = pk_digest_from_bytes(test_enclave_pk_x(), test_enclave_pk_y());
-    // Build the commitment under DOMAIN_X509 so the commitment open succeeds
-    // -- but the in-circuit DOMAIN_PASSPORT check must still fail.
-    let c = commit_attributes_v3(ctype, attr_hi, attr_lo, pk_digest, rand);
-    let digest = compute_challenge_digest(c.x, c.y, challenge, epoch);
-
-    invoke_main_legacy(
-        ctype,
-        attr_hi,
-        attr_lo,
+    invoke_main(
+        DOMAIN_X509,
+        claims,
         rand,
-        test_enclave_pk_x(),
-        test_enclave_pk_y(),
         test_signature(),
-        challenge,
-        2000,
-        1,
-        15,
-        [84, 87, 78],
         test_nonce_hash(),
         false,
         0,
-        epoch,
-        epoch_f,
+        sample_epoch(),
         2026,
         4,
         1,
@@ -1002,7 +752,6 @@ fn test_show_rejects_non_passport_credential_type() {
         false,
         c.x,
         c.y,
-        digest,
         0,
         false,
         [0, 0, 0],

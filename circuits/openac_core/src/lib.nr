@@ -10,7 +10,8 @@
 
 /// Pedersen commitment on Grumpkin curve.
 /// Paper: Com(m; r) = product(g_i^{m_i}) * h^r
-/// Provides: commit_attributes, commit_attributes_v3, assert_commitment_eq
+/// Provides: commit_attributes, commit_attributes_v3, commit_passport_v3_1,
+/// assert_commitment_eq
 /// Domain constants: DOMAIN_PASSPORT, DOMAIN_SDJWT, DOMAIN_MDL
 pub mod commit;
 
@@ -18,9 +19,10 @@ pub mod commit;
 /// Provides: verify_device_binding (ECDSA-P256 + pk_digest), pk_digest_from_bytes.
 pub mod device;
 
-/// Show-phase operations: challenge binding and scoped linking.
-/// Paper: C2 show relation -- binds verifier challenge and optional scope.
-/// Provides: compute_challenge_digest, compute_link_tag, verify_show
+/// Show-phase scoped linking, unified across credential types (v3.1).
+/// The in-circuit challenge digest is retired -- freshness rides on the
+/// pinned public `nonce_hash` (see show.nr header).
+/// Provides: compute_link_tag, compute_link_tag_with_mode, verify_show
 pub mod show;
 
 /// Generic predicate functions over credential attributes.
@@ -29,7 +31,7 @@ pub mod show;
 pub mod predicate;
 
 /// Shared profile encodings and device-link derivations for multi-credential flows.
-/// Provides: passport/x509 packing, device-link derivation, link tag helpers.
+/// Provides: passport claims packing, x509 domain packing, link_rand derivation.
 pub mod profile;
 
 /// Revocation Sparse Merkle Tree primitive shared across issuer adapters.

@@ -154,14 +154,18 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('mopro-binding/Cargo.toml') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      - name: Compile disclosure circuit (integration artifact)
-        working-directory: circuits/disclosure
+      # disclosure (v1) retired to circuits-legacy/ (2026-06-10) but remains the
+      # only circuit with full prove fixtures in mopro noir.rs, so the
+      # integration stage builds it from the legacy workspace until the v3.1
+      # bench wrappers land (upgrade-plan-v3.1.md Phase 0).
+      - name: Compile disclosure circuit (integration artifact, legacy workspace)
+        working-directory: circuits-legacy/disclosure
         run: nargo compile
 
       - name: Copy circuit artifacts to mopro test-vectors
         run: |
           mkdir -p mopro-binding/test-vectors/noir
-          cp circuits/target/disclosure.json mopro-binding/test-vectors/noir/
+          cp circuits-legacy/target/disclosure.json mopro-binding/test-vectors/noir/
 
       - name: Run integration tests (with circuit artifacts)
         working-directory: mopro-binding

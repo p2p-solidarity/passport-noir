@@ -20,64 +20,39 @@ warn_() { echo -e "  ${YELLOW}[WARN]${NC} $1"; }
 
 echo "=== Domain Separator Cross-Layer Check ==="
 
-# v1 domain separators must match between Noir and Rust
+# v1 circuits retired to circuits-legacy/ (2026-06-10). The v1 Rust verifier
+# (openac.rs) is still shipped for old artifacts; if it references the v1
+# legacy Noir circuits, they must still exist under circuits-legacy/.
 RUST_OPENAC="$RUST_DIR/openac.rs"
+LEGACY_DIR="$PROJECT_DIR/circuits-legacy"
 
-# v1 Noir circuits use byte arrays for domain separators, so we check function names
-# and verify the Rust side has matching string literals
-V1_DOMAINS=("openac.preparev1" "openac.show.v1" "openac.scope.v1")
-V1_NOIR_PATTERNS=("prepare_domain" "show_domain" "scope_domain")
-V1_NOIR_FILES=(
-  "$CIRCUIT_DIR/prepare_link/src/main.nr"
-  "$CIRCUIT_DIR/show_link/src/main.nr"
-  "$CIRCUIT_DIR/show_link/src/main.nr"
-)
-V1_LABELS=("prepare" "show" "scope")
-
-for i in "${!V1_DOMAINS[@]}"; do
-  domain="${V1_DOMAINS[$i]}"
-  noir_file="${V1_NOIR_FILES[$i]}"
-  noir_pattern="${V1_NOIR_PATTERNS[$i]}"
-  label="${V1_LABELS[$i]}"
-
-  # Noir: check domain function exists (byte array form)
-  noir_found=false
-  if [ -f "$noir_file" ] && grep -qF "$noir_pattern" "$noir_file" 2>/dev/null; then
-    noir_found=true
-  fi
-
-  # Rust: check string literal
-  rust_found=false
-  if [ -f "$RUST_OPENAC" ] && grep -qF "$domain" "$RUST_OPENAC" 2>/dev/null; then
-    rust_found=true
-  fi
-
-  if $noir_found && $rust_found; then
-    ok "v1/$label: Noir has ${noir_pattern}() + Rust has \"$domain\""
-  elif $noir_found && ! $rust_found; then
-    if [ -f "$RUST_OPENAC" ]; then
-      issue "v1/$label: Noir has ${noir_pattern}() but \"$domain\" NOT in Rust"
+if [ -f "$RUST_OPENAC" ]; then
+  for legacy in prepare_link show_link; do
+    if [ -d "$LEGACY_DIR/$legacy" ]; then
+      ok "v1/legacy: $legacy preserved under circuits-legacy/ for openac.rs vectors"
     else
-      warn_ "v1/$label: Noir has ${noir_pattern}(); Rust file not found"
+      issue "v1/legacy: openac.rs exists but circuits-legacy/$legacy is missing"
     fi
-  elif ! $noir_found; then
-    issue "v1/$label: ${noir_pattern}() NOT in Noir"
-  fi
-done
+  done
+fi
 
 echo ""
-echo "=== v2 Domain Separators (Noir only, pending Rust v2) ==="
+echo "=== v3.1 Show-Phase Anchors (challenge digest retired) ==="
 
-V2_DOMAINS=("openac.show.v2" "openac.scope.v2")
-V2_FILE="$CIRCUIT_DIR/openac_core/src/show.nr"
+V31_FILE="$CIRCUIT_DIR/openac_core/src/show.nr"
 
-for domain in "${V2_DOMAINS[@]}"; do
-  if [ -f "$V2_FILE" ] && grep -qF "$domain" "$V2_FILE" 2>/dev/null; then
-    ok "v2: \"$domain\" present in openac_core"
-  else
-    issue "v2: \"$domain\" NOT found in openac_core"
-  fi
-done
+# The unified link tag is the only show-phase domain anchor; the SHA256
+# challenge digest ("openac.show.v2") must NOT reappear in-circuit.
+if [ -f "$V31_FILE" ] && grep -qF "DOMAIN_LINK_TAG" "$V31_FILE" 2>/dev/null; then
+  ok "v3.1: DOMAIN_LINK_TAG present in openac_core::show"
+else
+  issue "v3.1: DOMAIN_LINK_TAG NOT found in openac_core::show"
+fi
+if [ -f "$V31_FILE" ] && grep -qF "openac.show.v2" "$V31_FILE" 2>/dev/null; then
+  issue "v3.1: retired SHA256 digest domain \"openac.show.v2\" reappeared in show.nr"
+else
+  ok "v3.1: retired digest domain absent from show.nr (as designed)"
+fi
 
 echo ""
 echo "=== Hash Function Consistency ==="
@@ -109,7 +84,7 @@ check_hash() {
   fi
 }
 
-for circuit in passport_verifier data_integrity disclosure prepare_link show_link passport_adapter; do
+for circuit in passport_adapter sdjwt_adapter jwt_x5c_adapter mdoc_adapter; do
   check_hash "$circuit"
 done
 
@@ -117,8 +92,8 @@ done
 if grep -qE 'pedersen_commitment' "$CIRCUIT_DIR/openac_core/src/commit.nr" 2>/dev/null; then
   ok "openac_core::commit: Pedersen (Grumpkin)"
 fi
-if grep -qE 'sha256_digest' "$CIRCUIT_DIR/openac_core/src/show.nr" 2>/dev/null; then
-  ok "openac_core::show: SHA256 (challenge digest) + Pedersen (link tag)"
+if grep -qE 'pedersen_hash' "$CIRCUIT_DIR/openac_core/src/show.nr" 2>/dev/null; then
+  ok "openac_core::show: Pedersen link tag (v3.1 -- no in-circuit digest)"
 fi
 
 echo ""

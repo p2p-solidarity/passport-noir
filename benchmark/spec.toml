@@ -5,15 +5,9 @@
 [meta]
 nargo_version_prefix = "1.0.0-beta"
 workspace_members = [
-  "passport_verifier",
-  "data_integrity",
-  "disclosure",
-  "prepare_link",
-  "show_link",
   "openac_core",
   "passport_adapter",
   "openac_show",
-  "device_binding",
   "sdjwt_adapter",
   "jwt_x5c_adapter",
   "x509_show",
@@ -24,16 +18,22 @@ workspace_members = [
 # ============================================================
 # Architecture Versions
 # ============================================================
-# v1: SHA256-based commitments (prepare_link, show_link)
-# v2: Pedersen-based commitments, arity 4 (legacy openac_core API — deprecated 2026-04-17)
-# v3: Pedersen-based commitments, arity 5 (+ pk_digest) — Path A target
-#     Affected: openac_core::commit_attributes_v3, passport_adapter, openac_show,
-#     sdjwt_adapter, jwt_x5c_adapter, x509_show, composite_show
+# v1: SHA256-based commitments — RETIRED 2026-06-10 to circuits-legacy/
+# v2: Pedersen arity-4 (device_binding) — RETIRED 2026-06-10 to circuits-legacy/
+# v3: Pedersen arity-5 (+ pk_digest) — Path A; still used by the non-passport
+#     adapters (sdjwt / jwt_x5c / mdoc aux commitments).
+# v3.1 (2026-06-10, spec/upgrade-plan-v3.1.md): show-path unification.
+#     * In-circuit challenge digest RETIRED — freshness rides on the pinned
+#       public nonce_hash (also the ECDSA-P256 device-binding message).
+#     * Unified link tag: pedersen([DOMAIN_LINK_TAG, credential_type,
+#       link_rand, link_scope, epoch]) for every show circuit.
+#     * Passport commitment is arity-8 commit_passport_v3_1 (full-width
+#       SOD / DG1 hashes + single packed claims Field — no truncation).
+#     * epoch is a single public Field everywhere.
 
 [versions]
-v1_circuits = ["passport_verifier", "data_integrity", "disclosure", "prepare_link", "show_link"]
-v2_circuits = ["device_binding"]
-v3_circuits = [
+legacy_circuits = ["passport_verifier", "data_integrity", "disclosure", "prepare_link", "show_link", "device_binding"]
+v3_1_circuits = [
   "openac_core",
   "passport_adapter",
   "openac_show",
@@ -45,210 +45,23 @@ v3_circuits = [
 ]
 
 # ============================================================
-# Circuit: passport_verifier
+# Legacy circuits (retired 2026-06-10 — circuits-legacy/)
 # ============================================================
-[circuits.passport_verifier]
-type = "bin"
-description = "RSA-2048 + SHA-256 (PKCS#1 v1.5) signature verification on passport SOD"
-source = "circuits/passport_verifier/src/main.nr"
-
-public_inputs = ["modulus_limbs"]
-public_input_types = ["[u128; 18]"]
-
-private_inputs = ["sod_hash", "signature_limbs", "redc_limbs", "exponent"]
-private_input_types = ["[u8; 32]", "[u128; 18]", "[u128; 18]", "u32"]
-
-assertions = [
-  "Passport DSC signature verification failed",
-]
-
-min_positive_tests = 1
-min_negative_tests = 1
-
-# Outputs consumed by other circuits
-exports = { sod_hash = "[u8; 32]" }
-
-[circuits.passport_verifier.dependencies]
-noir_rsa = "v0.10.0"
-bignum = "v0.9.2"
+# passport_verifier, data_integrity, disclosure, prepare_link, show_link (v1)
+# and device_binding (v2) were retired by the v3.1 show-path unification
+# (spec/upgrade-plan-v3.1.md Phase 3). Their sources and a standalone
+# workspace live in circuits-legacy/; they are not compiled, tested, or
+# shipped by default and have no [circuits.*] entries here. The v1 Rust
+# verifier (mopro-binding/src/openac.rs) still validates old artifacts using
+# committed test vectors.
 
 # ============================================================
-# Circuit: data_integrity
-# ============================================================
-# SOD hash hard constraint (do NOT remove without coordinating with iOS pipeline):
-#   sod_hash = SHA256(dg0_hash || dg1_hash || dg2_hash || dg3_hash)
-# Unused DG slots are zero-padded (32 bytes each). This is raw concatenation,
-# not the ICAO 9303 LDS Security Object TLV-encoded signedAttrs. The iOS app
-# must normalize NFC chip data to this layout before feeding the circuit.
-[circuits.data_integrity]
-type = "bin"
-description = "DG hash chain verification (DG1-DG4 -> SOD hash)"
-source = "circuits/data_integrity/src/main.nr"
-
-public_inputs = ["expected_dg_hashes", "sod_hash"]
-public_input_types = ["[[u8; 32]; 4]", "[u8; 32]"]
-
-private_inputs = ["dg_count", "dg_contents", "dg_lengths"]
-private_input_types = ["u8", "[[u8; 512]; 4]", "[u32; 4]"]
-
-assertions = [
-  "Too many data groups",
-  "Must have at least one data group",
-  "DG length exceeds maximum",
-  "Data group hash mismatch",
-  "SOD combined hash mismatch",
-]
-
-constants = { MAX_DG_COUNT = 4, MAX_DG_SIZE = 512 }
-
-min_positive_tests = 5
-min_negative_tests = 3
-
-exports = { sod_hash = "[u8; 32]", mrz_hash = "[u8; 32]" }
-
-[circuits.data_integrity.dependencies]
-sha256 = "v0.3.0"
-
-# ============================================================
-# Circuit: disclosure
-# ============================================================
-[circuits.disclosure]
-type = "bin"
-description = "Selective disclosure over TD3 MRZ (nationality, age, name)"
-source = "circuits/disclosure/src/main.nr"
-
-public_inputs = [
-  "mrz_hash", "disclose_nationality", "disclose_older_than", "disclose_name",
-  "age_threshold", "current_date", "out_nationality", "out_name", "out_is_older",
-]
-public_input_types = [
-  "[u8; 32]", "bool", "bool", "bool",
-  "u8", "[u8; 6]", "[u8; 3]", "[u8; 39]", "bool",
-]
-
-private_inputs = ["mrz_data"]
-private_input_types = ["[u8; 88]"]
-
-# main_with_challenge() helper binds a verifier challenge to mrz_hash.
-# Domain MUST differ from show_link's "openac.show.v1" because preimage
-# layouts diverge (mrz_hash vs prepare_commitment) — sharing a domain
-# would let an external verifier confuse digests across the two circuits.
-domain_separators = [
-  { name = "disclosure_challenge", value = "openac.disclosure.v1", bytes = 20 },
-]
-
-assertions = [
-  "MRZ hash mismatch",
-  "Challenge digest mismatch",
-]
-
-constants = { MRZ_LINE_LEN = 44, MRZ_TOTAL_LEN = 88 }
-
-# MRZ field offsets (absolute byte positions in 88-byte TD3 MRZ)
-[circuits.disclosure.mrz_offsets]
-nationality = { start = 54, end = 57, length = 3 }
-dob = { start = 57, end = 63, length = 6, format = "YYMMDD" }
-name = { start = 5, end = 44, length = 39 }
-
-min_positive_tests = 8
-min_negative_tests = 3
-
-imports = { mrz_hash = "data_integrity" }
-
-[circuits.disclosure.dependencies]
-sha256 = "v0.3.0"
-
-# ============================================================
-# Circuit: prepare_link (v1 — SHA256 commitment)
-# ============================================================
-[circuits.prepare_link]
-type = "bin"
-description = "OpenAC prepare-phase SHA256 commitment (offline, per session)"
-source = "circuits/prepare_link/src/main.nr"
-version = "v1"
-
-public_inputs = ["out_prepare_commitment"]
-public_input_types = ["[u8; 32]"]
-
-private_inputs = ["sod_hash", "mrz_hash", "link_rand"]
-private_input_types = ["[u8; 32]", "[u8; 32]", "[u8; 32]"]
-
-domain_separator = "openac.preparev1"
-domain_separator_bytes = 16
-commitment_formula = "SHA256(domain || sod_hash || mrz_hash || link_rand)"
-preimage_length = 112  # 16 + 32 + 32 + 32
-
-# prepare_link uses the shared `assert_hash_equals` helper, so the literal
-# assertion message is "Hash mismatch" (semantically: prepare commitment
-# mismatch). spec-check.sh greps for the literal string.
-assertions = [
-  "Hash mismatch",
-]
-
-min_positive_tests = 2
-min_negative_tests = 1
-
-imports = { sod_hash = "passport_verifier", mrz_hash = "data_integrity" }
-exports = { out_prepare_commitment = "[u8; 32]" }
-
-[circuits.prepare_link.dependencies]
-sha256 = "v0.3.0"
-
-# ============================================================
-# Circuit: show_link (v1 — SHA256 challenge + scoped linking)
-# ============================================================
-[circuits.show_link]
-type = "bin"
-description = "OpenAC show-phase challenge binding + scoped linking (online, per presentation)"
-source = "circuits/show_link/src/main.nr"
-version = "v1"
-
-public_inputs = [
-  "link_mode", "link_scope", "epoch",
-  "out_prepare_commitment", "out_challenge_digest", "out_link_tag",
-]
-public_input_types = [
-  "bool", "[u8; 32]", "[u8; 4]",
-  "[u8; 32]", "[u8; 32]", "[u8; 32]",
-]
-
-private_inputs = ["sod_hash", "mrz_hash", "link_rand", "challenge"]
-private_input_types = ["[u8; 32]", "[u8; 32]", "[u8; 32]", "[u8; 32]"]
-
-domain_separators = [
-  { name = "prepare", value = "openac.preparev1", bytes = 16 },
-  { name = "show", value = "openac.show.v1", bytes = 14 },
-  { name = "scope", value = "openac.scope.v1", bytes = 15 },
-]
-
-# show_link's `assert_hash_equals` and `assert_zero_hash` helpers emit the
-# literal messages below for every logical check listed alongside each line.
-# spec-check.sh only greps for "Hash mismatch" because all three positive-path
-# checks share the same helper, but both literal strings are normative.
-assertions = [
-  # "Hash mismatch" is emitted for: prepare commitment, challenge digest,
-  # scoped link tag (compute_*_link_tag mismatches).
-  "Hash mismatch",
-  # "Expected zero hash" is emitted for both: unlinkable mode requires zero
-  # link_scope, and unlinkable mode requires zero out_link_tag.
-  "Expected zero hash",
-]
-
-min_positive_tests = 3
-min_negative_tests = 1
-
-imports = { out_prepare_commitment = "prepare_link", sod_hash = "passport_verifier", mrz_hash = "data_integrity" }
-
-[circuits.show_link.dependencies]
-sha256 = "v0.3.0"
-
-# ============================================================
-# Library: openac_core (v2 — Pedersen commitment)
+# Library: openac_core (v3.1 — Pedersen commitment + unified show)
 # ============================================================
 [circuits.openac_core]
 type = "lib"
-description = "Generic OpenAC building blocks: Pedersen commitment, device binding, show logic, predicates, profile encodings, revocation SMT, CSCA Master List Merkle"
-version = "v3"
+description = "Generic OpenAC building blocks: Pedersen commitment, device binding, unified show linking, predicates, profile encodings, revocation SMT, CSCA Master List Merkle"
+version = "v3.1"
 
 # v3 expanded the library beyond the original commit/show/predicate trio to
 # host the Path A device-binding helpers (`device`), profile encodings
@@ -259,7 +72,7 @@ modules = ["commit", "device", "show", "predicate", "profile", "smt", "merkle", 
 
 [circuits.openac_core.module_commit]
 source = "circuits/openac_core/src/commit.nr"
-functions = ["commit_attributes", "commit_attributes_v3", "hash_to_fields", "assert_commitment_eq"]
+functions = ["commit_attributes", "commit_attributes_v3", "commit_passport_v3_1", "hash_to_fields", "assert_commitment_eq"]
 domain_constants = { DOMAIN_PASSPORT = "0x01", DOMAIN_X509 = "0x02", DOMAIN_SDJWT = "0x03", DOMAIN_MDL = "0x04", DOMAIN_SMT_NODE = "0x736d7431", DOMAIN_CSCA_NODE = "0x6373636e", DOMAIN_CSCA_LEAF = "0x6373636c", DOMAIN_REVOC_KEY = "0x726b6579", DOMAIN_X509_ISSUER = "0x78353039" }
 assertions = ["Commitment X mismatch", "Commitment Y mismatch"]
 min_positive_tests = 4
@@ -276,38 +89,32 @@ min_negative_tests = 2
 
 [circuits.openac_core.module_show]
 source = "circuits/openac_core/src/show.nr"
-functions = ["compute_challenge_digest", "compute_link_tag", "assert_hash_eq", "verify_show"]
-# Only the show-phase ASCII domain string lives in-circuit. The scope-phase
-# Pedersen link tag uses input shape (commitment coords as the leading pair)
-# for separation rather than an ASCII tag, so SCOPE_DOMAIN was removed from
-# show.nr in 2026-04-26 cleanup. The "openac.scope.v2" entry below is kept
-# for cross-layer (Swift / mopro v2 verifier) parity and lives in show.nr's
-# header comment as a documentation anchor.
-domain_separators = [
-  { name = "show", value = "openac.show.v2", bytes = 14 },
-  { name = "scope", value = "openac.scope.v2", bytes = 15, in_circuit = false },
-]
-# challenge_digest = SHA256("openac.show.v2" || commitment_x(32) || commitment_y(32) || challenge(32) || epoch(4))
-# link_tag = pedersen_hash([commitment_x, commitment_y, link_scope, epoch_field])
-assertions = ["Hash mismatch", "Scoped link tag mismatch", "Unlinkable mode requires zero scope", "Unlinkable mode requires zero tag", "epoch_field does not match epoch bytes"]
+functions = ["compute_link_tag", "compute_link_tag_with_mode", "verify_show"]
+# v3.1 (2026-06-10): the in-circuit SHA256 challenge digest is RETIRED
+# (domain "openac.show.v2" no longer appears in-circuit). Freshness rides on
+# the pinned public nonce_hash — see show.nr header for the security
+# argument. The unified link tag is the only show-phase domain anchor:
+# link_tag = pedersen_hash([DOMAIN_LINK_TAG, credential_type, link_rand, link_scope, epoch])
+domain_constants = { DOMAIN_LINK_TAG = "0x6c746167" }
+assertions = ["Scoped link tag mismatch", "Unlinkable mode requires zero scope", "Unlinkable mode requires zero tag"]
 min_positive_tests = 4
-min_negative_tests = 1
+min_negative_tests = 3
 
 [circuits.openac_core.module_predicate]
 source = "circuits/openac_core/src/predicate.nr"
-functions = ["check_age_above", "check_bytes3_eq", "two_digit_year_to_four", "decode_domain", "age_from_attr", "sdjwt_predicate_check", "domain_suffix_match"]
+functions = ["check_age_above", "check_bytes3_eq", "two_digit_year_to_four", "decode_domain", "age_from_claims", "sdjwt_predicate_check", "domain_suffix_match"]
 assertions = ["Birth year cannot be after current year"]
 min_positive_tests = 4
 min_negative_tests = 1
 
 [circuits.openac_core.module_profile]
 source = "circuits/openac_core/src/profile.nr"
-functions = ["fields_to_bytes32", "derive_x509_link_rand", "derive_sdjwt_link_rand", "compute_link_challenge_digest", "compute_link_tag", "pack_passport_profile", "unpack_passport_profile", "pack_x509_domain", "unpack_x509_domain"]
-# Path A salts for per-credential link_rand derivation (ASCII tags) and
-# additional Pedersen domain anchors for the per-credential challenge digest
-# and link tag.
-domain_constants = { SALT_X509 = "0x78353039", SALT_SDJWT = "0x73646a77", CHALLENGE_DOMAIN = "0x63686c67", LINK_TAG_DOMAIN = "0x6c746167" }
-assertions = ["Packed X.509 domain length exceeds maximum"]
+functions = ["fields_to_bytes32", "derive_x509_link_rand", "derive_sdjwt_link_rand", "pack_passport_claims", "unpack_passport_claims", "pack_x509_domain", "unpack_x509_domain"]
+# Path A salts for per-credential link_rand derivation (ASCII tags). The v3
+# CHALLENGE_DOMAIN / LINK_TAG_DOMAIN digest constants were retired in v3.1
+# (link tag moved to module_show with DOMAIN_LINK_TAG; digest removed).
+domain_constants = { SALT_X509 = "0x78353039", SALT_SDJWT = "0x73646a77" }
+assertions = ["Packed X.509 domain length exceeds maximum", "Birth month must fit in one byte", "Birth day must fit in one byte"]
 min_positive_tests = 3
 min_negative_tests = 1
 
@@ -344,7 +151,7 @@ min_negative_tests = 2
 # ============================================================
 [circuits.passport_adapter]
 type = "bin"
-description = "Combined passport prepare (v3.1): DSC->SOD RSA verify + CSCA->DSC RSA chain + depth-8 Master List Merkle inclusion + depth-32 DSC revocation SMT + DG hash chain + Pedersen v3 commitment bound to enclave pk_digest"
+description = "Combined passport prepare (v3.1): DSC->SOD RSA verify + CSCA->DSC RSA chain + depth-8 Master List Merkle inclusion + depth-32 DSC revocation SMT + DG hash chain + arity-8 Pedersen commitment (commit_passport_v3_1, full-width SOD/DG1 hashes, pk_digest-bound)"
 source = "circuits/passport_adapter/src/main.nr"
 version = "v3.1"
 
@@ -423,108 +230,75 @@ sha256 = "v0.3.0"
 openac_core = "path"
 
 # ============================================================
-# Circuit: openac_show (v3 — Path A generic show with in-circuit ECDSA)
+# Circuit: openac_show (v3.1 — Path A passport show, digest-free)
 # ============================================================
 [circuits.openac_show]
 type = "bin"
-description = "Generic OpenAC show (v3): in-circuit ECDSA-P256 device binding + v3 commitment re-open + challenge binding + predicates"
+description = "OpenAC passport show (v3.1): in-circuit ECDSA-P256 device binding over pinned nonce_hash + arity-8 commitment re-open + unified link tag + predicates"
 source = "circuits/openac_show/src/main.nr"
-version = "v3"
+version = "v3.1"
 
 public_inputs = [
   "credential_type",
   "nonce_hash",
-  "link_mode", "link_scope", "epoch", "epoch_field",
+  "link_mode", "link_scope", "epoch",
   "current_year", "current_month", "current_day", "age_threshold",
   "disclose_nationality", "disclose_age",
   "out_commitment_x", "out_commitment_y",
-  "out_challenge_digest", "out_link_tag",
+  "out_link_tag",
   "out_is_older", "out_nationality",
 ]
 public_input_types = [
   "Field",
   "[u8; 32]",
-  "bool", "Field", "[u8; 4]", "Field",
+  "bool", "Field", "Field",
   "u32", "u32", "u32", "u32",
   "bool", "bool",
   "Field", "Field",
-  "[u8; 32]", "Field",
+  "Field",
   "bool", "[u8; 3]",
 ]
 
-# v3 adds `enclave_pk_x`, `enclave_pk_y`, `signature` as private witnesses so
-# the circuit can run `verify_device_binding` in-circuit against `nonce_hash`.
-# `pk_digest` derived from that ECDSA feeds into `commit_attributes_v3`.
-# Note (2026-04-17 Path A): `Age not disclosed ... / Nationality not disclosed
-# ...` assertions from v2 are intentionally removed — when a disclosure flag
-# is false, the corresponding output is unconstrained to prevent leakage.
-# `verify_show` (openac_core::show) handles hash + link-tag assertions.
-# Note (2026-04-28 P1-8): `credential_type` is PUBLIC and asserted equal to
-# DOMAIN_PASSPORT in-circuit -- verifiers can require passport-only semantics
-# from openac_show. Multi-credential flows live in composite_show.
+# v3.1 (2026-06-10, spec/upgrade-plan-v3.1.md):
+#   * `challenge` / `out_challenge_digest` / `epoch[u8;4]` / `epoch_field`
+#     REMOVED — freshness rides on the pinned public `nonce_hash`, which is
+#     also the ECDSA-P256 message of the in-circuit device binding.
+#   * Commitment opening is arity-8 `commit_passport_v3_1` with full-width
+#     SOD / DG1 hash halves; predicates come from the single packed `claims`
+#     Field (no separate birth/nationality witnesses to re-bind).
+#   * CRITICAL-2 (2026-06-10): undisclosed outputs are pinned to zero
+#     sentinels in-circuit.
 private_inputs = [
-  "attr_hash_hi", "attr_hash_lo", "link_rand",
+  "claims", "sod_hash_hi", "sod_hash_lo", "dg1_hash_hi", "dg1_hash_lo",
+  "link_rand",
   "enclave_pk_x", "enclave_pk_y", "signature",
-  "challenge",
-  "birth_year", "birth_month", "birth_day",
-  "nationality",
 ]
 private_input_types = [
-  "Field", "Field", "Field",
+  "Field", "Field", "Field", "Field", "Field",
+  "Field",
   "[u8; 32]", "[u8; 32]", "[u8; 64]",
-  "[u8; 32]",
-  "u32", "u32", "u32",
-  "[u8; 3]",
 ]
 
 assertions = [
   "openac_show only accepts DOMAIN_PASSPORT credentials",
   "Commitment X mismatch",
   "Commitment Y mismatch",
-  "Hash mismatch",
   "Scoped link tag mismatch",
   "Unlinkable mode requires zero scope",
   "Unlinkable mode requires zero tag",
   "Age predicate output mismatch",
   "Nationality output mismatch",
-  "birth_year not bound to commitment attr_hash",
-  "birth_month not bound to commitment attr_hash",
-  "birth_day not bound to commitment attr_hash",
-  "nationality[0] not bound to commitment attr_hash",
-  "nationality[1] not bound to commitment attr_hash",
-  "nationality[2] not bound to commitment attr_hash",
+  "out_is_older must be false when age not disclosed",
+  "out_nationality must be zero when nationality not disclosed",
 ]
 
-min_positive_tests = 4
-min_negative_tests = 4
+min_positive_tests = 6
+min_negative_tests = 8
 
 imports = { out_commitment_x = "passport_adapter", out_commitment_y = "passport_adapter" }
 
 [circuits.openac_show.dependencies]
 openac_core = "path"
-sha256 = "v0.3.0"
-
-# ============================================================
-# Circuit: device_binding
-# ============================================================
-[circuits.device_binding]
-type = "bin"
-description = "ECDSA P-256 device binding: verifies Secure Enclave nonce signature"
-source = "circuits/device_binding/src/main.nr"
-version = "v2"
-
-public_inputs = ["pub_key_x", "pub_key_y", "message_hash"]
-public_input_types = ["[u8; 32]", "[u8; 32]", "[u8; 32]"]
-
-private_inputs = ["signature"]
-private_input_types = ["[u8; 64]"]
-
-assertions = [
-  "Device binding ECDSA P-256 verification failed",
-]
-
-min_positive_tests = 1
-min_negative_tests = 1
 
 # ============================================================
 # Circuit: sdjwt_adapter (v3.2 — Path A SD-JWT prepare with inclusion proof)
@@ -776,13 +550,13 @@ sha256 = "v0.3.0"
 openac_core = "path"
 
 # ============================================================
-# Circuit: x509_show (v3 — Path A X.509 show)
+# Circuit: x509_show (v3.1 — Path A X.509 show, digest-free)
 # ============================================================
 [circuits.x509_show]
 type = "bin"
-description = "X.509 show (v3): in-circuit ECDSA-P256 device binding + v3 commitment re-open + domain predicate + scoped link tag"
+description = "X.509 show (v3.1): in-circuit ECDSA-P256 device binding over pinned nonce_hash + v3 commitment re-open + domain predicate + unified link tag"
 source = "circuits/x509_show/src/main.nr"
-version = "v3"
+version = "v3.1"
 
 gate_budget = 5000
 
@@ -791,14 +565,14 @@ public_inputs = [
   "nonce_hash",
   "target_domain_hash",
   "link_mode", "link_scope", "epoch",
-  "out_link_tag", "out_domain_match", "out_challenge_digest",
+  "out_link_tag", "out_domain_match",
 ]
 public_input_types = [
   "Field", "Field",
   "[u8; 32]",
   "Field",
   "bool", "Field", "Field",
-  "Field", "Field", "Field",
+  "Field", "Field",
 ]
 
 private_inputs = [
@@ -810,18 +584,17 @@ private_input_types = [
   "[u8; 32]", "[u8; 32]", "[u8; 64]",
 ]
 
-# 2026-04-28 P1-9: challenge digest now binds the credential commitment via
-# `compute_show_challenge_digest_v2`, and `link_mode` toggles unlinkable mode
-# (link_scope = out_link_tag = 0). This brings x509_show in line with
-# openac_core::show's transcript & link-mode semantics.
+# v3.1 (2026-06-10): `out_challenge_digest` REMOVED — freshness rides on the
+# pinned public nonce_hash (also the ECDSA device-binding message). Link tag
+# moved to the unified openac_core::show construction (credential_type-keyed).
 assertions = [
   "Commitment X mismatch",
   "Commitment Y mismatch",
   "Domain match predicate mismatch",
   "Domain match must be boolean (0 or 1)",
-  "Link tag mismatch",
+  "Scoped link tag mismatch",
   "Unlinkable mode requires zero scope",
-  "Challenge digest mismatch",
+  "Unlinkable mode requires zero tag",
 ]
 
 min_positive_tests = 4
@@ -833,13 +606,13 @@ imports = { in_commitment_x509_x = "jwt_x5c_adapter", in_commitment_x509_y = "jw
 openac_core = "path"
 
 # ============================================================
-# Circuit: composite_show (v3 — Path A passport + X.509 bundle show)
+# Circuit: composite_show (v3.1 — Path A passport + aux bundle show)
 # ============================================================
 [circuits.composite_show]
 type = "bin"
-description = "Composite show (v3): single ECDSA-P256 verify + re-open passport & X.509 commitments sharing the same pk_digest + age predicate + domain predicate + scoped link tag"
+description = "Composite show (v3.1): single ECDSA-P256 verify over pinned nonce_hash + re-open arity-8 passport & arity-5 aux commitments sharing the same pk_digest + age predicate + aux predicate + unified link tag"
 source = "circuits/composite_show/src/main.nr"
-version = "v3"
+version = "v3.1"
 
 gate_budget = 8000
 
@@ -852,7 +625,7 @@ public_inputs = [
   "current_year", "current_month", "current_day",
   "target_aux_hash",
   "link_mode", "link_scope", "epoch",
-  "out_link_tag", "out_is_older", "out_aux_predicate", "out_challenge_digest",
+  "out_link_tag", "out_is_older", "out_aux_predicate",
 ]
 public_input_types = [
   "Field", "Field",
@@ -863,23 +636,27 @@ public_input_types = [
   "Field", "Field", "Field",
   "Field",
   "bool", "Field", "Field",
-  "Field", "Field", "Field", "Field",
+  "Field", "Field", "Field",
 ]
 
 private_inputs = [
-  "p_attr_hi", "p_attr_lo", "link_rand_p",
+  "p_claims", "p_sod_hash_hi", "p_sod_hash_lo", "p_dg1_hash_hi", "p_dg1_hash_lo",
+  "link_rand_p",
   "a_attr_hi", "a_attr_lo",
   "enclave_pk_x", "enclave_pk_y", "signature",
 ]
 private_input_types = [
-  "Field", "Field", "Field",
+  "Field", "Field", "Field", "Field", "Field",
+  "Field",
   "Field", "Field",
   "[u8; 32]", "[u8; 32]", "[u8; 64]",
 ]
 
-# 2026-04-28 P1-9: challenge digest now folds BOTH commitments
-# (compute_composite_challenge_digest), and `link_mode` toggles unlinkable
-# mode the same way openac_core::show / x509_show do.
+# v3.1 (2026-06-10): `out_challenge_digest` REMOVED; passport opening is
+# arity-8 commit_passport_v3_1; the link tag is keyed on (DOMAIN_PASSPORT,
+# link_rand_p) via the unified construction — deliberately equal to
+# openac_show's tag for the same holder/scope/epoch (scoped linkability
+# recognises the holder across solo and bundle presentations).
 assertions = [
   "aux_domain must be DOMAIN_X509 or DOMAIN_SDJWT",
   "Commitment X mismatch",
@@ -888,12 +665,12 @@ assertions = [
   "out_is_older must be boolean (0 or 1)",
   "Aux predicate mismatch",
   "out_aux_predicate must be boolean (0 or 1)",
-  "Link tag mismatch",
+  "Scoped link tag mismatch",
   "Unlinkable mode requires zero scope",
-  "Challenge digest mismatch",
+  "Unlinkable mode requires zero tag",
 ]
 
-min_positive_tests = 2
+min_positive_tests = 3
 min_negative_tests = 8
 
 imports = { in_commitment_passport_x = "passport_adapter", in_commitment_passport_y = "passport_adapter", in_commitment_aux_x = "jwt_x5c_adapter", in_commitment_aux_y = "jwt_x5c_adapter" }
@@ -902,49 +679,15 @@ imports = { in_commitment_passport_x = "passport_adapter", in_commitment_passpor
 openac_core = "path"
 
 # ============================================================
-# Cross-Circuit Hash Chain (v1 flow)
+# Cross-Circuit Commitment Chain (v3.1 flow — Path A)
 # ============================================================
-[cross_circuit.v1_hash_chain]
-description = "SHA256-based hash chain linking 5 v1 circuits"
-
-[[cross_circuit.v1_hash_chain.links]]
-from = "passport_verifier"
-to = "data_integrity"
-via = "sod_hash"
-type = "[u8; 32]"
-
-[[cross_circuit.v1_hash_chain.links]]
-from = "data_integrity"
-to = "disclosure"
-via = "mrz_hash"
-type = "[u8; 32]"
-
-[[cross_circuit.v1_hash_chain.links]]
-from = "passport_verifier"
-to = "prepare_link"
-via = "sod_hash"
-type = "[u8; 32]"
-
-[[cross_circuit.v1_hash_chain.links]]
-from = "data_integrity"
-to = "prepare_link"
-via = "mrz_hash"
-type = "[u8; 32]"
-
-[[cross_circuit.v1_hash_chain.links]]
-from = "prepare_link"
-to = "show_link"
-via = "out_prepare_commitment"
-type = "[u8; 32]"
-
-# ============================================================
-# Cross-Circuit Commitment Chain (v3 flow — Path A)
-# ============================================================
-# passport_adapter v3 and openac_show v3 now share a v3 (arity-5) Pedersen
-# commitment that binds `pk_digest = pedersen_hash(enclave_pk)`. x509 /
-# composite flows share the same pk_digest across multiple credentials.
+# (The v1 SHA256 hash chain was retired with circuits-legacy/ on 2026-06-10.)
+# passport_adapter and openac_show / composite_show share the v3.1 arity-8
+# passport Pedersen commitment (`commit_passport_v3_1`, pk_digest-bound).
+# x509 / sdjwt aux commitments stay on arity-5 `commit_attributes_v3` and
+# share the same pk_digest across credentials.
 [cross_circuit.v3_commitment_chain]
-description = "Pedersen v3 (arity-5, pk_digest-bound) commitment chain linking Path A circuits"
+description = "Pedersen commitment chain linking Path A circuits (passport arity-8 v3.1; aux arity-5 v3)"
 
 [[cross_circuit.v3_commitment_chain.links]]
 from = "passport_adapter"
@@ -1015,19 +758,29 @@ type = "Field"
 # ============================================================
 [cross_layer.domain_separators]
 
+# v1 separators are only used by the legacy Rust verifier (openac.rs) for
+# previously-issued artifacts; the v1 circuits live in circuits-legacy/.
 [cross_layer.domain_separators.v1]
 prepare = "openac.preparev1"
 show = "openac.show.v1"
 scope = "openac.scope.v1"
 
-[cross_layer.domain_separators.v2]
+# v2 SHA256 digest domains RETIRED in v3.1 (2026-06-10) — no in-circuit
+# challenge digest exists anymore. Kept here only as a historical record so
+# the strings are never reused for a different construction.
+[cross_layer.domain_separators.v2_retired]
 show = "openac.show.v2"
 scope = "openac.scope.v2"
+
+# v3.1 show-phase anchor (in-circuit, openac_core::show)
+[cross_layer.domain_separators.v3_1]
+link_tag = "0x6c746167"  # ASCII "ltag" (DOMAIN_LINK_TAG)
 
 # Rust layer references (mopro-binding/src/openac.rs)
 [cross_layer.rust]
 source = "mopro-binding/src/openac.rs"
-domain_separators_version = "v1"  # Rust verifier currently targets v1
+domain_separators_version = "v1"  # legacy Rust verifier targets v1 artifacts
+v3_source = "mopro-binding/src/openac_v3.rs"  # v3.1: nonce_hash pinning, no digest
 
 # ============================================================
 # Performance Baselines (update after benchmarking)

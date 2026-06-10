@@ -20,26 +20,24 @@ Passport → MRZ OCR → NFC chip read → CSCA passive auth → OpenPassport No
 ## Project Structure
 
 ```
-circuits/                   # Noir workspace (Nargo.toml at root) — 14 production circuits
-├── passport_verifier/      # v1: RSA-SHA256 signature verification (DSC → SOD)
-├── data_integrity/         # v1: DG hash chain verification (SOD hash matching)
-├── disclosure/             # v1: Selective disclosure (nationality, age, name from MRZ)
-├── prepare_link/           # v1: OpenAC prepare-phase commitment (SHA256, offline)
-├── show_link/              # v1: OpenAC show-phase challenge binding (SHA256, online)
-├── device_binding/         # v2: Device binding circuit (Pedersen arity-4, deprecated)
-├── openac_core/            # v3: Shared Pedersen library (commit/show/predicate/profile/smt)
-├── passport_adapter/       # v3.1: Passport → OpenAC adapter (CSCA root + DSC SMT)
-├── openac_show/            # v3: Show phase with Pedersen + pk_digest
-├── sdjwt_adapter/          # v3: SD-JWT (ES256) → Pedersen commitment
+circuits/                   # Noir workspace (Nargo.toml at root) — 8 production circuits (v3.1)
+├── openac_core/            # v3.1: Shared Pedersen library (commit/show/predicate/profile/smt/merkle/base64)
+├── passport_adapter/       # v3.1: Passport prepare (CSCA root + DSC SMT + arity-8 commitment)
+├── openac_show/            # v3.1: Passport show (digest-free; nonce_hash freshness + unified link tag)
+├── sdjwt_adapter/          # v3.2: SD-JWT (ES256) → Pedersen commitment
 ├── jwt_x5c_adapter/        # v3.1: JWT x5c (RSA + JWT payload) → X.509 commitment
-├── x509_show/              # v3: X.509 show phase (commitment opening + ECDSA device binding)
-├── composite_show/         # v3: Multi-credential show (passport + X.509 OR SD-JWT)
+├── x509_show/              # v3.1: X.509 show (commitment opening + ECDSA device binding)
+├── composite_show/         # v3.1: Multi-credential show (passport + X.509 OR SD-JWT)
 ├── mdoc_adapter/           # v3: mDoc/mDL prepare adapter (Direction D, ES256 issuer)
 └── target/                 # Compiled circuit JSON artifacts
+circuits-legacy/            # RETIRED v1/v2 circuits (standalone workspace; built on demand
+│                           # only — nargo cannot nest workspaces, hence top-level):
+│                           #   passport_verifier, data_integrity, disclosure,
+│                           #   prepare_link, show_link, device_binding
 mopro-binding/              # Mobile prover integration via mopro
-├── src/openac.rs           # v1 SHA256 OpenAC verifier (Rust)
-├── src/openac_v2.rs        # v2 Pedersen OpenAC verifier (Rust)
-├── src/openac_v3.rs        # v3 Pedersen + pk_digest verifier (Rust)
+├── src/openac.rs           # v1 SHA256 OpenAC verifier (Rust, legacy artifacts only)
+├── src/openac_v2.rs        # v2 Pedersen OpenAC verifier (Rust, legacy)
+├── src/openac_v3.rs        # v3.1 Pedersen verifier (nonce_hash pinning, no digest)
 ├── src/noir.rs             # noir_rs prove/verify entry points
 └── test-vectors/noir/      # Compiled circuit JSONs for cargo tests
 benchmark/                  # Circuit benchmark & spec compliance suite
@@ -48,6 +46,7 @@ benchmark/                  # Circuit benchmark & spec compliance suite
 ├── scripts/                # Benchmark, lint, size analysis scripts
 └── reports/                # Generated reports (gitignored)
 spec/                       # Human-readable design docs
+├── upgrade-plan-v3.1.md    # v3.1 show-path unification plan (digest removal rationale)
 ├── x509-circuits.md        # X.509 / JWT-x5c circuit spec
 ├── x509-benchmark.md       # X.509 gate-count benchmarks
 └── x509-migration.md       # X.509 migration notes
@@ -65,8 +64,8 @@ scripts/                    # Project tooling
 
 - **Noir**: `nargo 1.0.0-beta.19` / `noirc 1.0.0-beta.19`
 - **Dependencies**:
-  - `noir_rsa v0.10.0` from `zkpassport/noir_rsa` (passport_verifier) — uses `u128` limbs, `RuntimeBigNum<18, 2048>`
-  - `sha256 v0.3.0` from `noir-lang/sha256` (data_integrity, disclosure) — `sha256::digest<N>(input: [u8; N]) -> [u8; 32]`
+  - `noir_rsa v0.10.0` from `zkpassport/noir_rsa` (passport_adapter, jwt_x5c_adapter) — uses `u128` limbs, `RuntimeBigNum<18, 2048>`
+  - `sha256 v0.3.0` from `noir-lang/sha256` (adapters) — `sha256::digest<N>(input: [u8; N]) -> [u8; 32]`
 
 ## Common Commands
 
@@ -138,7 +137,7 @@ Each circuit is graded by **bytes/gate** (artifact bytes ÷ ACIR gate count).
 | D | ≤ 100 | Bloated — review artifact structure |
 | F | > 100 | Critical — likely low gate count inflating ratio |
 
-Total artifact budget: ~2.3 MB across all 14 circuits. `passport_adapter` is the largest single artifact (~1 MB). For exact per-circuit sizes, run `make bench-size` or check `benchmark/expected/baseline.toml`.
+Total artifact size: **~15.9 MB** across the 7 production bin circuits (2026-06-10). `mdoc_adapter` dominates (~10.1 MB), followed by `jwt_x5c_adapter` (~3.2 MB) and `passport_adapter` (~1.3 MB); the three show circuits are <150 KB each. For exact per-circuit sizes, run `make bench-size` or check `benchmark/expected/baseline.toml`.
 
 ## Benchmark
 
@@ -163,10 +162,10 @@ bash benchmark/scripts/circuit-lint.sh         # 9-dimension quality lint
 
 | Version | Commitment | Arity | Key feature | Circuits |
 |---------|-----------|-------|-------------|----------|
-| v1 | SHA256 | n/a | Hash-based prepare/show links | passport_verifier, data_integrity, disclosure, prepare_link, show_link |
-| v2 | Pedersen | 4 | Pedersen commitment without device binding (deprecated 2026-04-17) | device_binding |
-| v3 | Pedersen | 5 | `pk_digest` baked into commitment via `commit_attributes_v3()` — closes revocation bypass + enables in-circuit device binding | openac_core, openac_show, sdjwt_adapter, mdoc_adapter, x509_show, composite_show |
-| v3.1 | Pedersen | 5 | v3 + trust-anchor model (CSCA root / DSC SMT) and gate-budget optimizations | passport_adapter, jwt_x5c_adapter |
+| v1 | SHA256 | n/a | Hash-based prepare/show links — **RETIRED 2026-06-10** to `circuits-legacy/` | passport_verifier, data_integrity, disclosure, prepare_link, show_link |
+| v2 | Pedersen | 4 | Out-of-band device binding — **RETIRED 2026-06-10** to `circuits-legacy/` | device_binding |
+| v3 | Pedersen | 5 | `pk_digest` baked into commitment via `commit_attributes_v3()` — still used for non-passport (aux) commitments | sdjwt_adapter, mdoc_adapter aux layer |
+| v3.1 | Pedersen | 5 / 8 | **Show-path unification** (2026-06-10, `spec/upgrade-plan-v3.1.md`): in-circuit challenge digest RETIRED (freshness = pinned public `nonce_hash`, also the ECDSA device-binding message); unified link tag `pedersen([DOMAIN_LINK_TAG, credential_type, link_rand, scope, epoch])`; passport commitment is arity-8 `commit_passport_v3_1()` with full-width SOD/DG1 hashes (no truncation); epoch is a single Field. Plus trust-anchor model (CSCA root / DSC SMT). | openac_core, passport_adapter, openac_show, x509_show, composite_show, jwt_x5c_adapter |
 
 ## CI / CD
 
@@ -195,56 +194,34 @@ Release workflow: compile circuits → build xcframework on macOS → zip + uplo
 
 ## Circuit Details
 
-### passport_verifier
-Verifies RSA-2048 + SHA-256 (PKCS#1 v1.5) signature on a passport's SOD, proving it was signed by a valid DSC.
-- **Public inputs**: `modulus_limbs` (DSC public key — verifier checks against trusted CSCA list)
-- **Private inputs**: `sod_hash`, `signature_limbs`, `redc_limbs`, `exponent`
-- Uses `noir_rsa` for RSA BigNum operations (18 limbs for 2048-bit values)
+### passport_adapter (v3.1 Prepare Phase — combined, offline once)
+Single prepare circuit replacing the old v1 trio: RSA-2048 (PKCS#1 v1.5) DSC→SOD verify + CSCA→DSC chain (depth-8 Master List Merkle) + depth-32 DSC revocation SMT + DG hash chain + arity-8 Pedersen commitment.
+- **Public inputs**: `csca_root`, `dsc_smt_root`, `exponent` (=65537), `out_commitment_x/y`
+- Commitment: `commit_passport_v3_1(claims, sod_hash_hi/lo, dg1_hash_hi/lo, pk_digest, link_rand)` — full-width hashes, no truncation; `claims` = 9-byte packed birth date + nationality
+- **SOD hash format (hard constraint)**: `sod_hash = SHA256(dg0_hash || dg1_hash || dg2_hash || dg3_hash)` with **zero-padding** for unused DG slots (each slot is 32 bytes regardless of `dg_count`). This is **NOT** the ICAO 9303 LDS Security Object's TLV-encoded `signedAttrs` structure. The iOS app pipeline must normalize NFC chip data into this raw-concatenation layout before feeding the circuit.
 
-### data_integrity
-Verifies that passport data groups (DG1–DG4) hash correctly into the SOD.
-- **Public inputs**: `expected_dg_hashes`, `sod_hash`
-- **Private inputs**: `dg_count`, `dg_contents`, `dg_lengths`
-- Constants: `MAX_DG_COUNT = 4`, `MAX_DG_SIZE = 512` bytes
-- Uses `sha256::digest`
-- **SOD hash format (hard constraint)**: `sod_hash = SHA256(dg0_hash || dg1_hash || dg2_hash || dg3_hash)` with **zero-padding** for unused DG slots (each slot is 32 bytes regardless of `dg_count`). This is **NOT** the ICAO 9303 LDS Security Object's TLV-encoded `signedAttrs` structure. The iOS app pipeline must therefore normalize NFC chip data into this raw-concatenation layout before feeding the circuit; passport_verifier consumes the same `sod_hash`.
+### openac_show (v3.1 Show Phase — mobile hot path, per presentation)
+- **No in-circuit challenge digest** (v3.1): freshness/replay protection = the public `nonce_hash`, which the verifier pins against the nonce it issued AND which is the ECDSA-P256 message of the in-circuit device binding. UltraHonk's public-input binding makes a separate transcript digest redundant — removing it cut openac_show from 1,802 to 647 ACIR opcodes and deleted 2 SHA256 blocks from every presentation.
+- Re-opens the arity-8 passport commitment; predicates (age ≥ threshold, nationality) evaluate directly from the committed `claims` Field.
+- Undisclosed outputs are pinned to zero sentinels in-circuit (CRITICAL-2).
+- Link tag (all show circuits): `pedersen_hash([DOMAIN_LINK_TAG, credential_type, link_rand, link_scope, epoch])`; `link_mode=false` enforces zero scope + zero tag.
 
-### disclosure
-Selective disclosure over MRZ data — proves nationality, age ≥ threshold, or name without revealing the full MRZ.
-- **Public inputs**: `mrz_hash`, `disclose_nationality`, `disclose_older_than`, `disclose_name`, `age_threshold`, `current_date`, `out_nationality`, `out_name`, `out_is_older`
-- **Private inputs**: `mrz_data` (88-byte TD3 MRZ)
-- MRZ offsets: nationality at line2[10..12], DOB at line2[13..18] (YYMMDD), name at line1[5..43]
-- Uses `sha256::digest` to bind MRZ to data_integrity proof chain
+### x509_show / composite_show (v3.1)
+Same digest-free pattern: ECDSA-P256 over pinned `nonce_hash` + commitment re-open + predicate + unified link tag. composite_show opens the arity-8 passport commitment AND an arity-5 aux commitment (X.509 or SD-JWT) under one shared `pk_digest`; its link tag is keyed on `(DOMAIN_PASSPORT, link_rand_p)` so a scoped verifier recognises the holder across solo and bundle presentations.
 
-### prepare_link (OpenAC Prepare Phase)
-Computes a SHA256-based commitment binding sod_hash, mrz_hash, and link randomness. Run offline, once per credential session.
-- **Public inputs**: `out_prepare_commitment`
-- **Private inputs**: `sod_hash`, `mrz_hash`, `link_rand`
-- Commitment: `SHA256("openac.preparev1" || sod_hash || mrz_hash || link_rand)`
-- Uses `sha256::digest`
-
-### show_link (OpenAC Show Phase)
-Binds a verifier challenge to the prepare commitment and optionally computes a scoped link tag. Run online, per presentation.
-- **Public inputs**: `link_mode`, `link_scope`, `epoch`, `out_prepare_commitment`, `out_challenge_digest`, `out_link_tag`
-- **Private inputs**: `sod_hash`, `mrz_hash`, `link_rand`, `challenge`
-- Challenge digest: `SHA256("openac.show.v1" || challenge || prepare_commitment || epoch)`
-- Scoped link tag: `SHA256("openac.scope.v1" || prepare_commitment || link_scope || epoch)`
-- Unlinkable mode: `link_mode=false` → enforces zero link_scope and zero link_tag
-- Uses `sha256::digest`
-
-### OpenAC Flow (v1 5-circuit composition)
+### OpenAC Flow (v3.1 composition)
 ```
-passport_verifier ──(sod_hash)──► prepare_link ──(prepare_commitment)──► show_link
-data_integrity ──(mrz_hash)──┘                                              │
-       └──(mrz_hash)──► disclosure ◄── (challenge binding via main_with_challenge)
+passport_adapter ──(out_commitment_x/y)──► openac_show        (passport-only presentation)
+                └─(out_commitment_x/y)──► composite_show ◄──(aux commitment)── jwt_x5c_adapter / sdjwt_adapter
+jwt_x5c_adapter ──(out_commitment_x/y)──► x509_show           (X.509-only presentation)
 ```
-- **Paper reference**: OpenAC (zkID Team @ PSE, Nov 2025) — see `openAC.md` for full mapping
-- **Design (v1)**: Hash-based commitment (SHA256) instead of paper's Pedersen — pragmatic choice for Noir/mopro backend. v3 switched to true Pedersen with pk_digest binding.
-- **Device binding**: v2 was out-of-band ECDSA (deprecated). v3 binds `pk_digest` into the commitment in-circuit.
-- **Domain separation** (all consistent across Noir / Rust / Swift):
-  - v1 hash-based: `openac.preparev1`, `openac.show.v1`, `openac.scope.v1`
-  - v1 disclosure challenge: `openac.disclosure.v1` (distinct from `openac.show.v1` — different preimage layout: `mrz_hash` vs `prepare_commitment`)
-  - v2/v3 Pedersen: `openac.show.v2`, `openac.scope.v2` + per-credential `DOMAIN_PASSPORT` / `DOMAIN_X509` / `DOMAIN_SDJWT` / `DOMAIN_MDL`
+- **Paper reference**: OpenAC (zkID Team @ PSE, Nov 2025) — see `openAC.md`; v3.1 design rationale in `spec/upgrade-plan-v3.1.md`
+- **Device binding**: in-circuit ECDSA-P256 over `nonce_hash`; `pk_digest` bound inside every commitment (Path A)
+- **Domain separation** (Noir / Rust / Swift consistent):
+  - v3.1 show-phase: `DOMAIN_LINK_TAG` (`0x6c746167`, ASCII "ltag") — the ONLY in-circuit show anchor; the v2 SHA256 digest domains (`openac.show.v2` / `openac.scope.v2`) are RETIRED and must not be reused
+  - Per-credential: `DOMAIN_PASSPORT` / `DOMAIN_X509` / `DOMAIN_SDJWT` / `DOMAIN_MDL` + `SALT_X509` / `SALT_SDJWT` link_rand derivation
+  - v1 hash domains (`openac.preparev1`, `openac.show.v1`, `openac.scope.v1`, `openac.disclosure.v1`) only live on in `mopro-binding/src/openac.rs` for legacy artifacts
+- **Legacy (circuits-legacy/)**: the v1 5-circuit composition (passport_verifier → prepare_link → show_link + data_integrity + disclosure) and v2 device_binding are retired; build on demand with `cd circuits-legacy && nargo compile --workspace`
 
 ## Conventions
 

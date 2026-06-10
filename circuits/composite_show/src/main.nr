@@ -1,48 +1,43 @@
 use openac_core::commit::{
-    assert_commitment_eq, commit_attributes_v3, DOMAIN_PASSPORT, DOMAIN_SDJWT, DOMAIN_X509,
+    assert_commitment_eq, commit_attributes_v3, commit_passport_v3_1, DOMAIN_PASSPORT, DOMAIN_SDJWT,
+    DOMAIN_X509,
 };
 use openac_core::device::verify_device_binding;
-use openac_core::predicate::{age_from_attr, sdjwt_predicate_check};
-use openac_core::profile::{
-    compute_composite_challenge_digest, compute_link_tag_with_mode, derive_sdjwt_link_rand,
-    derive_x509_link_rand,
-};
+use openac_core::predicate::{age_from_claims, sdjwt_predicate_check};
+use openac_core::profile::{derive_sdjwt_link_rand, derive_x509_link_rand};
+use openac_core::show::verify_show;
 
-// Composite OpenAC Show Circuit (Path A, v1)
+// Composite OpenAC Show Circuit (Path A, v3.1)
 //
-// Spec: spec/x509-circuits.md section 7.
+// Spec: spec/x509-circuits.md section 7 + spec/upgrade-plan-v3.1.md.
 //
-// Proves the prover holds two Pedersen v3 commitments -- one passport and one
-// aux credential (X.509 OR SD-JWT, controlled by the public `aux_domain`) --
-// both bound to the SAME Secure Enclave key (pk_digest). The pair therefore
-// belongs to one device and can be presented together without revealing
-// contents.
+// Proves the prover holds two Pedersen commitments -- one passport (arity-8
+// v3.1) and one aux credential (X.509 OR SD-JWT, arity-5 v3, controlled by
+// the public `aux_domain`) -- both bound to the SAME Secure Enclave key
+// (pk_digest). The pair therefore belongs to one device and can be presented
+// together without revealing contents.
 //
-// Responsibilities (per spec sec 7):
+// v3.1 changes (2026-06-10):
+//   * `out_challenge_digest` REMOVED -- freshness rides on the pinned public
+//     `nonce_hash` (ECDSA message of the device binding); see
+//     openac_core::show header for the full argument.
+//   * Passport commitment opening is arity-8 `commit_passport_v3_1`
+//     (full-width SOD / DG1 hashes + single packed claims Field).
+//   * Link tag keyed on (DOMAIN_PASSPORT, link_rand_p) via the unified
+//     `verify_show`. NOTE: this deliberately matches openac_show's tag for
+//     the same holder/scope/epoch -- a scoped verifier recognises the same
+//     passport holder whether they present alone or as a bundle, which is
+//     exactly what scoped linkability promises.
+//
+// Responsibilities:
 //   1. Run a single ECDSA-P256 verification over `nonce_hash` to derive
 //      pk_digest (openac_core::device).
 //   2. Derive the aux link randomness from link_rand_p via the shared helper
-//      keyed on `aux_domain` -- SALT_X509 for X.509, SALT_SDJWT for SD-JWT --
-//      so we never fork the derivation rule.
+//      keyed on `aux_domain` -- SALT_X509 for X.509, SALT_SDJWT for SD-JWT.
 //   3. Re-open both commitments with the shared pk_digest.
-//   4. Emit two boolean predicates from openac_core::predicate:
-//        * out_is_older: age_from_attr(passport attrs vs. current date) >=
-//          age_threshold.
-//        * out_aux_predicate: pedersen_hash([a_attr_hi, a_attr_lo]) ==
-//          target_aux_hash. (Spec overloads this as "opened aux attr hash"
-//          regardless of credential flavor.)
-//   5. Publish a scoped link tag (link_scope, epoch are public per spec) keyed
-//      on link_rand_p so the verifier can recognise the bundle under that
-//      scope/epoch without linking to other scopes.
-//   6. Publish a challenge digest binding `nonce_hash` to the presentation.
-//
-// Issue P1-9 (2026-04-28):
-//   * Challenge digest now folds BOTH commitments via
-//     compute_composite_challenge_digest. Without this, a presentation could
-//     be replayed against a different (passport, aux) bundle that shares
-//     the same link_rand_p / nonce.
-//   * Added `link_mode` public input. Unlinkable mode forces link_scope == 0
-//     and out_link_tag == 0 (mirrors openac_core::show + x509_show).
+//   4. Emit two boolean predicates: out_is_older (age_from_claims) and
+//      out_aux_predicate (opened aux attr hash equality).
+//   5. Publish a scoped link tag (unlinkable mode pins zeros in-circuit).
 
 fn field_to_u32(f: Field) -> u32 {
     // Range-check the threshold/date fields fit in 32 bits and decode LE.
@@ -70,8 +65,11 @@ fn main(
     link_scope: pub Field,
     epoch: pub Field,
     // === PRIVATE ===
-    p_attr_hi: Field,
-    p_attr_lo: Field,
+    p_claims: Field,
+    p_sod_hash_hi: Field,
+    p_sod_hash_lo: Field,
+    p_dg1_hash_hi: Field,
+    p_dg1_hash_lo: Field,
     link_rand_p: Field,
     a_attr_hi: Field,
     a_attr_lo: Field,
@@ -82,7 +80,6 @@ fn main(
     out_link_tag: pub Field,
     out_is_older: pub Field,
     out_aux_predicate: pub Field,
-    out_challenge_digest: pub Field,
 ) {
     // aux_domain must be one of the supported credential tags.
     let is_x509 = aux_domain == DOMAIN_X509;
@@ -99,10 +96,12 @@ fn main(
     let link_rand_a = if is_x509 { link_rand_x } else { link_rand_s };
 
     // 3. Re-open both commitments with the SAME pk_digest.
-    let c_p = commit_attributes_v3(
-        DOMAIN_PASSPORT,
-        p_attr_hi,
-        p_attr_lo,
+    let c_p = commit_passport_v3_1(
+        p_claims,
+        p_sod_hash_hi,
+        p_sod_hash_lo,
+        p_dg1_hash_hi,
+        p_dg1_hash_lo,
         pk_digest,
         link_rand_p,
     );
@@ -116,9 +115,8 @@ fn main(
     let current_year_u32 = field_to_u32(current_year);
     let current_month_u32 = field_to_u32(current_month);
     let current_day_u32 = field_to_u32(current_day);
-    let expected_is_older = age_from_attr(
-        p_attr_hi,
-        p_attr_lo,
+    let expected_is_older = age_from_claims(
+        p_claims,
         current_year_u32,
         current_month_u32,
         current_day_u32,
@@ -134,32 +132,25 @@ fn main(
         "out_aux_predicate must be boolean (0 or 1)",
     );
 
-    // 5. Link tag keyed on link_rand_p (root) under the public (scope, epoch).
-    //    Issue P1-9: explicit unlinkable mode -- callers cannot smuggle a tag
-    //    while pretending to be unlinkable.
-    if !link_mode {
-        assert(link_scope == 0, "Unlinkable mode requires zero scope");
-    }
-    let expected_link_tag = compute_link_tag_with_mode(link_rand_p, link_scope, epoch, link_mode);
-    assert(out_link_tag == expected_link_tag, "Link tag mismatch");
-
-    // 6. Challenge digest binds the verifier nonce to this presentation.
-    //    Issue P1-9: also fold BOTH commitments so the digest cannot be
-    //    replayed against a different (passport, aux) bundle.
-    let expected_challenge_digest = compute_composite_challenge_digest(
-        nonce_hash,
-        in_commitment_passport_x,
-        in_commitment_passport_y,
-        in_commitment_aux_x,
-        in_commitment_aux_y,
+    // 5. Scoped link tag keyed on the root credential (passport). Unlinkable
+    //    mode pins scope and tag to zero in-circuit.
+    verify_show(
+        DOMAIN_PASSPORT,
         link_rand_p,
+        link_mode,
+        link_scope,
+        epoch,
+        out_link_tag,
     );
-    assert(out_challenge_digest == expected_challenge_digest, "Challenge digest mismatch");
 }
 
 // ============================================================
 // Tests
 // ============================================================
+
+use openac_core::commit::hash_to_fields;
+use openac_core::profile::pack_passport_claims;
+use openac_core::show::compute_link_tag;
 
 fn test_pub_key_x() -> [u8; 32] {
     [
@@ -195,22 +186,14 @@ fn test_message_hash() -> [u8; 32] {
     ]
 }
 
-// Build a packed passport profile (attr_hi, attr_lo) for a known birth date.
-// Must stay in sync with openac_core::profile::pack_passport_profile.
-fn make_passport_attrs(birth_year: u32) -> (Field, Field) {
-    openac_core::profile::pack_passport_profile(
-        [0xAA; 32],
-        [0xBB; 32],
-        birth_year,
-        1,
-        1,
-        [84, 87, 78],
-    )
+fn test_passport_fingerprints() -> (Field, Field, Field, Field) {
+    let (sod_hi, sod_lo) = hash_to_fields([0xAA; 32]);
+    let (dg1_hi, dg1_lo) = hash_to_fields([0xBB; 32]);
+    (sod_hi, sod_lo, dg1_hi, dg1_lo)
 }
 
 struct CompositeFixture {
-    p_attr_hi: Field,
-    p_attr_lo: Field,
+    p_claims: Field,
     a_attr_hi: Field,
     a_attr_lo: Field,
     link_rand_p: Field,
@@ -222,11 +205,10 @@ struct CompositeFixture {
     c_a_y: Field,
     target_aux_hash: Field,
     link_tag_linkable: Field,
-    challenge_digest: Field,
 }
 
 fn make_fixture(aux_domain: Field, birth_year: u32) -> CompositeFixture {
-    let (p_attr_hi, p_attr_lo) = make_passport_attrs(birth_year);
+    let p_claims = pack_passport_claims(birth_year, 1, 1, [84, 87, 78]);
     let a_attr_hi: Field = 11;
     let a_attr_lo: Field = 22;
     let link_rand_p: Field = 777;
@@ -244,28 +226,22 @@ fn make_fixture(aux_domain: Field, birth_year: u32) -> CompositeFixture {
     } else {
         derive_sdjwt_link_rand(link_rand_p)
     };
-    let c_p = commit_attributes_v3(
-        DOMAIN_PASSPORT,
-        p_attr_hi,
-        p_attr_lo,
+    let (sod_hi, sod_lo, dg1_hi, dg1_lo) = test_passport_fingerprints();
+    let c_p = commit_passport_v3_1(
+        p_claims,
+        sod_hi,
+        sod_lo,
+        dg1_hi,
+        dg1_lo,
         pk_digest,
         link_rand_p,
     );
     let c_a = commit_attributes_v3(aux_domain, a_attr_hi, a_attr_lo, pk_digest, link_rand_a);
     let target_aux_hash = openac_core::predicate::decode_domain(a_attr_hi, a_attr_lo);
-    let link_tag_linkable = compute_link_tag_with_mode(link_rand_p, link_scope, epoch, true);
-    let challenge_digest = compute_composite_challenge_digest(
-        test_message_hash(),
-        c_p.x,
-        c_p.y,
-        c_a.x,
-        c_a.y,
-        link_rand_p,
-    );
+    let link_tag_linkable = compute_link_tag(DOMAIN_PASSPORT, link_rand_p, link_scope, epoch);
 
     CompositeFixture {
-        p_attr_hi,
-        p_attr_lo,
+        p_claims,
         a_attr_hi,
         a_attr_lo,
         link_rand_p,
@@ -277,107 +253,165 @@ fn make_fixture(aux_domain: Field, birth_year: u32) -> CompositeFixture {
         c_a_y: c_a.y,
         target_aux_hash,
         link_tag_linkable,
-        challenge_digest,
     }
 }
 
-#[test]
-fn test_composite_valid_x509() {
-    let f = make_fixture(DOMAIN_X509, 2000);
+/// Forward a fixture into main(), exposing the inputs tests want to vary.
+fn invoke_main(
+    f: CompositeFixture,
+    aux_domain: Field,
+    nonce_hash: [u8; 32],
+    age_threshold: Field,
+    current_year: Field,
+    current_month: Field,
+    current_day: Field,
+    target_aux_hash: Field,
+    link_mode: bool,
+    link_scope: Field,
+    epoch: Field,
+    p_claims: Field,
+    out_link_tag: Field,
+    out_is_older: Field,
+    out_aux_predicate: Field,
+) {
+    let (sod_hi, sod_lo, dg1_hi, dg1_lo) = test_passport_fingerprints();
     main(
         f.c_p_x,
         f.c_p_y,
         f.c_a_x,
         f.c_a_y,
+        aux_domain,
+        nonce_hash,
+        age_threshold,
+        current_year,
+        current_month,
+        current_day,
+        target_aux_hash,
+        link_mode,
+        link_scope,
+        epoch,
+        p_claims,
+        sod_hi,
+        sod_lo,
+        dg1_hi,
+        dg1_lo,
+        f.link_rand_p,
+        f.a_attr_hi,
+        f.a_attr_lo,
+        test_pub_key_x(),
+        test_pub_key_y(),
+        test_signature(),
+        out_link_tag,
+        out_is_older,
+        out_aux_predicate,
+    );
+}
+
+#[test]
+fn test_composite_valid_x509() {
+    let f = make_fixture(DOMAIN_X509, 2000);
+    let claims = f.p_claims;
+    let tag = f.link_tag_linkable;
+    let scope = f.link_scope;
+    let epoch = f.epoch;
+    let target = f.target_aux_hash;
+    invoke_main(
+        f,
         DOMAIN_X509,
         test_message_hash(),
         18,
         2026,
         4,
         18,
-        f.target_aux_hash,
+        target,
         true,
-        f.link_scope,
-        f.epoch,
-        f.p_attr_hi,
-        f.p_attr_lo,
-        f.link_rand_p,
-        f.a_attr_hi,
-        f.a_attr_lo,
-        test_pub_key_x(),
-        test_pub_key_y(),
-        test_signature(),
-        f.link_tag_linkable,
+        scope,
+        epoch,
+        claims,
+        tag,
         1,
         1,
-        f.challenge_digest,
     );
 }
 
 #[test]
 fn test_composite_valid_sdjwt() {
     let f = make_fixture(DOMAIN_SDJWT, 2000);
-    main(
-        f.c_p_x,
-        f.c_p_y,
-        f.c_a_x,
-        f.c_a_y,
+    let claims = f.p_claims;
+    let tag = f.link_tag_linkable;
+    let scope = f.link_scope;
+    let epoch = f.epoch;
+    let target = f.target_aux_hash;
+    invoke_main(
+        f,
         DOMAIN_SDJWT,
         test_message_hash(),
         18,
         2026,
         4,
         18,
-        f.target_aux_hash,
+        target,
         true,
-        f.link_scope,
-        f.epoch,
-        f.p_attr_hi,
-        f.p_attr_lo,
-        f.link_rand_p,
-        f.a_attr_hi,
-        f.a_attr_lo,
-        test_pub_key_x(),
-        test_pub_key_y(),
-        test_signature(),
-        f.link_tag_linkable,
+        scope,
+        epoch,
+        claims,
+        tag,
         1,
         1,
-        f.challenge_digest,
+    );
+}
+
+#[test]
+fn test_composite_valid_unlinkable() {
+    // v3.1: unlinkable mode pins scope and tag to zero in-circuit.
+    let f = make_fixture(DOMAIN_X509, 2000);
+    let claims = f.p_claims;
+    let epoch = f.epoch;
+    let target = f.target_aux_hash;
+    invoke_main(
+        f,
+        DOMAIN_X509,
+        test_message_hash(),
+        18,
+        2026,
+        4,
+        18,
+        target,
+        false,
+        0,
+        epoch,
+        claims,
+        0,
+        1,
+        1,
     );
 }
 
 #[test(should_fail)]
 fn test_invalid_aux_domain() {
     let f = make_fixture(DOMAIN_X509, 2000);
-    // DOMAIN_MDL (0x04) is not accepted by composite_show v1.
-    main(
-        f.c_p_x,
-        f.c_p_y,
-        f.c_a_x,
-        f.c_a_y,
+    let claims = f.p_claims;
+    let tag = f.link_tag_linkable;
+    let scope = f.link_scope;
+    let epoch = f.epoch;
+    let target = f.target_aux_hash;
+    // DOMAIN_MDL (0x04) is not accepted by composite_show.
+    invoke_main(
+        f,
         0x04,
         test_message_hash(),
         18,
         2026,
         4,
         18,
-        f.target_aux_hash,
+        target,
         true,
-        f.link_scope,
-        f.epoch,
-        f.p_attr_hi,
-        f.p_attr_lo,
-        f.link_rand_p,
-        f.a_attr_hi,
-        f.a_attr_lo,
-        test_pub_key_x(),
-        test_pub_key_y(),
-        test_signature(),
-        f.link_tag_linkable,
+        scope,
+        epoch,
+        claims,
+        tag,
         1,
         1,
-        f.challenge_digest,
     );
 }
 
@@ -390,7 +424,7 @@ fn test_mismatched_pk_digest() {
     let link_rand_p: Field = 777;
     let link_scope: Field = 100;
     let epoch: Field = 2026;
-    let (p_attr_hi, p_attr_lo) = make_passport_attrs(2000);
+    let p_claims = pack_passport_claims(2000, 1, 1, [84, 87, 78]);
 
     let pk_digest_real = verify_device_binding(
         test_pub_key_x(),
@@ -401,10 +435,13 @@ fn test_mismatched_pk_digest() {
     let fake_pk_digest: Field = pk_digest_real + 1;
     let link_rand_x = derive_x509_link_rand(link_rand_p);
 
-    let c_p = commit_attributes_v3(
-        DOMAIN_PASSPORT,
-        p_attr_hi,
-        p_attr_lo,
+    let (sod_hi, sod_lo, dg1_hi, dg1_lo) = test_passport_fingerprints();
+    let c_p = commit_passport_v3_1(
+        p_claims,
+        sod_hi,
+        sod_lo,
+        dg1_hi,
+        dg1_lo,
         fake_pk_digest,
         link_rand_p,
     );
@@ -416,15 +453,7 @@ fn test_mismatched_pk_digest() {
         link_rand_x,
     );
     let target_aux_hash = openac_core::predicate::decode_domain(a_attr_hi, a_attr_lo);
-    let link_tag = compute_link_tag_with_mode(link_rand_p, link_scope, epoch, true);
-    let challenge_digest = compute_composite_challenge_digest(
-        test_message_hash(),
-        c_p.x,
-        c_p.y,
-        c_a.x,
-        c_a.y,
-        link_rand_p,
-    );
+    let link_tag = compute_link_tag(DOMAIN_PASSPORT, link_rand_p, link_scope, epoch);
 
     main(
         c_p.x,
@@ -441,8 +470,11 @@ fn test_mismatched_pk_digest() {
         true,
         link_scope,
         epoch,
-        p_attr_hi,
-        p_attr_lo,
+        p_claims,
+        sod_hi,
+        sod_lo,
+        dg1_hi,
+        dg1_lo,
         link_rand_p,
         a_attr_hi,
         a_attr_lo,
@@ -452,73 +484,62 @@ fn test_mismatched_pk_digest() {
         link_tag,
         1,
         1,
-        challenge_digest,
     );
 }
 
 #[test(should_fail)]
 fn test_wrong_passport_commitment() {
-    let f = make_fixture(DOMAIN_X509, 2000);
-    main(
-        f.c_p_x + 1,
-        f.c_p_y,
-        f.c_a_x,
-        f.c_a_y,
+    let mut f = make_fixture(DOMAIN_X509, 2000);
+    f.c_p_x += 1;
+    let claims = f.p_claims;
+    let tag = f.link_tag_linkable;
+    let scope = f.link_scope;
+    let epoch = f.epoch;
+    let target = f.target_aux_hash;
+    invoke_main(
+        f,
         DOMAIN_X509,
         test_message_hash(),
         18,
         2026,
         4,
         18,
-        f.target_aux_hash,
+        target,
         true,
-        f.link_scope,
-        f.epoch,
-        f.p_attr_hi,
-        f.p_attr_lo,
-        f.link_rand_p,
-        f.a_attr_hi,
-        f.a_attr_lo,
-        test_pub_key_x(),
-        test_pub_key_y(),
-        test_signature(),
-        f.link_tag_linkable,
+        scope,
+        epoch,
+        claims,
+        tag,
         1,
         1,
-        f.challenge_digest,
     );
 }
 
 #[test(should_fail)]
 fn test_wrong_aux_commitment() {
-    let f = make_fixture(DOMAIN_X509, 2000);
-    main(
-        f.c_p_x,
-        f.c_p_y,
-        f.c_a_x,
-        f.c_a_y + 1,
+    let mut f = make_fixture(DOMAIN_X509, 2000);
+    f.c_a_y += 1;
+    let claims = f.p_claims;
+    let tag = f.link_tag_linkable;
+    let scope = f.link_scope;
+    let epoch = f.epoch;
+    let target = f.target_aux_hash;
+    invoke_main(
+        f,
         DOMAIN_X509,
         test_message_hash(),
         18,
         2026,
         4,
         18,
-        f.target_aux_hash,
+        target,
         true,
-        f.link_scope,
-        f.epoch,
-        f.p_attr_hi,
-        f.p_attr_lo,
-        f.link_rand_p,
-        f.a_attr_hi,
-        f.a_attr_lo,
-        test_pub_key_x(),
-        test_pub_key_y(),
-        test_signature(),
-        f.link_tag_linkable,
+        scope,
+        epoch,
+        claims,
+        tag,
         1,
         1,
-        f.challenge_digest,
     );
 }
 
@@ -527,33 +548,27 @@ fn test_wrong_epoch_breaks_link_tag() {
     // Bumping the epoch in the public input without updating out_link_tag
     // must be rejected.
     let f = make_fixture(DOMAIN_X509, 2000);
-    main(
-        f.c_p_x,
-        f.c_p_y,
-        f.c_a_x,
-        f.c_a_y,
+    let claims = f.p_claims;
+    let tag = f.link_tag_linkable;
+    let scope = f.link_scope;
+    let epoch = f.epoch + 9999;
+    let target = f.target_aux_hash;
+    invoke_main(
+        f,
         DOMAIN_X509,
         test_message_hash(),
         18,
         2026,
         4,
         18,
-        f.target_aux_hash,
+        target,
         true,
-        f.link_scope,
-        f.epoch + 9999,
-        f.p_attr_hi,
-        f.p_attr_lo,
-        f.link_rand_p,
-        f.a_attr_hi,
-        f.a_attr_lo,
-        test_pub_key_x(),
-        test_pub_key_y(),
-        test_signature(),
-        f.link_tag_linkable,
+        scope,
+        epoch,
+        claims,
+        tag,
         1,
         1,
-        f.challenge_digest,
     );
 }
 
@@ -562,33 +577,27 @@ fn test_wrong_age_threshold_predicate() {
     // Birth 2000-01-01 + current 2026-04-18 -> age 26 -> is_older(40) = 0,
     // but the caller asserts 1.
     let f = make_fixture(DOMAIN_X509, 2000);
-    main(
-        f.c_p_x,
-        f.c_p_y,
-        f.c_a_x,
-        f.c_a_y,
+    let claims = f.p_claims;
+    let tag = f.link_tag_linkable;
+    let scope = f.link_scope;
+    let epoch = f.epoch;
+    let target = f.target_aux_hash;
+    invoke_main(
+        f,
         DOMAIN_X509,
         test_message_hash(),
         40,
         2026,
         4,
         18,
-        f.target_aux_hash,
+        target,
         true,
-        f.link_scope,
-        f.epoch,
-        f.p_attr_hi,
-        f.p_attr_lo,
-        f.link_rand_p,
-        f.a_attr_hi,
-        f.a_attr_lo,
-        test_pub_key_x(),
-        test_pub_key_y(),
-        test_signature(),
-        f.link_tag_linkable,
+        scope,
+        epoch,
+        claims,
+        tag,
         1,
         1,
-        f.challenge_digest,
     );
 }
 
@@ -597,12 +606,13 @@ fn test_wrong_target_aux_hash() {
     // Published target_aux_hash does not match the opened aux attribute pair
     // but the prover claims out_aux_predicate = 1.
     let f = make_fixture(DOMAIN_X509, 2000);
+    let claims = f.p_claims;
+    let tag = f.link_tag_linkable;
+    let scope = f.link_scope;
+    let epoch = f.epoch;
     let wrong_target = openac_core::predicate::decode_domain(f.a_attr_hi + 1, f.a_attr_lo);
-    main(
-        f.c_p_x,
-        f.c_p_y,
-        f.c_a_x,
-        f.c_a_y,
+    invoke_main(
+        f,
         DOMAIN_X509,
         test_message_hash(),
         18,
@@ -611,198 +621,132 @@ fn test_wrong_target_aux_hash() {
         18,
         wrong_target,
         true,
-        f.link_scope,
-        f.epoch,
-        f.p_attr_hi,
-        f.p_attr_lo,
-        f.link_rand_p,
-        f.a_attr_hi,
-        f.a_attr_lo,
-        test_pub_key_x(),
-        test_pub_key_y(),
-        test_signature(),
-        f.link_tag_linkable,
+        scope,
+        epoch,
+        claims,
+        tag,
         1,
         1,
-        f.challenge_digest,
     );
 }
 
 #[test(should_fail)]
 fn test_swapped_commitment_coordinates() {
-    let f = make_fixture(DOMAIN_X509, 2000);
-    // Swap passport (x, y) -- must break assert_commitment_eq.
-    main(
-        f.c_p_y,
-        f.c_p_x,
-        f.c_a_x,
-        f.c_a_y,
+    let mut f = make_fixture(DOMAIN_X509, 2000);
+    let tmp = f.c_p_x;
+    f.c_p_x = f.c_p_y;
+    f.c_p_y = tmp;
+    let claims = f.p_claims;
+    let tag = f.link_tag_linkable;
+    let scope = f.link_scope;
+    let epoch = f.epoch;
+    let target = f.target_aux_hash;
+    invoke_main(
+        f,
         DOMAIN_X509,
         test_message_hash(),
         18,
         2026,
         4,
         18,
-        f.target_aux_hash,
+        target,
         true,
-        f.link_scope,
-        f.epoch,
-        f.p_attr_hi,
-        f.p_attr_lo,
-        f.link_rand_p,
-        f.a_attr_hi,
-        f.a_attr_lo,
-        test_pub_key_x(),
-        test_pub_key_y(),
-        test_signature(),
-        f.link_tag_linkable,
+        scope,
+        epoch,
+        claims,
+        tag,
         1,
         1,
-        f.challenge_digest,
-    );
-}
-
-#[test(should_fail)]
-fn test_wrong_challenge_digest() {
-    let f = make_fixture(DOMAIN_X509, 2000);
-    main(
-        f.c_p_x,
-        f.c_p_y,
-        f.c_a_x,
-        f.c_a_y,
-        DOMAIN_X509,
-        test_message_hash(),
-        18,
-        2026,
-        4,
-        18,
-        f.target_aux_hash,
-        true,
-        f.link_scope,
-        f.epoch,
-        f.p_attr_hi,
-        f.p_attr_lo,
-        f.link_rand_p,
-        f.a_attr_hi,
-        f.a_attr_lo,
-        test_pub_key_x(),
-        test_pub_key_y(),
-        test_signature(),
-        f.link_tag_linkable,
-        1,
-        1,
-        f.challenge_digest + 1,
     );
 }
 
 #[test(should_fail)]
 fn test_age_predicate_bound_to_committed_birth_year() {
-    // Issue #4: the age predicate must be derived from the committed
-    // attr_hi/attr_lo, not from an independent witness. Birth 2010-01-01
-    // at current 2026-04-18 -> age 16, so `is_older(18) = 0`. A prover who
-    // tries to claim `out_is_older = 1` against the committed 2010 profile
-    // must be rejected. If `age_from_attr` secretly read a witness-only
-    // placeholder (as the audit suggested), this assertion would slip.
+    // The age predicate must be derived from the committed claims. Birth
+    // 2010-01-01 at current 2026-04-18 -> age 16, so `is_older(18) = 0`. A
+    // prover claiming `out_is_older = 1` against the committed 2010 claims
+    // must be rejected.
     let f = make_fixture(DOMAIN_X509, 2010);
-    main(
-        f.c_p_x,
-        f.c_p_y,
-        f.c_a_x,
-        f.c_a_y,
+    let claims = f.p_claims;
+    let tag = f.link_tag_linkable;
+    let scope = f.link_scope;
+    let epoch = f.epoch;
+    let target = f.target_aux_hash;
+    invoke_main(
+        f,
         DOMAIN_X509,
         test_message_hash(),
         18,
         2026,
         4,
         18,
-        f.target_aux_hash,
+        target,
         true,
-        f.link_scope,
-        f.epoch,
-        f.p_attr_hi,
-        f.p_attr_lo,
-        f.link_rand_p,
-        f.a_attr_hi,
-        f.a_attr_lo,
-        test_pub_key_x(),
-        test_pub_key_y(),
-        test_signature(),
-        f.link_tag_linkable,
+        scope,
+        epoch,
+        claims,
+        tag,
         1, // CLAIM: is_older. Real: 0 (age 16 at threshold 18).
         1,
-        f.challenge_digest,
     );
 }
 
 #[test(should_fail)]
-fn test_tampered_p_attr_breaks_commitment_before_predicate() {
-    // Issue #4 companion: if the prover flips p_attr_hi hoping to shift
-    // the unpacked birth year, `assert_commitment_eq` must fire first so
-    // the predicate never evaluates on an attacker-chosen profile.
+fn test_tampered_p_claims_breaks_commitment_before_predicate() {
+    // If the prover shifts the claims Field hoping to move the unpacked
+    // birth year, `assert_commitment_eq` must fire first so the predicate
+    // never evaluates on an attacker-chosen profile.
     let f = make_fixture(DOMAIN_X509, 2000);
-    main(
-        f.c_p_x,
-        f.c_p_y,
-        f.c_a_x,
-        f.c_a_y,
+    let forged_claims = f.p_claims + 1099511627776; // +1 birth year (2^40)
+    let tag = f.link_tag_linkable;
+    let scope = f.link_scope;
+    let epoch = f.epoch;
+    let target = f.target_aux_hash;
+    invoke_main(
+        f,
         DOMAIN_X509,
         test_message_hash(),
         18,
         2026,
         4,
         18,
-        f.target_aux_hash,
+        target,
         true,
-        f.link_scope,
-        f.epoch,
-        f.p_attr_hi + 1, // TAMPERED attr_hi -> commitment re-open must fail
-        f.p_attr_lo,
-        f.link_rand_p,
-        f.a_attr_hi,
-        f.a_attr_lo,
-        test_pub_key_x(),
-        test_pub_key_y(),
-        test_signature(),
-        f.link_tag_linkable,
+        scope,
+        epoch,
+        forged_claims,
+        tag,
         1,
         1,
-        f.challenge_digest,
     );
 }
 
 #[test(should_fail)]
 fn test_wrong_link_scope_breaks_link_tag() {
-    // Issue #5: `link_scope` is a public input; the link_tag binds
-    // (link_rand_p, link_scope, epoch) together, so changing scope without
-    // recomputing out_link_tag must be rejected. Confirms the scope policy
-    // is enforced by the circuit rather than advisory.
+    // `link_scope` is a public input; the link_tag binds (link_rand_p,
+    // link_scope, epoch) together, so changing scope without recomputing
+    // out_link_tag must be rejected.
     let f = make_fixture(DOMAIN_X509, 2000);
-    main(
-        f.c_p_x,
-        f.c_p_y,
-        f.c_a_x,
-        f.c_a_y,
+    let claims = f.p_claims;
+    let tag = f.link_tag_linkable;
+    let scope = f.link_scope + 1; // TAMPERED scope, tag computed at original
+    let epoch = f.epoch;
+    let target = f.target_aux_hash;
+    invoke_main(
+        f,
         DOMAIN_X509,
         test_message_hash(),
         18,
         2026,
         4,
         18,
-        f.target_aux_hash,
+        target,
         true,
-        f.link_scope + 1, // TAMPERED scope, link_tag was computed at the original scope
-        f.epoch,
-        f.p_attr_hi,
-        f.p_attr_lo,
-        f.link_rand_p,
-        f.a_attr_hi,
-        f.a_attr_lo,
-        test_pub_key_x(),
-        test_pub_key_y(),
-        test_signature(),
-        f.link_tag_linkable,
+        scope,
+        epoch,
+        claims,
+        tag,
         1,
         1,
-        f.challenge_digest,
     );
 }

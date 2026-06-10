@@ -86,6 +86,44 @@ pub fn commit_attributes_v3(
     )
 }
 
+/// v3.1 passport commitment (2026-06-10, spec/upgrade-plan-v3.1.md sec.3.3).
+///
+/// Replaces the v3 passport use of `commit_attributes_v3`, where the SOD and
+/// DG1 hashes were truncated to 11 / 12 bytes to fit a shared 32-byte pack
+/// (P-6). Here every fingerprint enters the Pedersen commitment full-width:
+///
+///   C = pedersen_commitment([DOMAIN_PASSPORT, claims,
+///                            sod_hash_hi, sod_hash_lo,
+///                            dg1_hash_hi, dg1_hash_lo,
+///                            pk_digest, link_rand])
+///
+/// `claims` is the 9-byte packed predicate bundle from
+/// `profile::pack_passport_claims` (birth date + nationality). The arity (8)
+/// differs from commit_attributes (4) and commit_attributes_v3 (5), so v3.1
+/// passport commitments are non-malleable against every earlier version.
+/// Non-passport credential types keep the arity-5 `commit_attributes_v3`
+/// (their attr pair is already a full-width hash -- no truncation to fix).
+pub fn commit_passport_v3_1(
+    claims: Field,
+    sod_hash_hi: Field,
+    sod_hash_lo: Field,
+    dg1_hash_hi: Field,
+    dg1_hash_lo: Field,
+    pk_digest: Field,
+    link_rand: Field,
+) -> EmbeddedCurvePoint {
+    pedersen_commitment([
+        DOMAIN_PASSPORT,
+        claims,
+        sod_hash_hi,
+        sod_hash_lo,
+        dg1_hash_hi,
+        dg1_hash_lo,
+        pk_digest,
+        link_rand,
+    ])
+}
+
 /// Assert that a computed commitment matches the expected public output coordinates.
 /// Convert a [u8; 32] hash to two Field elements (128-bit each, big-endian split).
 /// Standardizes any 256-bit hash into the (hi, lo) format used by commit_attributes.
@@ -229,4 +267,47 @@ fn test_commit_v3_differs_from_v1() {
     let c_v1 = commit_attributes(DOMAIN_PASSPORT, 100, 200, 42);
     let c_v3 = commit_attributes_v3(DOMAIN_PASSPORT, 100, 200, 0, 42);
     assert(c_v1.x != c_v3.x, "v3 commitment must differ from v1 even with zero pk_digest");
+}
+
+// ---------- commit_passport_v3_1 (arity-8) tests ----------
+
+#[test]
+fn test_commit_passport_v3_1_deterministic() {
+    let c1 = commit_passport_v3_1(9, 1, 2, 3, 4, 7777, 42);
+    let c2 = commit_passport_v3_1(9, 1, 2, 3, 4, 7777, 42);
+    assert(c1.x == c2.x, "v3.1 passport commitment X should be deterministic");
+    assert(c1.y == c2.y, "v3.1 passport commitment Y should be deterministic");
+}
+
+#[test]
+fn test_commit_passport_v3_1_changes_with_each_fingerprint_half() {
+    let base = commit_passport_v3_1(9, 1, 2, 3, 4, 7777, 42);
+    let sod_hi = commit_passport_v3_1(9, 99, 2, 3, 4, 7777, 42);
+    let sod_lo = commit_passport_v3_1(9, 1, 99, 3, 4, 7777, 42);
+    let dg1_hi = commit_passport_v3_1(9, 1, 2, 99, 4, 7777, 42);
+    let dg1_lo = commit_passport_v3_1(9, 1, 2, 3, 99, 7777, 42);
+    assert(base.x != sod_hi.x, "sod_hash_hi must bind into the v3.1 commitment");
+    assert(base.x != sod_lo.x, "sod_hash_lo must bind into the v3.1 commitment");
+    assert(base.x != dg1_hi.x, "dg1_hash_hi must bind into the v3.1 commitment");
+    assert(base.x != dg1_lo.x, "dg1_hash_lo must bind into the v3.1 commitment");
+}
+
+#[test]
+fn test_commit_passport_v3_1_changes_with_claims_pk_digest_rand() {
+    let base = commit_passport_v3_1(9, 1, 2, 3, 4, 7777, 42);
+    let claims = commit_passport_v3_1(10, 1, 2, 3, 4, 7777, 42);
+    let pk = commit_passport_v3_1(9, 1, 2, 3, 4, 7778, 42);
+    let rand = commit_passport_v3_1(9, 1, 2, 3, 4, 7777, 43);
+    assert(base.x != claims.x, "claims must bind into the v3.1 commitment");
+    assert(base.x != pk.x, "pk_digest must bind into the v3.1 commitment");
+    assert(base.x != rand.x, "link_rand must bind into the v3.1 commitment");
+}
+
+#[test]
+fn test_commit_passport_v3_1_differs_from_v3() {
+    // Arity 8 vs 5: even with aligned leading inputs the two constructions
+    // must produce different points (cross-version non-malleability).
+    let c_v3 = commit_attributes_v3(DOMAIN_PASSPORT, 100, 200, 7777, 42);
+    let c_v31 = commit_passport_v3_1(100, 200, 0, 0, 0, 7777, 42);
+    assert(c_v3.x != c_v31.x, "v3.1 passport commitment must differ from v3");
 }

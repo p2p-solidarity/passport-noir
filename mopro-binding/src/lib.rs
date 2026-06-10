@@ -21,8 +21,8 @@ pub use openac_v2::{
 
 pub mod openac_v3;
 pub use openac_v3::{
-    bool_as_field, byte_as_field, compute_challenge_digest_v3, pin_byte_array, pin_field,
-    pin_rsa_modulus_limbs, prepare_layout_jwt_x5c, prepare_layout_passport, prepare_layout_sdjwt,
-    show_layout_composite, show_layout_openac, show_layout_x509, u32_as_field, verify_openac_v3,
-    PolicyV3, PrepareArtifactV3, PrepareLayoutV3, ShowLayoutV3, ShowPresentationV3,
+    bool_as_field, byte_as_field, pin_byte_array, pin_field, pin_rsa_modulus_limbs,
+    prepare_layout_jwt_x5c, prepare_layout_passport, prepare_layout_sdjwt, show_layout_composite,
+    show_layout_openac, show_layout_x509, u32_as_field, verify_openac_v3, PolicyV3,
+    PrepareArtifactV3, PrepareLayoutV3, ShowLayoutV3, ShowPresentationV3,
 };

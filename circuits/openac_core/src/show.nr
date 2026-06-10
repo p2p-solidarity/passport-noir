@@ -1,129 +1,83 @@
-use sha256::digest as sha256_digest;
 use std::hash::pedersen_hash;
 
-// Domain separator for the show-phase challenge digest (ASCII byte array)
-// "openac.show.v2" (v2 = Pedersen-based)
+// Show-phase verification (v3.1 -- unified across credential types).
 //
-// Note: there is no SCOPE_DOMAIN ASCII constant here. The scoped link tag
-// uses a pure pedersen_hash([commitment_x, commitment_y, link_scope,
-// epoch_field]) construction (see compute_link_tag below); domain
-// separation against other pedersen_hash callers in this library comes
-// from the unique input shape (commitment coordinates as the leading
-// pair) rather than an ASCII tag. The Pedersen-domain string
-// "openac.scope.v2" only appears in cross-layer documentation
-// (spec.toml, mopro/Swift OpenAC v2 verifier) for v1-style hashing
-// flows and is intentionally absent from the in-circuit path.
-global SHOW_DOMAIN: [u8; 14] = [111, 112, 101, 110, 97, 99, 46, 115, 104, 111, 119, 46, 118, 50];
+// v3.1 protocol change (2026-06-10, spec/upgrade-plan-v3.1.md sec.3.1):
+// the in-circuit challenge digest was REMOVED. Freshness / replay protection
+// is carried entirely by `nonce_hash`, which is
+//   * a public input of every show circuit (pinned by the verifier against
+//     the nonce it issued for this session), and
+//   * the ECDSA-P256 message verified by `device::verify_device_binding`,
+//     so the enclave signature and the commitment opening are already bound
+//     to the same session value by the proof system itself.
+// UltraHonk binds all public inputs into the proof transcript, so an extra
+// in-circuit digest over (nonce, commitment, epoch) added no security and
+// cost two SHA256 blocks per presentation on the mobile hot path.
+//
+// The pre-v3.1 SHA256 construction (the v2 show digest domain) is RETIRED;
+// cross-layer-check.sh guards against the literal domain string reappearing
+// in this file. Verifiers that want an audit-trail transcript digest compute
+// it off-circuit.
 
+/// Byte length of the verifier-issued nonce hash (SHA256 output).
 pub global HASH_LEN: u32 = 32;
-global SHOW_DOMAIN_LEN: u32 = 14;
-pub global EPOCH_BYTES: u32 = 4;
 
-/// Serialize a Field element to 32 big-endian bytes.
-/// Used to convert commitment coordinates into byte arrays for SHA256 hashing.
-fn field_to_be_bytes(f: Field) -> [u8; 32] {
-    f.to_be_bytes::<32>()
-}
+/// Domain separator for the scoped link tag. ASCII "ltag". Moved from
+/// profile.nr (v3 kept two incompatible tag constructions; v3.1 unifies on
+/// this one -- see HIGH-4, 2026-06-10).
+global DOMAIN_LINK_TAG: Field = 0x6c746167;
 
-/// Compute challenge digest binding the verifier's challenge to this session.
+/// Compute the scoped link tag -- ONE construction for every credential type.
 ///
-/// Paper C2: binds verifier nonce to the credential commitment and epoch.
-/// Uses SHA256 (not Pedersen) because this is a one-way digest, not a commitment.
+/// tag = pedersen_hash([DOMAIN_LINK_TAG, credential_type, link_rand, link_scope, epoch])
 ///
-/// digest = SHA256("openac.show.v2" || commitment_x || commitment_y || challenge || epoch_bytes)
-pub fn compute_challenge_digest(
-    commitment_x: Field,
-    commitment_y: Field,
-    challenge: [u8; HASH_LEN],
-    epoch: [u8; EPOCH_BYTES],
-) -> [u8; HASH_LEN] {
-    // Preimage: domain(14) + commitment_x(32) + commitment_y(32) + challenge(32) + epoch(4) = 114 bytes
-    let mut preimage: [u8; 114] = [0; 114];
-
-    // Domain
-    for i in 0..SHOW_DOMAIN_LEN {
-        preimage[i] = SHOW_DOMAIN[i];
-    }
-
-    // Commitment coordinates (Grumpkin point)
-    let cx_bytes = field_to_be_bytes(commitment_x);
-    let cy_bytes = field_to_be_bytes(commitment_y);
-    for i in 0..HASH_LEN {
-        preimage[SHOW_DOMAIN_LEN + i] = cx_bytes[i];
-        preimage[SHOW_DOMAIN_LEN + HASH_LEN + i] = cy_bytes[i];
-    }
-
-    // Challenge
-    for i in 0..HASH_LEN {
-        preimage[SHOW_DOMAIN_LEN + HASH_LEN * 2 + i] = challenge[i];
-    }
-
-    // Epoch
-    for i in 0..EPOCH_BYTES {
-        preimage[SHOW_DOMAIN_LEN + HASH_LEN * 3 + i] = epoch[i];
-    }
-
-    sha256_digest(preimage)
-}
-
-/// Compute scoped link tag for pseudonymous linkability within a scope+epoch.
-///
-/// Paper: deterministic tag that lets a verifier detect repeat presentations
-/// within the same scope and epoch, without revealing the credential holder's identity.
-///
-/// Uses Pedersen hash (algebraic, on Grumpkin) for efficiency.
-/// tag = pedersen_hash([commitment_x, commitment_y, link_scope, epoch_field])
-///
-/// NAMESPACE NOTE (security review HIGH-4, 2026-06-10): this passport tag is
-/// keyed on the commitment coordinates, while `profile::compute_link_tag` keys
-/// the X.509 / SD-JWT tag on `link_rand`. The two tag spaces are therefore
-/// disjoint BY CONSTRUCTION -- a passport tag and an X.509 tag for the same
-/// holder/scope/epoch never collide, and are never cross-comparable. The
-/// protocol relies on per-credential-type tag namespaces; do NOT attempt to
-/// compare tags across the two functions for cross-credential linking.
+/// Keying on `link_rand` (not the commitment coordinates) keeps the tag
+/// stable under out-of-circuit commitment re-randomization, and including
+/// `credential_type` gives explicit per-credential namespace separation
+/// instead of relying on pedersen arity differences (HIGH-4 fix).
 pub fn compute_link_tag(
-    commitment_x: Field,
-    commitment_y: Field,
+    credential_type: Field,
+    link_rand: Field,
     link_scope: Field,
-    epoch_field: Field,
+    epoch: Field,
 ) -> Field {
-    pedersen_hash([commitment_x, commitment_y, link_scope, epoch_field])
+    pedersen_hash(
+        [DOMAIN_LINK_TAG, credential_type, link_rand, link_scope, epoch],
+    )
 }
 
-/// Assert hash equality (byte-by-byte).
-pub fn assert_hash_eq(left: [u8; HASH_LEN], right: [u8; HASH_LEN]) {
-    for i in 0..HASH_LEN {
-        assert(left[i] == right[i], "Hash mismatch");
+/// Link tag with explicit unlinkable-mode support: `link_mode == false`
+/// forces the tag to 0 so callers cannot emit a tag while claiming to be
+/// unlinkable. Callers must also pin `link_scope == 0` (verify_show does).
+pub fn compute_link_tag_with_mode(
+    credential_type: Field,
+    link_rand: Field,
+    link_scope: Field,
+    epoch: Field,
+    link_mode: bool,
+) -> Field {
+    if link_mode {
+        compute_link_tag(credential_type, link_rand, link_scope, epoch)
+    } else {
+        0
     }
 }
 
-/// Full show-phase verification: challenge binding + scoped linking.
-/// This is the generic show logic used by ALL credential types.
+/// Show-phase link verification shared by ALL credential types (v3.1).
+///
+/// Linkable mode: recomputes the scoped tag and asserts it matches the
+/// public output. Unlinkable mode: pins both scope and tag to zero so a
+/// prover cannot smuggle a session context while claiming unlinkability.
 pub fn verify_show(
-    commitment_x: Field,
-    commitment_y: Field,
-    challenge: [u8; HASH_LEN],
-    epoch: [u8; EPOCH_BYTES],
-    epoch_field: Field,
+    credential_type: Field,
+    link_rand: Field,
     link_mode: bool,
     link_scope: Field,
-    expected_challenge_digest: [u8; HASH_LEN],
+    epoch: Field,
     expected_link_tag: Field,
 ) {
-    // 0. Enforce epoch bytes == epoch_field (prevents epoch mixing attack)
-    let expected_epoch_field: Field = (epoch[0] as Field) * 16777216
-        + (epoch[1] as Field) * 65536
-        + (epoch[2] as Field) * 256
-        + (epoch[3] as Field);
-    assert(epoch_field == expected_epoch_field, "epoch_field does not match epoch bytes");
-
-    // 1. Challenge binding
-    let digest = compute_challenge_digest(commitment_x, commitment_y, challenge, epoch);
-    assert_hash_eq(digest, expected_challenge_digest);
-
-    // 2. Scoped linking
     if link_mode {
-        let tag = compute_link_tag(commitment_x, commitment_y, link_scope, epoch_field);
+        let tag = compute_link_tag(credential_type, link_rand, link_scope, epoch);
         assert(tag == expected_link_tag, "Scoped link tag mismatch");
     } else {
         assert(link_scope == 0, "Unlinkable mode requires zero scope");
@@ -135,160 +89,97 @@ pub fn verify_show(
 // Tests
 // ============================================================
 
-fn sample_challenge() -> [u8; HASH_LEN] {
-    let mut out: [u8; HASH_LEN] = [0; HASH_LEN];
-    for i in 0..HASH_LEN {
-        out[i] = (i as u8) + 0x40;
-    }
-    out
-}
-
-fn sample_epoch() -> [u8; EPOCH_BYTES] {
-    [0x20, 0x26, 0x04, 0x01]
-}
-
-#[test]
-fn test_challenge_digest_deterministic() {
-    let d1 = compute_challenge_digest(100, 200, sample_challenge(), sample_epoch());
-    let d2 = compute_challenge_digest(100, 200, sample_challenge(), sample_epoch());
-    assert_hash_eq(d1, d2);
-}
-
-#[test]
-fn test_challenge_digest_changes_with_commitment() {
-    let d1 = compute_challenge_digest(100, 200, sample_challenge(), sample_epoch());
-    let d2 = compute_challenge_digest(101, 200, sample_challenge(), sample_epoch());
-    let mut differs = false;
-    for i in 0..HASH_LEN {
-        if d1[i] != d2[i] {
-            differs = true;
-        }
-    }
-    assert(differs, "Digest should change with different commitment");
-}
+global TEST_DOMAIN_A: Field = 0x01;
+global TEST_DOMAIN_B: Field = 0x02;
 
 #[test]
 fn test_link_tag_deterministic() {
-    let t1 = compute_link_tag(10, 20, 30, 40);
-    let t2 = compute_link_tag(10, 20, 30, 40);
+    let t1 = compute_link_tag(TEST_DOMAIN_A, 10, 30, 40);
+    let t2 = compute_link_tag(TEST_DOMAIN_A, 10, 30, 40);
     assert(t1 == t2, "Link tag should be deterministic");
 }
 
 #[test]
 fn test_link_tag_differs_across_scope() {
-    let t1 = compute_link_tag(10, 20, 30, 40);
-    let t2 = compute_link_tag(10, 20, 31, 40);
+    let t1 = compute_link_tag(TEST_DOMAIN_A, 10, 30, 40);
+    let t2 = compute_link_tag(TEST_DOMAIN_A, 10, 31, 40);
     assert(t1 != t2, "Different scope must produce different tag");
 }
 
 #[test]
 fn test_link_tag_differs_across_epoch() {
-    let t1 = compute_link_tag(10, 20, 30, 40);
-    let t2 = compute_link_tag(10, 20, 30, 41);
+    let t1 = compute_link_tag(TEST_DOMAIN_A, 10, 30, 40);
+    let t2 = compute_link_tag(TEST_DOMAIN_A, 10, 30, 41);
     assert(t1 != t2, "Different epoch must produce different tag");
 }
 
 #[test]
+fn test_link_tag_differs_across_link_rand() {
+    let t1 = compute_link_tag(TEST_DOMAIN_A, 10, 30, 40);
+    let t2 = compute_link_tag(TEST_DOMAIN_A, 11, 30, 40);
+    assert(t1 != t2, "Different link_rand must produce different tag");
+}
+
+#[test]
+fn test_link_tag_namespace_separated_by_credential_type() {
+    // HIGH-4 (v3.1): tag namespaces are separated by an EXPLICIT
+    // credential_type input, not by pedersen arity side effects. The same
+    // holder secret under two credential domains must yield distinct tags.
+    let t_a = compute_link_tag(TEST_DOMAIN_A, 10, 30, 40);
+    let t_b = compute_link_tag(TEST_DOMAIN_B, 10, 30, 40);
+    assert(t_a != t_b, "Different credential_type must produce different tag");
+}
+
+#[test]
+fn test_link_tag_with_mode_unlinkable_returns_zero() {
+    let tag = compute_link_tag_with_mode(TEST_DOMAIN_A, 123, 456, 789, false);
+    assert(tag == 0, "Unlinkable mode must yield zero link tag");
+}
+
+#[test]
+fn test_link_tag_with_mode_linkable_matches_compute_link_tag() {
+    let with_mode = compute_link_tag_with_mode(TEST_DOMAIN_A, 123, 456, 789, true);
+    let direct = compute_link_tag(TEST_DOMAIN_A, 123, 456, 789);
+    assert(with_mode == direct, "Linkable mode must match compute_link_tag");
+}
+
+#[test]
 fn test_verify_show_linkable_mode() {
-    let cx: Field = 555;
-    let cy: Field = 666;
-    let challenge = sample_challenge();
-    let epoch = sample_epoch();
-    let epoch_field: Field = 0x20260401;
     let scope: Field = 42;
-
-    let digest = compute_challenge_digest(cx, cy, challenge, epoch);
-    let tag = compute_link_tag(cx, cy, scope, epoch_field);
-
-    verify_show(
-        cx,
-        cy,
-        challenge,
-        epoch,
-        epoch_field,
-        true,
-        scope,
-        digest,
-        tag,
-    );
+    let epoch: Field = 0x20260401;
+    let tag = compute_link_tag(TEST_DOMAIN_A, 77, scope, epoch);
+    verify_show(TEST_DOMAIN_A, 77, true, scope, epoch, tag);
 }
 
 #[test]
 fn test_verify_show_unlinkable_mode() {
-    let cx: Field = 555;
-    let cy: Field = 666;
-    let challenge = sample_challenge();
-    let epoch = sample_epoch();
-    let epoch_field: Field = 0x20260401;
-
-    let digest = compute_challenge_digest(cx, cy, challenge, epoch);
-
-    verify_show(cx, cy, challenge, epoch, epoch_field, false, 0, digest, 0);
+    verify_show(TEST_DOMAIN_A, 77, false, 0, 0x20260401, 0);
 }
 
-#[test(should_fail)]
-fn test_verify_show_fails_on_tampered_challenge() {
-    let cx: Field = 555;
-    let cy: Field = 666;
-    let challenge = sample_challenge();
-    let epoch = sample_epoch();
-    let epoch_field: Field = 0x20260401;
+#[test(should_fail_with = "Scoped link tag mismatch")]
+fn test_verify_show_fails_on_tampered_tag() {
     let scope: Field = 42;
-
-    let digest = compute_challenge_digest(cx, cy, challenge, epoch);
-    let tag = compute_link_tag(cx, cy, scope, epoch_field);
-
-    // Tamper challenge
-    let mut bad_challenge = challenge;
-    bad_challenge[0] = bad_challenge[0] ^ 0xFF;
-
-    verify_show(
-        cx,
-        cy,
-        bad_challenge,
-        epoch,
-        epoch_field,
-        true,
-        scope,
-        digest,
-        tag,
-    );
+    let epoch: Field = 0x20260401;
+    let tag = compute_link_tag(TEST_DOMAIN_A, 77, scope, epoch);
+    verify_show(TEST_DOMAIN_A, 77, true, scope, epoch, tag + 1);
 }
 
-#[test(should_fail)]
-fn test_verify_show_fails_on_epoch_mismatch() {
-    let cx: Field = 555;
-    let cy: Field = 666;
-    let challenge = sample_challenge();
-    let epoch = sample_epoch();
-    let epoch_field: Field = 0x20260401;
-
-    let digest = compute_challenge_digest(cx, cy, challenge, epoch);
-
-    // epoch_field doesn't match epoch bytes
-    verify_show(
-        cx,
-        cy,
-        challenge,
-        epoch,
-        epoch_field + 1,
-        false,
-        0,
-        digest,
-        0,
-    );
+#[test(should_fail_with = "Scoped link tag mismatch")]
+fn test_verify_show_fails_on_cross_domain_tag_replay() {
+    // v3.1 digest-removal regression: a tag computed under credential type A
+    // must not satisfy a presentation claiming credential type B.
+    let scope: Field = 42;
+    let epoch: Field = 0x20260401;
+    let tag_a = compute_link_tag(TEST_DOMAIN_A, 77, scope, epoch);
+    verify_show(TEST_DOMAIN_B, 77, true, scope, epoch, tag_a);
 }
 
-#[test(should_fail)]
-fn test_verify_show_fails_linkable_with_zero_scope() {
-    let cx: Field = 555;
-    let cy: Field = 666;
-    let challenge = sample_challenge();
-    let epoch = sample_epoch();
-    let epoch_field: Field = 0x20260401;
+#[test(should_fail_with = "Unlinkable mode requires zero scope")]
+fn test_verify_show_fails_unlinkable_with_nonzero_scope() {
+    verify_show(TEST_DOMAIN_A, 77, false, 42, 0x20260401, 0);
+}
 
-    let digest = compute_challenge_digest(cx, cy, challenge, epoch);
-
-    // unlinkable mode requires zero scope - non-zero scope should fail
-    verify_show(cx, cy, challenge, epoch, epoch_field, false, 42, digest, 0);
+#[test(should_fail_with = "Unlinkable mode requires zero tag")]
+fn test_verify_show_fails_unlinkable_with_nonzero_tag() {
+    verify_show(TEST_DOMAIN_A, 77, false, 0, 0x20260401, 99);
 }

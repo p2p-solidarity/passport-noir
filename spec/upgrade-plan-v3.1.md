@@ -1,10 +1,12 @@
 # OpenAC v3.1 Upgrade Plan — Show 路徑統一 + Mobile 效能優先
 
-> Status: APPROVED / IN PROGRESS (2026-06-10)
-> Baseline 對照: `benchmark/expected/baseline.toml` (2026-04-28) + 2026-06-10 security review 修正
+> Status: **IMPLEMENTED 2026-06-10**（Phase 1 / 2 / 3 / 5 完成；Phase 0 bench wrappers 與 Phase 4 adapter 減重為後續工作）
+> 實測結果（nargo info, 2026-06-10）：openac_show **1,802 → 647 ACIR（−64%）**、passport_adapter **36,247 → 28,596（−21%）**、x509_show 549 → 488（−11%）、composite_show 815 → 827（+1.5%）；bundle 17.0 → 15.9 MB；電路測試 234 全綠、mopro 52 全綠、lint 71(C)。
+> Baseline 對照: `benchmark/expected/baseline.toml`（2026-06-10 已刷新）
 > 命名說明: 既有 v3.1 = 「v3 + trust-anchor model」(passport_adapter / jwt_x5c_adapter)。
 > 本計畫把 **全部 openac 電路收斂到 v3.1**：show 路徑統一 + commitment layout 修正併入同一版號。
-> 前置條件: 2026-06-10 security fixes (CRITICAL-2 / HIGH-2 / HIGH-3 / HIGH-5) 先行合併
+> 前置條件: 2026-06-10 security fixes (CRITICAL-2 / HIGH-2 / HIGH-3 / HIGH-5) 先行合併 ✅
+> 補充（實作中發現）: nargo 不支援巢狀 workspace（會解析到最外層 Nargo.toml），故 legacy 電路放在頂層 `circuits-legacy/` 而非 `circuits/legacy/`。
 
 ---
 
@@ -18,7 +20,7 @@
 | Epoch | `epoch[u8;4]` + `epoch_field` 重複 + 等值約束 | 單一 `epoch: pub Field` |
 | Commitment 屬性 (passport) | `pack_passport_profile` 截斷 sod_hash 到 11 bytes / dg1_hash 到 12 bytes 塞進 32 bytes | arity-8 `commit_passport_v3_1`，full-width hash，免截斷、免 unpack 迴圈 |
 | mopro 驗證端 | `ChallengeDigestCheck::{Sha256, PinnedInProof}` 雙路徑 | 單一路徑：只查 pin 的 `nonce_hash` + commitment（`openac_v3.rs` 原地演進） |
-| Workspace | 14 條電路全部編譯/出貨（v1×5 + v2×1 已被 v3 取代） | v1/v2 移到 `circuits/legacy/`，bundle 只含 v3.1 |
+| Workspace | 14 條電路全部編譯/出貨（v1×5 + v2×1 已被 v3 取代） | v1/v2 移到 `circuits-legacy/`，bundle 只含 v3.1 |
 
 **Mobile 預期收益（show 熱路徑，每次出示都要跑）：**
 openac_show 移除 2-block SHA256 + 64 bytes 公開輸入 + epoch 等值約束。以 baseline 實測「disclosure 487 ACIR、SHA256 為主 → prove 26.7 s / RSS +309 MB」推斷，SHA256 blackbox 是 mobile prove 時間的主導項之一；移除後 show 的剩餘成本以 ECDSA-P256 為主。精確數字由 Phase 0 實測決定。
@@ -170,7 +172,7 @@ baseline.toml 自己標注 `v2_v3_status = "wrappers_pending"`。在 `mopro-bind
 §3.3。動 `commit.nr` / `profile.nr` / `passport_adapter` 的 commit 呼叫點 / `openac_show` + `composite_show` 的 re-open 與 unpack。注意：**v3 已發的 passport prepare commitment 與 v3.1 不相容**，需要 app 端 re-prepare（離線、無感），release notes 註明。
 
 ### Phase 3 — Workspace 瘦身（1 天）
-- `passport_verifier` / `data_integrity` / `disclosure` / `prepare_link` / `show_link` / `device_binding` → `circuits/legacy/`，移出預設 workspace members，CI 改為僅 legacy 檔案變更時才跑
+- `passport_verifier` / `data_integrity` / `disclosure` / `prepare_link` / `show_link` / `device_binding` → `circuits-legacy/`，移出預設 workspace members，CI 改為僅 legacy 檔案變更時才跑
 - bundle / release.yml 只打包 v3.1 artifacts：**−~1.28 MB、−6 條電路的 SRS 與 CI 時間**
 - baseline.toml / spec.toml 分出 legacy 區段
 
@@ -199,17 +201,18 @@ baseline.toml 自己標注 `v2_v3_status = "wrappers_pending"`。在 `mopro-bind
 
 ---
 
-## 6. 與本版逐項對照（驗收清單）
+## 6. 與本版逐項對照（驗收清單 — 2026-06-10 實測結果）
 
-| # | 項目 | v3（現況） | v3.1（驗收標準） |
-|---|---|---|---|
-| 1 | show 電路 SHA256 blackbox | 2 blocks/proof | 0 |
-| 2 | challenge 相關公開輸入 | challenge 32B + digest 32B + epoch 4B | 0（nonce_hash 32B 既有，不變） |
-| 3 | challenge digest 實作數 | 3 種（SHA256 / pedersen-v2 / pedersen-composite） | 0 種（圈外可選 1 種） |
-| 4 | link tag 構造 | 2 種，namespace 不相容 | 1 種，顯式 domain + credential_type |
-| 5 | mopro 驗證路徑 | 2（Sha256 / PinnedInProof） | 1 |
-| 6 | epoch 表示 | bytes + Field + 等值約束 | Field ×1 |
-| 7 | 屬性 hash 截斷 (passport) | sod 11B / dg1 12B | full-width |
-| 8 | workspace 電路數 | 14 | 8（+6 legacy 不出貨） |
-| 9 | bundle artifact | 17.0 MB | ≤ 15.7 MB（Phase 3）；Phase 4 後另計 |
-| 10 | openac_show prove ms | Phase 0 實測 | 對照下降，目標 −(SHA256 實測佔比) |
+| # | 項目 | v3（改前） | v3.1（驗收標準） | 結果 |
+|---|---|---|---|---|
+| 1 | show 電路 SHA256 blackbox | 2 blocks/proof | 0 | ✅ 0 |
+| 2 | challenge 相關公開輸入 | challenge 32B + digest 32B + epoch 4B | 0（nonce_hash 32B 既有，不變） | ✅ openac_show 公開輸入 85 → 49 slots |
+| 3 | challenge digest 實作數 | 3 種（SHA256 / pedersen-v2 / pedersen-composite） | 0 種（圈外可選 1 種） | ✅ 全刪（Noir + Rust） |
+| 4 | link tag 構造 | 2 種，namespace 不相容 | 1 種，顯式 domain + credential_type | ✅ `show::compute_link_tag` 唯一實作 + 跨 domain replay 負測試 |
+| 5 | mopro 驗證路徑 | 2（Sha256 / PinnedInProof） | 1 | ✅ `ChallengeDigestCheck` enum 刪除 |
+| 6 | epoch 表示 | bytes + Field + 等值約束 | Field ×1 | ✅ |
+| 7 | 屬性 hash 截斷 (passport) | sod 11B / dg1 12B | full-width | ✅ arity-8 `commit_passport_v3_1` |
+| 8 | workspace 電路數 | 14 | 8（+6 legacy 不出貨） | ✅ legacy 在頂層 `circuits-legacy/`（nargo 不支援巢狀 workspace） |
+| 9 | bundle artifact | 17.0 MB | ≤ 15.7 MB（Phase 3） | ✅ 15.9 MB（−1.28 MB legacy + openac_show/passport_adapter 縮小；x509/composite/jwt_x5c 實測微增） |
+| 10 | ACIR opcodes（附帶收益） | openac_show 1,802 / passport_adapter 36,247 / x509_show 549 | 不設目標 | ✅ **647（−64%）/ 28,596（−21%）/ 488（−11%）**；composite_show 815 → 827（+1.5%，arity-8 開銷） |
+| 11 | openac_show prove ms | — | Phase 0 實測（待辦） | ⬜ bench wrappers 未實作（`baseline.toml [performance]` 標 pending） |

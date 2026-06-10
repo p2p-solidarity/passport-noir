@@ -1,11 +1,11 @@
 use openac_core::commit::{assert_commitment_eq, commit_attributes_v3, DOMAIN_X509};
 use openac_core::device::verify_device_binding;
 use openac_core::predicate::decode_domain;
-use openac_core::profile::{compute_link_tag_with_mode, compute_show_challenge_digest_v2};
+use openac_core::show::verify_show;
 
-// X.509-only OpenAC Show Circuit (Path A, v1)
+// X.509-only OpenAC Show Circuit (Path A, v3.1)
 //
-// Spec: spec/x509-circuits.md section 6.
+// Spec: spec/x509-circuits.md section 6 + spec/upgrade-plan-v3.1.md.
 //
 // Responsibilities:
 //   1. Re-open the X.509 Pedersen commitment using attributes, shared pk_digest
@@ -14,28 +14,18 @@ use openac_core::profile::{compute_link_tag_with_mode, compute_show_challenge_di
 //      bind the resulting pk_digest into the commitment opening.
 //   3. Evaluate a simple domain predicate: the caller provides the (already
 //      hashed) target domain Field; we hash the opened (attr_hi, attr_lo) with
-//      pedersen_hash and surface a 0/1 match flag. This keeps the circuit
-//      agnostic to the domain encoding decided by the adapter -- the caller
-//      precomputes `target_domain_hash = pedersen_hash([target_attr_hi,
-//      target_attr_lo])` using the same scheme the adapter used when packing
-//      the X.509 profile.
-//   4. Emit a scoped link tag and a challenge digest suitable for OpenAC show.
+//      pedersen_hash and surface a 0/1 match flag.
+//   4. Emit a scoped link tag via the unified openac_core::show construction.
 //
-// Notes:
-//   * Poseidon hash_2 is not exposed in nargo 1.0.0-beta.19 stdlib, so we keep
-//     every algebraic hash on pedersen_hash (same primitive as openac_core).
-//   * nonce_hash is [u8; 32]; the helpers in openac_core::profile compress it
-//     to two Fields via hash_to_fields (Field cannot fit 256 bits).
-//
-// Issue P1-9 (2026-04-28):
-//   * Challenge digest now binds the credential commitment via
-//     `compute_show_challenge_digest_v2`. Without the commitment in the
-//     transcript, a presentation under one credential could be replayed
-//     against a different credential that happened to share (link_rand,
-//     scope, epoch).
-//   * Added `link_mode` public input + `compute_link_tag_with_mode` so this
-//     circuit supports the same unlinkable mode as `openac_core::show`. The
-//     unlinkable case forces `link_scope == 0` and `out_link_tag == 0`.
+// v3.1 changes (2026-06-10):
+//   * `out_challenge_digest` REMOVED. Freshness rides on `nonce_hash`, which
+//     the verifier pins as a public input and which is the ECDSA message of
+//     the device binding -- see openac_core::show header for the full
+//     argument. This also deletes the x509-specific Pedersen digest that the
+//     Rust verifier could never recompute (mopro "PinnedInProof" dual path).
+//   * Link tag switched to `verify_show(DOMAIN_X509, link_rand_x, ...)` -- the
+//     same credential_type-keyed construction every show circuit now uses
+//     (HIGH-4 namespace unification).
 
 fn main(
     // === PUBLIC ===
@@ -56,7 +46,6 @@ fn main(
     // === PUBLIC OUTPUTS ===
     out_link_tag: pub Field,
     out_domain_match: pub Field,
-    out_challenge_digest: pub Field,
 ) {
     // 1. ECDSA-P256 + pk_digest derivation (openac_core::device).
     let pk_digest = verify_device_binding(enclave_pk_x, enclave_pk_y, signature, nonce_hash);
@@ -88,34 +77,26 @@ fn main(
         "Domain match must be boolean (0 or 1)",
     );
 
-    // 4. Scoped link tag with explicit unlinkable-mode support (Issue P1-9).
-    //    The shared helper enforces zero-tag in unlinkable mode; here we also
-    //    require zero link_scope so callers cannot smuggle a session context
-    //    while pretending to be unlinkable.
-    if !link_mode {
-        assert(link_scope == 0, "Unlinkable mode requires zero scope");
-    }
-    let expected_link_tag = compute_link_tag_with_mode(link_rand_x, link_scope, epoch, link_mode);
-    assert(out_link_tag == expected_link_tag, "Link tag mismatch");
-
-    // 5. Challenge digest binds the verifier's nonce to this presentation.
-    //    Issue P1-9: also fold the credential commitment so a tampered nonce
-    //    paired with a re-randomised commitment cannot reuse the digest.
-    let expected_challenge_digest = compute_show_challenge_digest_v2(
-        nonce_hash,
-        in_commitment_x509_x,
-        in_commitment_x509_y,
+    // 4. Scoped link tag -- unified v3.1 construction. Unlinkable mode pins
+    //    link_scope == 0 and out_link_tag == 0 in-circuit.
+    verify_show(
+        DOMAIN_X509,
         link_rand_x,
+        link_mode,
+        link_scope,
+        epoch,
+        out_link_tag,
     );
-    assert(out_challenge_digest == expected_challenge_digest, "Challenge digest mismatch");
 }
 
 // ============================================================
 // Tests
 // ============================================================
-// ECDSA-P256 fixture reused from circuits/device_binding so that the show
-// circuit stays on the same canonical vector as the standalone binding
-// benchmark. Message: SHA256("openac_device_binding_test_v2").
+// ECDSA-P256 fixture reused from openac_core::device so the show circuit
+// stays on the same canonical vector. Message:
+// SHA256("openac_device_binding_test_v2").
+
+use openac_core::show::compute_link_tag;
 
 fn test_pub_key_x() -> [u8; 32] {
     [
@@ -156,7 +137,6 @@ struct X509Fixture {
     c_y: Field,
     target_domain: Field,
     link_tag_linkable: Field,
-    challenge_digest: Field,
     attr_hi: Field,
     attr_lo: Field,
     link_rand_x: Field,
@@ -179,14 +159,12 @@ fn make_fixture(
     );
     let c = commit_attributes_v3(DOMAIN_X509, attr_hi, attr_lo, pk_digest, link_rand_x);
     let target = decode_domain(attr_hi, attr_lo);
-    let link_tag = compute_link_tag_with_mode(link_rand_x, scope, epoch, true);
-    let digest = compute_show_challenge_digest_v2(test_message_hash(), c.x, c.y, link_rand_x);
+    let link_tag = compute_link_tag(DOMAIN_X509, link_rand_x, scope, epoch);
     X509Fixture {
         c_x: c.x,
         c_y: c.y,
         target_domain: target,
         link_tag_linkable: link_tag,
-        challenge_digest: digest,
         attr_hi,
         attr_lo,
         link_rand_x,
@@ -214,14 +192,12 @@ fn test_valid_show_linkable() {
         test_signature(),
         f.link_tag_linkable,
         1,
-        f.challenge_digest,
     );
 }
 
 #[test]
 fn test_valid_show_unlinkable() {
-    // Issue P1-9: x509_show now supports unlinkable mode -- link_scope and
-    // out_link_tag must both be 0 when link_mode = false.
+    // link_scope and out_link_tag must both be 0 when link_mode = false.
     let f = make_fixture(1, 2, 3, 0, 5);
     main(
         f.c_x,
@@ -239,7 +215,6 @@ fn test_valid_show_unlinkable() {
         test_signature(),
         0,
         1,
-        f.challenge_digest,
     );
 }
 
@@ -262,7 +237,6 @@ fn test_domain_match_true() {
         test_signature(),
         0,
         1,
-        f.challenge_digest,
     );
 }
 
@@ -286,7 +260,6 @@ fn test_domain_match_false() {
         test_signature(),
         0,
         0,
-        f.challenge_digest,
     );
 }
 
@@ -309,7 +282,6 @@ fn test_wrong_commitment() {
         test_signature(),
         f.link_tag_linkable,
         1,
-        f.challenge_digest,
     );
 }
 
@@ -334,7 +306,6 @@ fn test_wrong_pk_sig() {
         bad_sig,
         f.link_tag_linkable,
         1,
-        f.challenge_digest,
     );
 }
 
@@ -357,7 +328,6 @@ fn test_wrong_link_scope_breaks_link_tag() {
         test_signature(),
         f.link_tag_linkable,
         1,
-        f.challenge_digest,
     );
 }
 
@@ -380,15 +350,12 @@ fn test_wrong_epoch_breaks_link_tag() {
         test_signature(),
         f.link_tag_linkable,
         1,
-        f.challenge_digest,
     );
 }
 
 #[test(should_fail)]
 fn test_unlinkable_mode_rejects_nonzero_scope() {
-    // Issue P1-9: link_mode = false must enforce link_scope == 0 in-circuit.
-    // A prover that pretends to be unlinkable while supplying a non-zero
-    // scope must be rejected by the circuit, not just by off-chain policy.
+    // link_mode = false must enforce link_scope == 0 in-circuit.
     let f = make_fixture(1, 2, 3, 0, 5);
     main(
         f.c_x,
@@ -406,14 +373,13 @@ fn test_unlinkable_mode_rejects_nonzero_scope() {
         test_signature(),
         0,
         1,
-        f.challenge_digest,
     );
 }
 
 #[test(should_fail)]
 fn test_unlinkable_mode_rejects_nonzero_tag() {
-    // Issue P1-9 companion: with link_mode = false and link_scope = 0, a
-    // non-zero out_link_tag must still be rejected.
+    // With link_mode = false and link_scope = 0, a non-zero out_link_tag
+    // must still be rejected.
     let f = make_fixture(1, 2, 3, 0, 5);
     main(
         f.c_x,
@@ -431,23 +397,21 @@ fn test_unlinkable_mode_rejects_nonzero_tag() {
         test_signature(),
         99, // Non-zero tag contradicts link_mode = false
         1,
-        f.challenge_digest,
     );
 }
 
+// v3.1 digest-removal regression: a stale device signature (produced over a
+// different nonce) must fail the in-circuit ECDSA check -- nonce_hash alone
+// carries freshness now.
 #[test(should_fail)]
-fn test_challenge_digest_rejects_wrong_commitment_binding() {
-    // Issue P1-9 (commitment binding): the digest must reject a
-    // pre-recomputed digest derived from a different commitment. Build the
-    // expected digest against (c.x + 1) so the in-circuit recomputation
-    // diverges and the assert fires.
+fn test_stale_nonce_signature_rejected() {
     let f = make_fixture(1, 2, 3, 4, 5);
-    let bogus_digest =
-        compute_show_challenge_digest_v2(test_message_hash(), f.c_x + 1, f.c_y, f.link_rand_x);
+    let mut fresh_nonce = test_message_hash();
+    fresh_nonce[0] ^= 0x01;
     main(
         f.c_x,
         f.c_y,
-        test_message_hash(),
+        fresh_nonce,
         f.target_domain,
         true,
         f.scope,
@@ -460,6 +424,5 @@ fn test_challenge_digest_rejects_wrong_commitment_binding() {
         test_signature(),
         f.link_tag_linkable,
         1,
-        bogus_digest,
     );
 }

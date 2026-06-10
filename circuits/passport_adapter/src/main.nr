@@ -4,12 +4,12 @@ use noir_rsa::rsa::verify_sha256_pkcs1v15;
 use sha256::digest;
 
 use openac_core::commit::{
-    assert_commitment_eq, commit_attributes_v3, DOMAIN_CSCA_NODE, DOMAIN_PASSPORT,
+    assert_commitment_eq, commit_passport_v3_1, DOMAIN_CSCA_NODE, hash_to_fields,
 };
 use openac_core::device::pk_digest_from_bytes;
 use openac_core::merkle::{compute_csca_leaf_v2, CSCA_MERKLE_DEPTH, verify_inclusion_depth_8};
 use openac_core::predicate::two_digit_year_to_four;
-use openac_core::profile::pack_passport_profile;
+use openac_core::profile::pack_passport_claims;
 use openac_core::smt::{SMT_DEPTH, smt_fold, verify_non_membership};
 use std::embedded_curve_ops::EmbeddedCurvePoint;
 use std::hash::pedersen_hash;
@@ -198,10 +198,13 @@ fn extract_passport_profile(dg1_content: [u8; MAX_DG_SIZE]) -> (u32, u32, u32, [
     (birth_year, birth_mm, birth_dd, nationality)
 }
 
-/// Compute the v3 Pedersen commitment for a passport credential using reopened profile
-/// attributes plus the enclave pk digest.
-/// The commitment binds to age/nationality inputs required by composite_show while retaining
-/// a credential fingerprint from DG1 + SOD, and now also binds the device's enclave key.
+/// Compute the v3.1 Pedersen commitment for a passport credential.
+///
+/// v3.1 (2026-06-10, spec/upgrade-plan-v3.1.md sec.3.3): the SOD and DG1 hashes
+/// enter the arity-8 commitment FULL-WIDTH (hi/lo Field halves) instead of
+/// being truncated to 11 / 12 bytes inside a shared 32-byte pack. The
+/// predicate claims (birth date + nationality from DG1) pack into a single
+/// 9-byte Field via `pack_passport_claims`.
 fn compute_passport_commitment(
     sod_hash: [u8; 32],
     dg1_content: [u8; MAX_DG_SIZE],
@@ -210,15 +213,10 @@ fn compute_passport_commitment(
     link_rand: Field,
 ) -> EmbeddedCurvePoint {
     let (birth_year, birth_month, birth_day, nationality) = extract_passport_profile(dg1_content);
-    let (attr_hi, attr_lo) = pack_passport_profile(
-        sod_hash,
-        dg1_hash,
-        birth_year,
-        birth_month,
-        birth_day,
-        nationality,
-    );
-    commit_attributes_v3(DOMAIN_PASSPORT, attr_hi, attr_lo, pk_digest, link_rand)
+    let claims = pack_passport_claims(birth_year, birth_month, birth_day, nationality);
+    let (sod_hi, sod_lo) = hash_to_fields(sod_hash);
+    let (dg1_hi, dg1_lo) = hash_to_fields(dg1_hash);
+    commit_passport_v3_1(claims, sod_hi, sod_lo, dg1_hi, dg1_lo, pk_digest, link_rand)
 }
 
 fn main(
@@ -539,8 +537,10 @@ fn test_commitment_matches_manual_recomputation() {
     let pk_digest = pk_digest_from_bytes(test_enclave_pk_x(), test_enclave_pk_y());
     let c = compute_passport_commitment(sod_hash, dg1, dg1_hash, pk_digest, rand);
 
-    let (attr_hi, attr_lo) = pack_passport_profile(sod_hash, dg1_hash, 2000, 3, 15, [84, 87, 78]);
-    let c_manual = commit_attributes_v3(DOMAIN_PASSPORT, attr_hi, attr_lo, pk_digest, rand);
+    let claims = pack_passport_claims(2000, 3, 15, [84, 87, 78]);
+    let (sod_hi, sod_lo) = hash_to_fields(sod_hash);
+    let (dg1_hi, dg1_lo) = hash_to_fields(dg1_hash);
+    let c_manual = commit_passport_v3_1(claims, sod_hi, sod_lo, dg1_hi, dg1_lo, pk_digest, rand);
 
     assert(c.x == c_manual.x, "Commitment X must match manual recomputation");
     assert(c.y == c_manual.y, "Commitment Y must match manual recomputation");

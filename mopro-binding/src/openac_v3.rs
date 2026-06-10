@@ -1,21 +1,33 @@
-//! OpenAC v3 (Path A): Pedersen commitment with in-circuit device binding.
+//! OpenAC v3 / v3.1 (Path A): Pedersen commitment with in-circuit device
+//! binding.
 //!
-//! Upgrades from v2 (arity-4 Pedersen) to v3 (arity-5), folding an enclave
+//! v3 upgraded v2 (arity-4 Pedersen) to arity-5, folding an enclave
 //! public-key digest `pk_digest` into the commitment so the show circuit can
 //! enforce in-circuit ECDSA-P256 device binding without a separate
 //! device-binding proof.
 //!
-//! Noir reference:
-//!   * `openac_core::commit::commit_attributes_v3(ctype, attr_hi, attr_lo, pk_digest, r)`
-//!   * `openac_core::device::verify_device_binding(pk_x, pk_y, sig, nonce_hash)`
-//!   * `openac_core::show::compute_challenge_digest` — domain `openac.show.v2`
-//!     (show-phase SHA256 digest math is unchanged from v2; only the
-//!     commitment pre-image differs).
+//! v3.1 (2026-06-10, spec/upgrade-plan-v3.1.md) retired the in-circuit
+//! challenge digest entirely. Freshness / replay protection is carried by
+//! `nonce_hash`: the verifier pins it at its ABI-known public-input index
+//! (step 4) and compares it against the nonce it issued (step 7). The
+//! previous dual code path (SHA256 recompute for openac_show vs. "pinned
+//! Pedersen digest" for x509/composite) is gone, along with the
+//! `challenge` / `challenge_digest` presentation fields.
 //!
-//! Breaking change from v2:
-//!   * `PrepareArtifactV3::pk_digest` is a new field — old v2 artifacts
+//! Noir reference:
+//!   * `openac_core::commit::commit_passport_v3_1(claims, sod_hi, sod_lo,
+//!     dg1_hi, dg1_lo, pk_digest, r)` (passport, arity-8)
+//!   * `openac_core::commit::commit_attributes_v3(ctype, attr_hi, attr_lo,
+//!     pk_digest, r)` (x509 / sdjwt / mdl, arity-5)
+//!   * `openac_core::device::verify_device_binding(pk_x, pk_y, sig, nonce_hash)`
+//!   * `openac_core::show::compute_link_tag(ctype, link_rand, scope, epoch)`
+//!
+//! Breaking changes:
+//!   * v3: `PrepareArtifactV3::pk_digest` is a new field — old v2 artifacts
 //!     cannot be upgraded in place, must be re-issued (see
 //!     `spec/x509-migration.md §3`).
+//!   * v3.1: passport commitments are arity-8 — v3 passport prepare
+//!     artifacts must be re-prepared (offline, no user interaction).
 
 use crate::MoproError;
 use sha2::{Digest, Sha256};
@@ -62,28 +74,6 @@ pub struct PrepareLayoutV3 {
     pub extra_pinned_fields: Vec<(usize, [u8; FIELD_BYTES])>,
 }
 
-/// How the show circuit's challenge digest is checked by the verifier.
-///
-/// Different show circuits compute the digest with different primitives:
-///   * `openac_show` (passport) emits `SHA256("openac.show.v2" || cx || cy ||
-///     challenge || epoch)` — the verifier can recompute it (step 7).
-///   * `x509_show` / `composite_show` emit a **Pedersen** digest
-///     (`openac_core::profile::compute_show_challenge_digest_v2`), which the
-///     Rust side cannot recompute without a Grumpkin Pedersen implementation.
-///     For these the caller supplies the expected digest as a pinned public
-///     input (`extra_pinned_fields`), and the SHA256 recomputation in step 7
-///     MUST be skipped — otherwise verification always fails with
-///     `invalid_challenge_digest`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChallengeDigestCheck {
-    /// Recompute SHA256("openac.show.v2" || cx || cy || challenge || epoch)
-    /// and compare against `ShowPresentationV3.challenge_digest`.
-    Sha256,
-    /// Digest is a Pedersen hash already pinned at a known public-input index
-    /// via `extra_pinned_fields`; skip the SHA256 recomputation.
-    PinnedInProof,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShowLayoutV3 {
     pub num_public_inputs: usize,
@@ -93,12 +83,10 @@ pub struct ShowLayoutV3 {
     pub commitment_y_index: usize,
     /// Field index where the first byte of `nonce_hash` (Field index of
     /// nonce_hash[0]) sits. Each subsequent byte occupies the next slot.
+    /// v3.1: this is the freshness anchor — there is no challenge digest.
     pub nonce_hash_first_byte_index: Option<usize>,
-    /// Optional adapter-specific pins: link tag, challenge digest, link
-    /// scope, epoch, etc.
+    /// Optional adapter-specific pins: link tag, link scope, epoch, etc.
     pub extra_pinned_fields: Vec<(usize, [u8; FIELD_BYTES])>,
-    /// How step 7 verifies the challenge digest for this show circuit.
-    pub challenge_digest: ChallengeDigestCheck,
 }
 
 /// Encode a single byte (0..=255) in the right-most position of a 32-byte
@@ -313,31 +301,27 @@ pub fn prepare_layout_jwt_x5c(
     }
 }
 
-/// openac_show v3 (passport-only) layout. Public inputs (85 total):
+/// openac_show v3.1 (passport-only) layout. Public inputs (49 total):
 ///   0:      credential_type (must be DOMAIN_PASSPORT)
 ///   1..33:  nonce_hash bytes
 ///   33:     link_mode
 ///   34:     link_scope
-///   35..39: epoch bytes
-///   39:     epoch_field
-///   40:     current_year
-///   41:     current_month
-///   42:     current_day
-///   43:     age_threshold
-///   44:     disclose_nationality
-///   45:     disclose_age
-///   46:     out_commitment_x
-///   47:     out_commitment_y
-///   48..80: out_challenge_digest bytes
-///   80:     out_link_tag
-///   81:     out_is_older
-///   82..85: out_nationality bytes
+///   35:     epoch
+///   36:     current_year
+///   37:     current_month
+///   38:     current_day
+///   39:     age_threshold
+///   40:     disclose_nationality
+///   41:     disclose_age
+///   42:     out_commitment_x
+///   43:     out_commitment_y
+///   44:     out_link_tag
+///   45:     out_is_older
+///   46..49: out_nationality bytes
 pub fn show_layout_openac(
     expected_link_mode: bool,
     expected_link_scope: [u8; FIELD_BYTES],
-    expected_epoch: &[u8; 4],
-    expected_epoch_field: [u8; FIELD_BYTES],
-    expected_challenge_digest: &[u8; 32],
+    expected_epoch: [u8; FIELD_BYTES],
     expected_link_tag: [u8; FIELD_BYTES],
 ) -> ShowLayoutV3 {
     let mut pins = Vec::new();
@@ -345,22 +329,18 @@ pub fn show_layout_openac(
     pins.push(pin_field(0, byte_as_field(DOMAIN_PASSPORT)));
     pins.push(pin_field(33, bool_as_field(expected_link_mode)));
     pins.push(pin_field(34, expected_link_scope));
-    pins.extend(pin_byte_array(35, expected_epoch));
-    pins.push(pin_field(39, expected_epoch_field));
-    pins.extend(pin_byte_array(48, expected_challenge_digest));
-    pins.push(pin_field(80, expected_link_tag));
+    pins.push(pin_field(35, expected_epoch));
+    pins.push(pin_field(44, expected_link_tag));
     ShowLayoutV3 {
-        num_public_inputs: 85,
-        commitment_x_index: 46,
-        commitment_y_index: 47,
+        num_public_inputs: 49,
+        commitment_x_index: 42,
+        commitment_y_index: 43,
         nonce_hash_first_byte_index: Some(1),
         extra_pinned_fields: pins,
-        // openac_show emits a SHA256 challenge digest (domain openac.show.v2).
-        challenge_digest: ChallengeDigestCheck::Sha256,
     }
 }
 
-/// x509_show v3 layout. Public inputs (41 total):
+/// x509_show v3.1 layout. Public inputs (40 total):
 ///   0:      in_commitment_x509_x
 ///   1:      in_commitment_x509_y
 ///   2..34:  nonce_hash bytes
@@ -370,14 +350,12 @@ pub fn show_layout_openac(
 ///   37:     epoch
 ///   38:     out_link_tag
 ///   39:     out_domain_match
-///   40:     out_challenge_digest
 pub fn show_layout_x509(
     expected_target_domain_hash: [u8; FIELD_BYTES],
     expected_link_mode: bool,
     expected_link_scope: [u8; FIELD_BYTES],
     expected_epoch: [u8; FIELD_BYTES],
     expected_link_tag: [u8; FIELD_BYTES],
-    expected_challenge_digest: [u8; FIELD_BYTES],
 ) -> ShowLayoutV3 {
     let mut pins = Vec::new();
     pins.push(pin_field(34, expected_target_domain_hash));
@@ -385,19 +363,16 @@ pub fn show_layout_x509(
     pins.push(pin_field(36, expected_link_scope));
     pins.push(pin_field(37, expected_epoch));
     pins.push(pin_field(38, expected_link_tag));
-    pins.push(pin_field(40, expected_challenge_digest));
     ShowLayoutV3 {
-        num_public_inputs: 41,
+        num_public_inputs: 40,
         commitment_x_index: 0,
         commitment_y_index: 1,
         nonce_hash_first_byte_index: Some(2),
         extra_pinned_fields: pins,
-        // x509_show emits a Pedersen challenge digest, pinned at index 40 above.
-        challenge_digest: ChallengeDigestCheck::PinnedInProof,
     }
 }
 
-/// composite_show v3 layout. Public inputs (49 total):
+/// composite_show v3.1 layout. Public inputs (48 total):
 ///   0:      in_commitment_passport_x  <-- pinned via standard commitment_x_index
 ///   1:      in_commitment_passport_y  <-- pinned via standard commitment_y_index
 ///   2:      in_commitment_aux_x       <-- pinned via extra_pinned_fields
@@ -413,7 +388,6 @@ pub fn show_layout_x509(
 ///   45:     out_link_tag
 ///   46:     out_is_older
 ///   47:     out_aux_predicate
-///   48:     out_challenge_digest
 ///
 /// composite_show binds two commitments: the passport credential (indices
 /// 0,1) is the one carried via `ShowPresentationV3.commitment` and gets
@@ -430,7 +404,6 @@ pub fn show_layout_composite(
     expected_link_scope: [u8; FIELD_BYTES],
     expected_epoch: [u8; FIELD_BYTES],
     expected_link_tag: [u8; FIELD_BYTES],
-    expected_challenge_digest: [u8; FIELD_BYTES],
 ) -> ShowLayoutV3 {
     let mut pins = Vec::new();
     pins.push(pin_field(2, aux_commitment.x));
@@ -441,21 +414,14 @@ pub fn show_layout_composite(
     pins.push(pin_field(43, expected_link_scope));
     pins.push(pin_field(44, expected_epoch));
     pins.push(pin_field(45, expected_link_tag));
-    pins.push(pin_field(48, expected_challenge_digest));
     ShowLayoutV3 {
-        num_public_inputs: 49,
+        num_public_inputs: 48,
         commitment_x_index: 0,
         commitment_y_index: 1,
         nonce_hash_first_byte_index: Some(5),
         extra_pinned_fields: pins,
-        // composite_show emits a Pedersen challenge digest, pinned at index 48.
-        challenge_digest: ChallengeDigestCheck::PinnedInProof,
     }
 }
-
-// Show-phase digest domain. Kept at v2 because the SHA256 digest math did not
-// change in v3 Path A — only the Pedersen commitment's pre-image did.
-const SHOW_DOMAIN_V2: &[u8] = b"openac.show.v2";
 
 use crate::openac_v2::{LinkMode, PedersenPoint};
 
@@ -479,7 +445,12 @@ pub struct PrepareArtifactV3 {
     pub vk: Vec<u8>,
 }
 
-/// Show presentation with in-circuit ECDSA device binding (v3 Path A).
+/// Show presentation with in-circuit ECDSA device binding (v3.1 Path A).
+///
+/// v3.1: the `challenge` / `challenge_digest` fields were removed — the
+/// verifier-issued nonce (hashed into `nonce_hash`) is the only session
+/// freshness value, checked both as a pinned public input and against
+/// `PolicyV3::expected_nonce_hash`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShowPresentationV3 {
     /// Pedersen commitment point (MUST match prepare's commitment).
@@ -488,10 +459,6 @@ pub struct ShowPresentationV3 {
     pub pk_digest: [u8; FIELD_BYTES],
     /// Verifier-supplied nonce signed by the enclave (public input to show).
     pub nonce_hash: [u8; 32],
-    /// Challenge from verifier (raw bytes, folded into challenge_digest).
-    pub challenge: [u8; 32],
-    /// SHA256 challenge digest: SHA256("openac.show.v2" || cx || cy || challenge || epoch).
-    pub challenge_digest: [u8; 32],
     /// Scoped link tag (Field, 0 for unlinkable mode).
     pub link_tag: [u8; FIELD_BYTES],
     /// Noir proof bytes (show circuit).
@@ -514,11 +481,9 @@ pub struct PolicyV3 {
     pub link_mode: LinkMode,
     /// Scope identifier (None for unlinkable mode).
     pub link_scope: Option<[u8; FIELD_BYTES]>,
-    pub epoch: [u8; 4],
-    pub epoch_field: [u8; FIELD_BYTES],
     pub now_unix: u64,
-    pub expected_challenge: [u8; 32],
-    /// Nonce the verifier issued and expects the enclave to sign.
+    /// Nonce the verifier issued and expects the enclave to sign. v3.1: this
+    /// is the ONLY session freshness value (challenge digest retired).
     pub expected_nonce_hash: [u8; 32],
     pub prepare_vk_hash: [u8; 32],
     pub show_vk_hash: [u8; 32],
@@ -549,22 +514,11 @@ fn sha256_hash(data: &[u8]) -> [u8; 32] {
 //   * `verify_commitment_in_proof` — same scan-based approach for the
 //     commitment pair. Replaced by `assert_public_inputs_at` calls keyed on
 //     `PolicyV3.{prepare,show}_layout.commitment_x/y_index`.
-
-/// Compute challenge digest (v3 uses the same SHA256 math as v2).
-/// SHA256("openac.show.v2" || commitment_x || commitment_y || challenge || epoch)
-pub fn compute_challenge_digest_v3(
-    commitment: &PedersenPoint,
-    challenge: &[u8; 32],
-    epoch: &[u8; 4],
-) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(SHOW_DOMAIN_V2);
-    hasher.update(&commitment.x);
-    hasher.update(&commitment.y);
-    hasher.update(challenge);
-    hasher.update(epoch);
-    hasher.finalize().into()
-}
+// Removed (v3.1, 2026-06-10):
+//   * `compute_challenge_digest_v3` and the `ChallengeDigestCheck` dual
+//     path — the in-circuit challenge digest is retired. Verifiers wanting
+//     an audit-trail transcript digest compute one off-circuit from
+//     (nonce, commitment, epoch); it carries no protocol security.
 
 /// Verify a linked v3 prepare + show pair (Path A: in-circuit device binding).
 pub fn verify_openac_v3(
@@ -681,33 +635,14 @@ where
     // every nonce byte at its ABI-known index when
     // `show_layout.nonce_hash_first_byte_index` is set.)
 
-    // 7. Challenge binding
-    if show.challenge != policy.expected_challenge {
-        return Err(verification_error("invalid_challenge"));
-    }
+    // 7. Session freshness (v3.1): the verifier-issued nonce is the single
+    //    freshness anchor. Step 4 already pinned every nonce byte at its
+    //    ABI-known public-input index inside the proof; this check ties the
+    //    presentation metadata to the nonce THIS verifier issued, so a
+    //    replayed presentation (stale nonce) is rejected here even before
+    //    considering the in-circuit ECDSA binding over the same value.
     if show.nonce_hash != policy.expected_nonce_hash {
         return Err(verification_error("invalid_nonce_hash"));
-    }
-    // The SHA256 recomputation only applies to circuits that emit a SHA256
-    // digest (openac_show / passport). x509_show and composite_show emit a
-    // Pedersen digest that this Rust layer cannot recompute; for them the
-    // digest is enforced via the pinned public input in step 4
-    // (extra_pinned_fields), so we skip the SHA256 comparison here. Running it
-    // unconditionally would reject every x509/composite proof.
-    match policy.show_layout.challenge_digest {
-        ChallengeDigestCheck::Sha256 => {
-            let expected_digest = compute_challenge_digest_v3(
-                &show.commitment,
-                &policy.expected_challenge,
-                &policy.epoch,
-            );
-            if show.challenge_digest != expected_digest {
-                return Err(verification_error("invalid_challenge_digest"));
-            }
-        }
-        ChallengeDigestCheck::PinnedInProof => {
-            // Verified via show_layout.extra_pinned_fields (Pedersen digest).
-        }
     }
 
     // 8. Scope / linkability
@@ -816,7 +751,6 @@ mod tests {
             commitment_y_index: 1,
             nonce_hash_first_byte_index: Some(3),
             extra_pinned_fields: Vec::new(),
-            challenge_digest: ChallengeDigestCheck::Sha256,
         };
         (prepare_layout, show_layout)
     }
@@ -825,9 +759,6 @@ mod tests {
         let commitment = sample_point(10);
         let pk_digest = sample_field(60);
         let nonce_hash = sample_hash32(70);
-        let challenge = sample_hash32(44);
-        let epoch = [0x20, 0x26, 0x04, 0x01];
-        let challenge_digest = compute_challenge_digest_v3(&commitment, &challenge, &epoch);
         let scope = sample_field(55);
         let link_tag = sample_field(77);
 
@@ -849,8 +780,6 @@ mod tests {
             commitment,
             pk_digest,
             nonce_hash,
-            challenge,
-            challenge_digest,
             link_tag,
             proof: mock_show_proof(&commitment, &pk_digest, &nonce_hash, &[40, 50, 60]),
             vk: show_vk.clone(),
@@ -860,10 +789,7 @@ mod tests {
         let policy = PolicyV3 {
             link_mode: LinkMode::ScopedLinkable,
             link_scope: Some(scope),
-            epoch,
-            epoch_field: sample_field(0x20),
             now_unix: 150,
-            expected_challenge: challenge,
             expected_nonce_hash: nonce_hash,
             prepare_vk_hash: sha256_hash(&prepare_vk),
             show_vk_hash: sha256_hash(&show_vk),
@@ -888,8 +814,6 @@ mod tests {
         tampered.x[0] ^= 0x01;
         show.commitment = tampered;
         show.proof = mock_show_proof(&tampered, &show.pk_digest, &show.nonce_hash, &[40, 50, 60]);
-        show.challenge_digest =
-            compute_challenge_digest_v3(&tampered, &policy.expected_challenge, &policy.epoch);
 
         let err = verify_openac_v3_with_verifier(&prepare, &show, &policy, &always_valid)
             .expect_err("must reject");
@@ -956,15 +880,6 @@ mod tests {
     }
 
     #[test]
-    fn test_v3_wrong_challenge() {
-        let (prepare, mut show, policy) = fixture();
-        show.challenge[0] ^= 0xFF;
-        let err = verify_openac_v3_with_verifier(&prepare, &show, &policy, &always_valid)
-            .expect_err("must reject");
-        assert!(err.to_string().contains("invalid_challenge"));
-    }
-
-    #[test]
     fn test_v3_untrusted_vk() {
         let (prepare, show, mut policy) = fixture();
         policy.prepare_vk_hash = sample_hash32(99);
@@ -979,11 +894,6 @@ mod tests {
         policy.link_mode = LinkMode::Unlinkable;
         policy.link_scope = None;
         show.link_tag = [0u8; FIELD_BYTES];
-        show.challenge_digest = compute_challenge_digest_v3(
-            &show.commitment,
-            &policy.expected_challenge,
-            &policy.epoch,
-        );
         verify_openac_v3_with_verifier(&prepare, &show, &policy, &always_valid)
             .expect("unlinkable mode should verify");
     }
@@ -1025,29 +935,6 @@ mod tests {
         })
         .expect_err("must reject");
         assert!(err.to_string().contains("invalid_prepare_proof"));
-    }
-
-    #[test]
-    fn test_challenge_digest_v3_deterministic() {
-        let c = sample_point(10);
-        let challenge = sample_hash32(20);
-        let epoch = [0x20, 0x26, 0x04, 0x01];
-        let d1 = compute_challenge_digest_v3(&c, &challenge, &epoch);
-        let d2 = compute_challenge_digest_v3(&c, &challenge, &epoch);
-        assert_eq!(d1, d2);
-    }
-
-    #[test]
-    fn test_challenge_digest_v3_matches_v2_math() {
-        // v3 Path A kept the show-phase domain at "openac.show.v2" because the
-        // SHA256 digest math is unchanged. Cross-check to catch accidental
-        // drift.
-        let c = sample_point(42);
-        let challenge = sample_hash32(99);
-        let epoch = [0x01, 0x02, 0x03, 0x04];
-        let d3 = compute_challenge_digest_v3(&c, &challenge, &epoch);
-        let d2 = crate::openac_v2::compute_challenge_digest_v2(&c, &challenge, &epoch);
-        assert_eq!(d3, d2, "v3 digest must match v2 (shared domain/math)");
     }
 
     // ============================================================
@@ -1099,7 +986,6 @@ mod tests {
             commitment_y_index: 1,
             nonce_hash_first_byte_index: Some(2),
             extra_pinned_fields: vec![(34, csca_root)],
-            challenge_digest: ChallengeDigestCheck::Sha256,
         };
         (prepare, show, policy)
     }
@@ -1109,35 +995,6 @@ mod tests {
         let (prepare, show, policy) = fixture_with_strict_layout();
         verify_openac_v3_with_verifier(&prepare, &show, &policy, &always_valid)
             .expect("strict layout should verify");
-    }
-
-    #[test]
-    fn test_pinned_challenge_digest_skips_sha256_recompute() {
-        // Regression (X.509 path, 2026-06-10): x509_show / composite_show emit
-        // a Pedersen challenge digest that this Rust layer cannot recompute.
-        // With ChallengeDigestCheck::PinnedInProof the SHA256 step must be
-        // skipped, so a presentation whose `challenge_digest` is NOT the
-        // SHA256 value still verifies (the digest is enforced via the pinned
-        // public input instead). Before the fix this returned
-        // `invalid_challenge_digest` for every x509/composite proof.
-        let (prepare, mut show, mut policy) = fixture_with_strict_layout();
-        policy.show_layout.challenge_digest = ChallengeDigestCheck::PinnedInProof;
-        // A Pedersen digest is not the SHA256 value; simulate that mismatch.
-        show.challenge_digest = [0xAB; 32];
-        verify_openac_v3_with_verifier(&prepare, &show, &policy, &always_valid)
-            .expect("pinned-digest layout must skip the SHA256 recompute");
-    }
-
-    #[test]
-    fn test_sha256_challenge_digest_still_enforced() {
-        // Dual of the above: when the layout declares Sha256, a tampered
-        // challenge_digest MUST still be rejected.
-        let (prepare, mut show, policy) = fixture_with_strict_layout();
-        assert_eq!(policy.show_layout.challenge_digest, ChallengeDigestCheck::Sha256);
-        show.challenge_digest = [0xAB; 32];
-        let err = verify_openac_v3_with_verifier(&prepare, &show, &policy, &always_valid)
-            .expect_err("sha256 layout must reject a wrong challenge digest");
-        assert!(err.to_string().contains("invalid_challenge_digest"));
     }
 
     #[test]
@@ -1297,14 +1154,12 @@ mod tests {
         // so a verifier cannot accidentally accept an X.509 / SDJWT
         // commitment opening from the same circuit.
         let scope = sample_field(0xE0);
-        let epoch = [0x20, 0x26, 0x04, 0x28];
-        let epoch_field = sample_field(0xE1);
-        let digest = sample_hash32(0xE2);
+        let epoch = sample_field(0xE1);
         let link_tag = sample_field(0xE3);
-        let layout = show_layout_openac(true, scope, &epoch, epoch_field, &digest, link_tag);
-        assert_eq!(layout.num_public_inputs, 85);
-        assert_eq!(layout.commitment_x_index, 46);
-        assert_eq!(layout.commitment_y_index, 47);
+        let layout = show_layout_openac(true, scope, epoch, link_tag);
+        assert_eq!(layout.num_public_inputs, 49);
+        assert_eq!(layout.commitment_x_index, 42);
+        assert_eq!(layout.commitment_y_index, 43);
         assert_eq!(layout.nonce_hash_first_byte_index, Some(1));
         assert!(layout
             .extra_pinned_fields
@@ -1313,30 +1168,10 @@ mod tests {
             .extra_pinned_fields
             .contains(&(33, bool_as_field(true))));
         assert!(layout.extra_pinned_fields.contains(&(34, scope)));
-        for pin in pin_byte_array(35, &epoch) {
-            assert!(layout.extra_pinned_fields.contains(&pin));
-        }
-        assert!(layout.extra_pinned_fields.contains(&(39, epoch_field)));
-    }
-
-    #[test]
-    fn test_show_layout_openac_pins_challenge_digest_and_link_tag() {
-        let scope = sample_field(0xE0);
-        let epoch = [0x20, 0x26, 0x04, 0x28];
-        let epoch_field = sample_field(0xE3);
-        let digest = sample_hash32(0xE1);
-        let link_tag = sample_field(0xE2);
-        let layout = show_layout_openac(true, scope, &epoch, epoch_field, &digest, link_tag);
-        for pin in pin_byte_array(48, &digest) {
-            assert!(
-                layout.extra_pinned_fields.contains(&pin),
-                "challenge digest byte must be pinned at field index {}",
-                pin.0,
-            );
-        }
+        assert!(layout.extra_pinned_fields.contains(&(35, epoch)));
         assert!(
-            layout.extra_pinned_fields.contains(&(80, link_tag)),
-            "link tag must be pinned at field index 80",
+            layout.extra_pinned_fields.contains(&(44, link_tag)),
+            "link tag must be pinned at field index 44",
         );
     }
 
@@ -1346,9 +1181,8 @@ mod tests {
         let scope = sample_field(0x71);
         let epoch = sample_field(0x72);
         let tag = sample_field(0x73);
-        let digest = sample_field(0x74);
-        let layout = show_layout_x509(target, true, scope, epoch, tag, digest);
-        assert_eq!(layout.num_public_inputs, 41);
+        let layout = show_layout_x509(target, true, scope, epoch, tag);
+        assert_eq!(layout.num_public_inputs, 40);
         assert!(layout.extra_pinned_fields.contains(&(34, target)));
         assert!(layout
             .extra_pinned_fields
@@ -1356,7 +1190,6 @@ mod tests {
         assert!(layout.extra_pinned_fields.contains(&(36, scope)));
         assert!(layout.extra_pinned_fields.contains(&(37, epoch)));
         assert!(layout.extra_pinned_fields.contains(&(38, tag)));
-        assert!(layout.extra_pinned_fields.contains(&(40, digest)));
     }
 
     #[test]
@@ -1367,7 +1200,6 @@ mod tests {
         let scope = sample_field(0x83);
         let epoch = sample_field(0x84);
         let tag = sample_field(0x85);
-        let digest = sample_field(0x86);
         let layout = show_layout_composite(
             &aux_commitment,
             aux_domain,
@@ -1376,9 +1208,8 @@ mod tests {
             scope,
             epoch,
             tag,
-            digest,
         );
-        assert_eq!(layout.num_public_inputs, 49);
+        assert_eq!(layout.num_public_inputs, 48);
         assert!(layout.extra_pinned_fields.contains(&(2, aux_commitment.x)));
         assert!(layout.extra_pinned_fields.contains(&(3, aux_commitment.y)));
         assert!(layout.extra_pinned_fields.contains(&(4, aux_domain)));
@@ -1389,6 +1220,5 @@ mod tests {
         assert!(layout.extra_pinned_fields.contains(&(43, scope)));
         assert!(layout.extra_pinned_fields.contains(&(44, epoch)));
         assert!(layout.extra_pinned_fields.contains(&(45, tag)));
-        assert!(layout.extra_pinned_fields.contains(&(48, digest)));
     }
 }

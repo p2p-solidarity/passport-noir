@@ -5,7 +5,7 @@
 
 use std::hash::pedersen_hash;
 
-use crate::profile::unpack_passport_profile;
+use crate::profile::unpack_passport_claims;
 
 /// Check if age is above a threshold given a birth date and current date.
 /// Handles century rollover for 2-digit year formats (e.g., MRZ uses YY format).
@@ -93,20 +93,19 @@ pub fn decode_domain(attr_hi: Field, attr_lo: Field) -> Field {
     pedersen_hash([attr_hi, attr_lo])
 }
 
-/// Evaluate "packed passport attrs encode a birth date at least `threshold`
+/// Evaluate "packed passport claims encode a birth date at least `threshold`
 /// years before (current_year, current_month, current_day)". Returns Field 0/1
-/// so the result can be published directly as `out_is_older`. Spec: x509-
-/// circuits.md sec 7 (`age_from_attr`).
-pub fn age_from_attr(
-    attr_hi: Field,
-    attr_lo: Field,
+/// so the result can be published directly as `out_is_older`. v3.1: takes the
+/// single packed claims Field from `profile::pack_passport_claims` (was an
+/// (attr_hi, attr_lo) pair in v3).
+pub fn age_from_claims(
+    claims: Field,
     current_year: u32,
     current_month: u32,
     current_day: u32,
     threshold: u32,
 ) -> Field {
-    let (birth_year, birth_month, birth_day, _nationality) =
-        unpack_passport_profile(attr_hi, attr_lo);
+    let (birth_year, birth_month, birth_day, _nationality) = unpack_passport_claims(claims);
     if check_age_above(
         birth_year,
         birth_month,
@@ -305,22 +304,16 @@ fn test_decode_domain_differs_on_input() {
 }
 
 #[test]
-fn test_age_from_attr_pass() {
-    let sod_hash: [u8; 32] = [0xAA; 32];
-    let dg1_hash: [u8; 32] = [0xBB; 32];
-    let (attr_hi, attr_lo) =
-        crate::profile::pack_passport_profile(sod_hash, dg1_hash, 2000, 1, 1, [84, 87, 78]);
-    let out = age_from_attr(attr_hi, attr_lo, 2026, 4, 1, 18);
+fn test_age_from_claims_pass() {
+    let claims = crate::profile::pack_passport_claims(2000, 1, 1, [84, 87, 78]);
+    let out = age_from_claims(claims, 2026, 4, 1, 18);
     assert(out == 1, "Age 26 should satisfy threshold 18");
 }
 
 #[test]
-fn test_age_from_attr_fail() {
-    let sod_hash: [u8; 32] = [0xAA; 32];
-    let dg1_hash: [u8; 32] = [0xBB; 32];
-    let (attr_hi, attr_lo) =
-        crate::profile::pack_passport_profile(sod_hash, dg1_hash, 2010, 1, 1, [84, 87, 78]);
-    let out = age_from_attr(attr_hi, attr_lo, 2026, 4, 1, 18);
+fn test_age_from_claims_fail() {
+    let claims = crate::profile::pack_passport_claims(2010, 1, 1, [84, 87, 78]);
+    let out = age_from_claims(claims, 2026, 4, 1, 18);
     assert(out == 0, "Age 16 should not satisfy threshold 18");
 }
 

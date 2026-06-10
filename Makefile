@@ -7,7 +7,9 @@ CIRCUIT_DIR = circuits
 MOPRO_DIR = mopro-binding
 MOPRO_IOS_BINDINGS_DIR = $(MOPRO_DIR)/MoproiOSBindings
 SWIFT_PACKAGE_BINDINGS_DIR = Sources/MoproiOSBindings
-CIRCUIT_PACKAGES = passport_verifier data_integrity disclosure prepare_link show_link passport_adapter openac_show device_binding sdjwt_adapter jwt_x5c_adapter x509_show composite_show mdoc_adapter
+# v3.1 production circuits only. Retired v1/v2 circuits live in
+# circuits-legacy/ (own workspace, built on demand -- see circuits-legacy/Nargo.toml).
+CIRCUIT_PACKAGES = passport_adapter openac_show sdjwt_adapter jwt_x5c_adapter x509_show composite_show mdoc_adapter
 IOS_ARCHS ?= aarch64-apple-ios,aarch64-apple-ios-sim
 
 # ──────────────────────────────────────────────────

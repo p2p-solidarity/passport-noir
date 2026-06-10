@@ -68,19 +68,16 @@ check_link() {
   fi
 }
 
-# v1 chain links
-check_link "passport_verifier" "data_integrity" "sod_hash" "v1[1]"
-check_link "data_integrity" "disclosure" "mrz_hash" "v1[2]"
-check_link "passport_verifier" "prepare_link" "sod_hash" "v1[3]"
-check_link "data_integrity" "prepare_link" "mrz_hash" "v1[4]"
-check_link "prepare_link" "show_link" "out_prepare_commitment" "v1[5]"
+# v1 chain retired to circuits-legacy/ (2026-06-10, upgrade-plan-v3.1.md
+# Phase 3). The production flow is the v3.1 commitment chain below.
+echo "  (v1 circuits retired -- skipped)"
 
 echo ""
-echo "=== v2 Commitment Chain ==="
+echo "=== v3.1 Commitment Chain ==="
 
 # passport_adapter -> openac_show via commitment
-check_link "passport_adapter" "openac_show" "out_commitment_x" "v2[1]"
-check_link "passport_adapter" "openac_show" "out_commitment_y" "v2[2]"
+check_link "passport_adapter" "openac_show" "out_commitment_x" "v3.1[1]"
+check_link "passport_adapter" "openac_show" "out_commitment_y" "v3.1[2]"
 
 echo ""
 echo "=== Shared Library Usage ==="
@@ -99,21 +96,21 @@ check_import() {
   fi
 }
 
-check_import "passport_adapter" "openac_core::commit" "v2 commit"
-check_import "openac_show" "openac_core::commit" "v2 commit"
-check_import "openac_show" "openac_core::show" "v2 show"
-check_import "openac_show" "openac_core::predicate" "v2 predicate"
+check_import "passport_adapter" "openac_core::commit" "v3.1 commit"
+check_import "openac_show" "openac_core::commit" "v3.1 commit"
+check_import "openac_show" "openac_core::show" "v3.1 show"
+check_import "openac_show" "openac_core::predicate" "v3.1 predicate"
 
 echo ""
 echo "=== Prepare-Show Commitment Equality ==="
 
-# Critical: passport_adapter and openac_show MUST use the same commit function
-# Both call commit_attributes() from openac_core::commit
-ADAPTER_COMMIT=$(grep -c "commit_attributes" "$CIRCUIT_DIR/passport_adapter/src/main.nr" 2>/dev/null || true)
-SHOW_COMMIT=$(grep -c "commit_attributes" "$CIRCUIT_DIR/openac_show/src/main.nr" 2>/dev/null || true)
+# Critical: passport_adapter and openac_show MUST use the same commit function.
+# v3.1: both call commit_passport_v3_1() (arity-8) from openac_core::commit.
+ADAPTER_COMMIT=$(grep -c "commit_passport_v3_1" "$CIRCUIT_DIR/passport_adapter/src/main.nr" 2>/dev/null || true)
+SHOW_COMMIT=$(grep -c "commit_passport_v3_1" "$CIRCUIT_DIR/openac_show/src/main.nr" 2>/dev/null || true)
 
 if [ "$ADAPTER_COMMIT" -gt 0 ] && [ "$SHOW_COMMIT" -gt 0 ]; then
-  ok "Both passport_adapter and openac_show use commit_attributes()"
+  ok "Both passport_adapter and openac_show use commit_passport_v3_1()"
 else
   issue "Commitment function usage mismatch (adapter: $ADAPTER_COMMIT, show: $SHOW_COMMIT)"
 fi
@@ -126,9 +123,7 @@ else
 fi
 
 # Check that openac_show re-computes commitment (not trusting external).
-# v3 Path A migrated from `commit_attributes(` to `commit_attributes_v3(`;
-# accept either so the script works across the v2 -> v3 transition.
-if grep -qE "commit_attributes(_v3)?\(" "$CIRCUIT_DIR/openac_show/src/main.nr" 2>/dev/null; then
+if grep -qF "commit_passport_v3_1(" "$CIRCUIT_DIR/openac_show/src/main.nr" 2>/dev/null; then
   ok "openac_show re-computes commitment (self-verifying)"
 else
   issue "openac_show does not re-compute commitment"

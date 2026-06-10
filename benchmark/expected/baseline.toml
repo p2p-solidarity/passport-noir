@@ -1,174 +1,120 @@
 # Benchmark Baseline
 # Generated: 2026-04-01; refreshed 2026-04-26 after openac_core security fixes.
-# 2026-04-28: refreshed again after closing P0-5 (sdjwt_adapter base64url
-# inclusion proof of disclosure hashes inside the issuer-signed payload) and
-# P1-4 (jwt_x5c_adapter base64url binding of the JWS signing-input payload
-# section to jwt_payload_norm). Both close audit-flagged off-chain policy
-# gaps and intentionally raise the gate count.
+# 2026-04-28: refreshed after closing P0-5 (sdjwt b64 inclusion) and P1-4
+# (jwt_x5c b64 payload binding).
+# 2026-06-10: refreshed for v3.1 (spec/upgrade-plan-v3.1.md):
+#   * Show-path unification: in-circuit challenge digest RETIRED; unified
+#     credential_type-keyed link tag; epoch is a single Field.
+#   * Passport commitment is arity-8 commit_passport_v3_1 (full-width
+#     SOD/DG1 hashes; truncated 32-byte pack removed).
+#   * v1/v2 circuits (passport_verifier, data_integrity, disclosure,
+#     prepare_link, show_link, device_binding) retired to circuits-legacy/ --
+#     dropped from this baseline; ~1.28 MB removed from the bundle.
+#   Headline gate wins: openac_show 1802 -> 647 (-64%), passport_adapter
+#   36247 -> 28596 (-21%), x509_show 549 -> 488 (-11%).
 # Update this after confirmed improvements via: make bench-update-baseline
 
 [meta]
 created = "2026-04-01"
-updated = "2026-04-28"
+updated = "2026-06-10"
 nargo_version = "1.0.0-beta.19"
 
 # Minimum test counts per circuit (fail if below)
 [tests]
-passport_verifier = { positive = 1, negative = 8, total = 9 }
-data_integrity = { positive = 11, negative = 8, total = 19 }
-disclosure = { positive = 13, negative = 5, total = 18 }
-prepare_link = { positive = 2, negative = 1, total = 3 }
-show_link = { positive = 4, negative = 1, total = 5 }
-# openac_core: +4 smt module + +4 merkle module - 2 deleted commit_attributes_extended
-openac_core = { positive = 48, negative = 11, total = 59 }
-openac_show = { positive = 6, negative = 4, total = 10 }
-# passport_adapter v3.1: +CSCA chain tests (+1 pos +3 neg) + DSC revocation (+1 pos +1 neg)
-passport_adapter = { positive = 11, negative = 5, total = 16 }
-device_binding = { positive = 1, negative = 3, total = 4 }
-# sdjwt_adapter v3.2 (P0-5 closure): +2 positive (assert_disclosures_in_payload
-# pass + skip-inactive) + +2 negative (missing disclosure, position past active
-# bytes) for the base64url inclusion proof.
-sdjwt_adapter = { positive = 8, negative = 4, total = 12 }
-# jwt_x5c_adapter v3.1 multi-issuer + v3.2 P1-4 (closure): adds 1 positive
-# (b64 binding round-trip) + 4 negative (missing dot, offset drift, norm drift,
-# truncated window) covering the JWS payload <-> jwt_payload_norm binding.
-jwt_x5c_adapter = { positive = 8, negative = 8, total = 16 }
-x509_show = { positive = 3, negative = 2, total = 5 }
-composite_show = { positive = 1, negative = 3, total = 4 }
-# mdoc_adapter v2 (Direction D + validUntil + deviceKey extraction, 2026-04-27).
-# v1 had 10/11/21; v2 adds 3 positive (test_v2_main_passes, parse_iso_date_known_values,
-# extract_device_key_from_mso_round_trip) and 4 negative (wrong validUntil pos,
-# wrong out_valid_until, wrong device key pos, tampered device key y byte,
-# parse_iso_date rejects missing dash). v1 4 negative tests (tampered_sig /
-# tampered_message_byte / wrong_envelope_position / envelope_window_past_message_len)
-# were repurposed to use v2_build_message via v2_invoke_main.
+# openac_core v3.1: show module rewritten (digest tests removed, unified
+# link-tag + cross-domain replay tests added); profile claims pack/unpack
+# tests replace passport_profile roundtrip; commit gains arity-8 tests.
+openac_core = { positive = 53, negative = 3, total = 95 }
+# openac_show v3.1: legacy digest tests removed; adds stale-nonce, forged
+# claims, wrong-link-tag, CRITICAL-2 sentinel regressions.
+openac_show = { positive = 8, negative = 8, total = 16 }
+passport_adapter = { positive = 12, negative = 9, total = 21 }
+sdjwt_adapter = { positive = 15, negative = 8, total = 23 }
+jwt_x5c_adapter = { positive = 13, negative = 13, total = 26 }
+# x509_show v3.1: digest negative test replaced by stale-nonce regression.
+x509_show = { positive = 4, negative = 7, total = 11 }
+# composite_show v3.1: +unlinkable positive; digest negative removed.
+composite_show = { positive = 3, negative = 11, total = 14 }
 mdoc_adapter = { positive = 13, negative = 15, total = 28 }
 
 [tests.total]
-minimum = 217
+minimum = 234
 
 # Gate count baselines (ACIR opcodes, warn if > 10% regression)
-# Measured: 2026-04-17, nargo 1.0.0-beta.19
-# Method: `nargo info --package <name>` (captured raw main.ACIR column).
+# Measured: 2026-06-10, nargo 1.0.0-beta.19 (`nargo info --workspace`,
+# main-function ACIR column).
 [gates]
-passport_verifier = 11736
-data_integrity = 13643
-disclosure = 487
-prepare_link = 283
-show_link = 757
-passport_adapter = 36247   # v3.1 (+10498): CSCA->DSC RSA chain + depth-8 Merkle inclusion + DSC revocation SMT (4/26: +24 from 0cd7bb7 path_index range-check)
-openac_show = 1802         # 4/26: +50 from 879f68e binding birth_year/month/day/nationality to commitment attr_hash (security fix)
-device_binding = 162
-# 4/28 P0-5 closure: jwt_payload_raw + sha256_var binding to jwt_payload_hash
-# + base64url-encoded disclosure inclusion proof at witnessed offsets (8 slots
-# x 43 chars). Adds ~30k gates vs prior 5841 baseline.
-sdjwt_adapter = 35885
-# Path A v3 additions (2026-04-17); jwt_x5c_adapter v3.1 optimisation 2026-04-17;
-# 4/28 P1-4 closure: in-circuit base64url decode of payload section (1024-byte
-# decoded buffer) + byte-equality with jwt_payload_norm. Adds ~115k gates vs
-# prior 20879 baseline; gate_budget bumped to 200000 in spec.toml.
+# v3.1 (-21% vs 36247): removing pack_passport_profile's truncation loops in
+# favour of direct hash_to_fields halves + single claims Field.
+passport_adapter = 28596
+# v3.1 (-64% vs 1802): 2-block SHA256 challenge digest, epoch byte/field
+# equality, and the packed-profile unpack/re-bind loops all removed.
+openac_show = 647
+sdjwt_adapter = 35255
 jwt_x5c_adapter = 136440
-x509_show = 549            # NEW — within 5,000 spec budget
-composite_show = 815       # 4/26: +131 from openac_core/predicate.nr + commit.nr changes (security fixes flow through imports). Main fn unchanged.
-mdoc_adapter = 692381      # 4/27: Direction D v2 (+validUntil prefix/parse + deviceKey extraction from mso). v1 was 441471, v0 was 7512.
+# v3.1 (-11% vs 549): digest computation removed; unified tag.
+x509_show = 488
+# v3.1 (+1.5% vs 815): arity-8 passport opening slightly outweighs the
+# removed composite digest. Acceptable -- still tiny.
+composite_show = 827
+mdoc_adapter = 692381
 
 # Artifact sizes in bytes (warn if > 20% regression)
-# Measured: 2026-04-17, nargo 1.0.0-beta.19
+# Measured: 2026-06-10, nargo 1.0.0-beta.19 (circuits/target/*.json).
 [artifact_bytes]
-passport_verifier = 653652
-data_integrity = 405646
-disclosure = 79661
-prepare_link = 58832
-show_link = 73746
-passport_adapter = 1473390   # v3.1: CSCA chain + SMT added
-openac_show = 178000          # 4/26: +10668 from 879f68e (birth_year binding); within 7% of prior
-device_binding = 7351
-# 4/28 P0-5: jwt_payload_raw + b64 inclusion proof drove artifact ~3.4x.
-sdjwt_adapter = 781000
-# 4/28 P1-4: in-circuit b64 decode + byte-equality drove artifact ~2.3x.
-jwt_x5c_adapter = 3120000
-x509_show = 112000           # 4/26: +9962
-composite_show = 133000      # 4/26: +15188 from new test cases ab6add8 + openac_core changes
-mdoc_adapter = 10115613      # 4/27: Direction D v2 (+validUntil + deviceKey). v1 was 6441164.
-total = 17008873             # 4/28: previous 14857613 + 781000 - 229000 + 3120000 - 1312940 (sdjwt + jwt_x5c grew)
+passport_adapter = 1334587
+openac_show = 146805
+sdjwt_adapter = 792963
+jwt_x5c_adapter = 3242540
+x509_show = 125312
+composite_show = 150762
+mdoc_adapter = 10119930
+# 2026-06-10 v3.1: 15.9 MB vs 17.0 MB pre-v3.1 (legacy circuits dropped from
+# the bundle + openac_show/passport_adapter shrink).
+total = 15912899
 
 # Bytes per gate (lower = more compact artifact representation)
 # Grade: A(≤10) B(≤30) C(≤60) D(≤100) F(>100)
+# NOTE: tiny show circuits (x509_show / composite_show / openac_show) grade F
+# on this ratio by construction -- low gate count inflates bytes/gate; their
+# absolute artifact size (<150 KB each) is what matters for the bundle.
 [bytes_per_gate]
-passport_verifier = 55
-data_integrity = 29
-disclosure = 163
-prepare_link = 207
-show_link = 97
-passport_adapter = 40   # 4/26: 1473390/36247 = 40.6
-openac_show = 98        # 4/26: 178000/1802 = 98.7
-device_binding = 45
-# 4/28 P0-5: 781000 / 35885 = 21.8 -> grade B (better ratio than v3.1).
+passport_adapter = 47
+openac_show = 227
 sdjwt_adapter = 22
-# 4/28 P1-4: 3120000 / 136440 = 22.9 -> grade B (gate-count growth absorbed
-# the artifact overhead, ratio improved vs v3.1's grade C).
-jwt_x5c_adapter = 23
-x509_show = 204        # 4/26: 112000/549 = 204
-composite_show = 163   # 4/26: 133000/815 = 163; main fn unchanged, regression from openac_core security fixes
-mdoc_adapter = 14      # 4/27: 10115613/692381 = 14.6 -> grade B (v2 maintains ratio; main-fn-dominant artifact)
+jwt_x5c_adapter = 24
+x509_show = 257
+composite_show = 182
+mdoc_adapter = 15
 
 # ============================================================
-# Witness generation time (nargo execute) — prove-time lower bound.
-# Measured 2026-04-27 on darwin/arm64, nargo 1.0.0-beta.19.
-# Only circuits with a real Prover.toml are reported; the other 8
-# circuits still have stub or v3-mismatched fixtures.
+# Witness generation time (nargo execute) -- prove-time lower bound.
+# 2026-06-10: the 2026-04-27 numbers covered only v1/v2 circuits, all of
+# which are now retired to circuits-legacy/. v3.1 circuits need fresh
+# Prover.toml fixtures before this section can be repopulated (Phase 0 of
+# spec/upgrade-plan-v3.1.md).
 # ============================================================
 [witness_gen_ms]
-disclosure = 302
-prepare_link = 177
-show_link = 165
-device_binding = 159
-total_4_circuits = 803
+status = "pending_v3_1_fixtures"
 
 # ============================================================
-# Real prove + verify timings — UNBLOCKED 2026-04-27.
+# Real prove + verify timings.
 #
-# History: the 4/27 morning bench-prove-verify run errored out with
-# `CircuitError: Incompatible noir_version`. Circuits compile with
-# nargo 1.0.0-beta.19; mopro-binding pinned noir_rs to the
-# `v1.0.0-beta.8-3` branch which only accepts beta.8 ACIR artifacts.
+# Toolchain: unblocked 2026-04-27 (noir_rs v1.0.0-beta.19; see git history
+# for the migration notes). The only measured datapoint so far is the
+# RETIRED v1 disclosure circuit -- kept as a reference magnitude because it
+# demonstrates how heavily SHA256 blackboxes dominate mobile prove time
+# (487 ACIR opcodes but 26.7 s prove / +309 MB RSS):
+#   disclosure_prove_ms = 26690, disclosure_verify_ms = 83,
+#   proof 18,724 B, vk 3,680 B, peak RSS +309 MB (darwin/arm64).
 #
-# Resolution: 4/27 afternoon, mopro-binding/Cargo.toml moved to
-# `tag = "v1.0.0-beta.19"` (released 2026-04-16, includes the
-# upstream switch to the official barretenberg-rs crate). Three
-# follow-up source edits made the build green:
-#   * noir.rs imports moved to `noir_rs::acir::native_types::*` and
-#     `noir_rs::acir::FieldElement` (both re-exports of the embedded
-#     acvm crate; the legacy `noir_rs::native_types` shim was removed
-#     in beta.19).
-#   * SUPPORTED_NOIR_VERSION_PREFIX bumped from "1.0.0-beta.8" to
-#     "1.0.0-beta.19" so assert_supported_noir_version accepts the
-#     freshly compiled circuit JSON.
-#
-# After the upgrade, `make bench-prove-verify` runs the four
-# disclosure benches end-to-end against real proofs.
-#
-# Numbers below come from: darwin/arm64 (host machine), nargo
-# 1.0.0-beta.19, noir_rs v1.0.0-beta.19, mopro-binding release
-# build, single-thread Criterion run. They reflect the v1 disclosure
-# circuit only (487 ACIR opcodes, ~80 KB artifact); v2/v3 circuits
-# still need bench wrappers added in mopro-binding/src/noir.rs.
+# v3.1 priority (upgrade-plan Phase 0): add bench wrappers in
+# mopro-binding/src/noir.rs for openac_show / x509_show / composite_show /
+# passport_adapter and record their prove/verify/RSS here. openac_show now
+# carries ZERO SHA256 blocks; its remaining prove cost is dominated by the
+# ECDSA-P256 device-binding blackbox.
 # ============================================================
 [performance]
-status = "unblocked"
-unblocked_on = "2026-04-27"
+status = "wrappers_pending_for_v3_1"
 mopro_binding_noir_rs = "v1.0.0-beta.19"
 host = "darwin/arm64"
-
-# disclosure (v1 SHA256-based, 487 gates, 79,661-byte artifact)
-disclosure_prove_ms = 26690    # 26.689755459 s -- first run on toolchain-upgraded build cache
-disclosure_verify_ms = 83      # 82.85275 ms
-disclosure_proof_bytes = 18724
-disclosure_vk_bytes = 3680
-disclosure_peak_rss_mb = 320   # delta 309 MB above 11 MB idle baseline
-
-# v2 / v3 prove+verify numbers still pending; bench wrappers for
-# passport_adapter / openac_show / composite_show etc. need to be
-# added to mopro-binding/src/noir.rs (mirror the disclosure pattern).
-v2_v3_status = "wrappers_pending_in_mopro_binding_src_noir_rs"
-

@@ -1,18 +1,17 @@
+# v3.1 production workspace. v1 (passport_verifier, data_integrity,
+# disclosure, prepare_link, show_link) and v2 (device_binding) circuits were
+# retired on 2026-06-10 (spec/upgrade-plan-v3.1.md Phase 3) and live in
+# circuits-legacy/ with their own workspace -- they are no longer compiled,
+# tested, or shipped by default.
 [workspace]
 members = [
-    "passport_verifier",
-    "data_integrity",
-    "disclosure",
-    "prepare_link",
-    "show_link",
     "openac_core",
     "passport_adapter",
     "openac_show",
-    "device_binding",
     "sdjwt_adapter",
     "jwt_x5c_adapter",
     "x509_show",
     "composite_show",
     "mdoc_adapter",
 ]
-default-member = "passport_verifier"
+default-member = "passport_adapter"

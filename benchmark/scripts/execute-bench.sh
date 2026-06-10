@@ -23,7 +23,7 @@ RED='\033[0;31m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-ALL_CIRCUITS=(passport_verifier data_integrity disclosure prepare_link show_link passport_adapter openac_show device_binding sdjwt_adapter jwt_x5c_adapter x509_show composite_show)
+ALL_CIRCUITS=(passport_adapter openac_show sdjwt_adapter jwt_x5c_adapter x509_show composite_show)
 
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 NARGO_VERSION=$(nargo --version 2>/dev/null | head -1 || echo "unknown")

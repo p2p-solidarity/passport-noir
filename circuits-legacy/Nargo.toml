@@ -1,0 +1,16 @@
+# Retired v1 / v2 circuits (2026-06-10, spec/upgrade-plan-v3.1.md Phase 3).
+# Superseded by the v3.1 flow: passport_adapter (prepare) + openac_show /
+# composite_show (show). Kept for reference and for regenerating the v1
+# mopro test vectors; NOT part of the default build, CI, or release bundle.
+#
+# Build on demand:  cd circuits-legacy && nargo compile --workspace
+[workspace]
+members = [
+    "passport_verifier",
+    "data_integrity",
+    "disclosure",
+    "prepare_link",
+    "show_link",
+    "device_binding",
+]
+default-member = "passport_verifier"
