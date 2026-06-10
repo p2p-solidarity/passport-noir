@@ -41,7 +41,7 @@ check_pub_inputs() {
   fi
 }
 
-BIN_CIRCUITS=(passport_adapter openac_show sdjwt_adapter jwt_x5c_adapter x509_show composite_show)
+BIN_CIRCUITS=(dsc_chain passport_adapter openac_show sdjwt_adapter jwt_x5c_adapter x509_show composite_show)
 for circuit in "${BIN_CIRCUITS[@]}"; do
   check_pub_inputs "$circuit"
 done
@@ -78,17 +78,28 @@ check_assertions() {
 # prepare_link, show_link, device_binding) retired to circuits-legacy/ on
 # 2026-06-10 (spec/upgrade-plan-v3.1.md Phase 3) -- no longer spec-checked.
 
-# passport_adapter
+# dsc_chain (Phase 6: cacheable CSCA trust chain split out of passport_adapter)
+check_assertions "dsc_chain" \
+  "DSC exponent must be 65537 (ICAO 9303 v3 trust model)" \
+  "CSCA signature over DSC TBS failed verification" \
+  "CSCA Merkle root mismatch" \
+  "dsc_serial must match the CSCA-signed TBS serial bytes" \
+  "Revocation witness matches blocked serial" \
+  "Revocation SMT root mismatch" \
+  "out_dsc_id must equal the computed DSC linking id"
+
+# passport_adapter (Phase 6: per-holder core; CSCA chain moved to dsc_chain,
+# linked via the in_dsc_id pin)
 check_assertions "passport_adapter" \
   "Passport DSC signature verification failed" \
+  "DSC modulus does not match the trusted dsc_chain id" \
   "Too many data groups" \
   "Must have at least one data group" \
   "DG length exceeds maximum" \
   "Data group hash mismatch" \
   "SOD combined hash mismatch" \
   "Commitment X mismatch" \
-  "Commitment Y mismatch" \
-  "dsc_serial must match the CSCA-signed TBS serial bytes"
+  "Commitment Y mismatch"
 
 # openac_show (v3.1: challenge digest retired; predicates come from the
 # committed claims Field so the v3 "birth_* not bound" asserts are gone.

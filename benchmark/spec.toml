@@ -6,6 +6,7 @@
 nargo_version_prefix = "1.0.0-beta"
 workspace_members = [
   "openac_core",
+  "dsc_chain",
   "passport_adapter",
   "openac_show",
   "sdjwt_adapter",
@@ -35,6 +36,7 @@ workspace_members = [
 legacy_circuits = ["passport_verifier", "data_integrity", "disclosure", "prepare_link", "show_link", "device_binding"]
 v3_1_circuits = [
   "openac_core",
+  "dsc_chain",
   "passport_adapter",
   "openac_show",
   "sdjwt_adapter",
@@ -147,66 +149,107 @@ min_positive_tests = 4
 min_negative_tests = 2
 
 # ============================================================
-# Circuit: passport_adapter (v3.1 — Path A combined prepare with CSCA chain)
+# Circuit: dsc_chain (v3.1 + Phase 6 — cacheable DSC trust-chain proof)
 # ============================================================
-[circuits.passport_adapter]
+# Phase 6 (spec/upgrade-plan-v3.1.md sec.7.2): the public-data CSCA trust chain
+# split out of passport_adapter so it can be precomputed once per DSC (a single
+# DSC signs hundreds of thousands of passports) and shipped with each CSCA
+# Master List snapshot. Outputs `out_dsc_id`; the passport core proof pins the
+# same id, and the verifier checks they are equal -- no recursion.
+[circuits.dsc_chain]
 type = "bin"
-description = "Combined passport prepare (v3.1): DSC->SOD RSA verify + CSCA->DSC RSA chain + depth-8 Master List Merkle inclusion + depth-32 DSC revocation SMT + DG hash chain + arity-8 Pedersen commitment (commit_passport_v3_1, full-width SOD/DG1 hashes, pk_digest-bound)"
-source = "circuits/passport_adapter/src/main.nr"
+description = "DSC trust-chain proof (Phase 6): CSCA->DSC RSA-2048 + depth-8 Master List Merkle inclusion + serial binding + depth-32 revocation SMT non-membership -> cacheable out_dsc_id (compute_dsc_id over the CSCA-signed DSC modulus)"
+source = "circuits/dsc_chain/src/main.nr"
 version = "v3.1"
 
-gate_budget = 50000  # v3.1 sec.7.3 reduction measured 19,997 opcodes (was 28,596)
+gate_budget = 20000  # Phase 6 measured 10,111 opcodes
 
-# v3.1 promotes the trust anchor model: `csca_root` (ICAO Master List snapshot)
-# and `dsc_smt_root` (DSC revocation list) are the only non-commitment public
-# inputs. The DSC RSA modulus is now a private witness because CSCA + Merkle
-# inclusion proves its legitimacy.
-# 2026-04-28 P0-3: `exponent` is also PUBLIC and asserted to equal 65537 in
-# the circuit so verifiers can rely on the DSC RSA exponent being ICAO-mandated.
 public_inputs = [
   "csca_root", "dsc_smt_root",
   "exponent",
-  "out_commitment_x", "out_commitment_y",
+  "out_dsc_id",
 ]
-public_input_types = ["Field", "Field", "u32", "Field", "Field"]
+public_input_types = ["Field", "Field", "u32", "Field"]
 
 private_inputs = [
-  "sod_hash", "signature_limbs", "modulus_limbs", "redc_limbs",
   "csca_modulus_limbs", "csca_redc_limbs",
   "dsc_tbs", "dsc_cert_sig_limbs",
   "csca_merkle_index", "csca_merkle_siblings",
   "csca_tbs_hash_hi", "csca_tbs_hash_lo",
   "dsc_serial", "smt_siblings", "smt_old_key", "smt_old_value", "smt_is_old0",
+]
+private_input_types = [
+  "[u128; 18]", "[u128; 18]",
+  "[u8; 512]", "[u128; 18]",
+  "u32", "[Field; 8]",
+  "Field", "Field",
+  "[u8; 20]", "[Field; 32]", "Field", "Field", "bool",
+]
+
+assertions = [
+  "DSC exponent must be 65537 (ICAO 9303 v3 trust model)",
+  "CSCA signature over DSC TBS failed verification",
+  "CSCA Merkle root mismatch",
+  "dsc_serial must match the CSCA-signed TBS serial bytes",
+  "Revocation witness matches blocked serial",
+  "Revocation SMT root mismatch",
+  "out_dsc_id must equal the computed DSC linking id",
+]
+
+constants = { DSC_TBS_LEN = 512, DSC_SERIAL_OFFSET = 352, DSC_SERIAL_LEN = 20, CSCA_MERKLE_DEPTH = 8, SMT_DEPTH = 32, CSCA_RSA_EXPONENT = 65537, DSC_RSA_EXPONENT = 65537 }
+
+min_positive_tests = 5   # extract roundtrip, dsc_id derive, non-membership, serial offset, exponent const
+min_negative_tests = 6
+
+exports = { out_dsc_id = "Field" }
+
+[circuits.dsc_chain.dependencies]
+noir_rsa = "v0.10.0"
+bignum = "v0.9.2"
+sha256 = "v0.3.0"
+openac_core = "path"
+
+# ============================================================
+# Circuit: passport_adapter (v3.1 + Phase 6 — Path A passport core prepare)
+# ============================================================
+[circuits.passport_adapter]
+type = "bin"
+description = "Passport core prepare (v3.1 + Phase 6): DSC->SOD RSA verify + DG hash chain + arity-8 Pedersen commitment (commit_passport_v3_1, full-width SOD/DG1 hashes, pk_digest-bound), pinned to the cacheable dsc_chain trust proof via compute_dsc_id(in_dsc_id)"
+source = "circuits/passport_adapter/src/main.nr"
+version = "v3.1"
+
+gate_budget = 50000  # Phase 6 measured 11,000 opcodes (was 19,997 pre-split, 28,596 pre-7.3)
+
+# Phase 6 (sec.7.2): the CSCA trust anchors moved to dsc_chain. The only
+# non-commitment public input here is `in_dsc_id` (= dsc_chain.out_dsc_id),
+# which the verifier pins equal across the two proofs so the DSC that signed
+# this SOD is exactly the one dsc_chain validated.
+# 2026-04-28 P0-3: `exponent` is PUBLIC and asserted to equal 65537 so verifiers
+# can rely on the DSC RSA exponent being ICAO-mandated.
+public_inputs = [
+  "in_dsc_id",
+  "exponent",
+  "out_commitment_x", "out_commitment_y",
+]
+public_input_types = ["Field", "u32", "Field", "Field"]
+
+private_inputs = [
+  "sod_hash", "signature_limbs", "modulus_limbs", "redc_limbs",
   "dg_count", "dg_contents", "dg_lengths", "expected_dg_hashes",
   "link_rand",
   "enclave_pk_x", "enclave_pk_y",
 ]
 private_input_types = [
   "[u8; 32]", "[u128; 18]", "[u128; 18]", "[u128; 18]",
-  "[u128; 18]", "[u128; 18]",
-  "[u8; 512]", "[u128; 18]",
-  "u32", "[Field; 8]",
-  "Field", "Field",
-  "[u8; 20]", "[Field; 32]", "Field", "Field", "bool",
   "u8", "[[u8; 512]; 2]", "[u32; 2]", "[[u8; 32]; 2]",
   "Field",
   "[u8; 32]", "[u8; 32]",
 ]
 
-# 2026-04-28 P1-7 follow-up: passport_adapter switched to compute_csca_leaf_v2
-# in both `verify_csca_chain` and the DSC revocation SMT issuer_id derivation.
-# `csca_tbs_hash_hi/lo` are private witnesses constrained by the Master List
-# Merkle root (a tampered hash produces a leaf that no longer matches the
-# off-chain snapshot's path).
 assertions = [
   "Passport DSC exponent must be 65537 (ICAO 9303 v3 trust model)",
   "Passport DSC signature verification failed",
-  "CSCA signature over DSC TBS failed verification",
-  "DSC modulus mismatch with CSCA-signed TBS",
-  "CSCA Merkle root mismatch",
-  "dsc_serial must match the CSCA-signed TBS serial bytes",
-  "Revocation witness matches blocked serial",
-  "Revocation SMT root mismatch",
+  "DSC modulus does not match the trusted dsc_chain id",
   "Too many data groups",
   "Must have at least one data group",
   "DG length exceeds maximum",
@@ -216,12 +259,13 @@ assertions = [
   "Commitment Y mismatch",
 ]
 
-constants = { MAX_DG_COUNT = 2, MAX_DG_SIZE = 512, DSC_TBS_LEN = 512, DSC_SERIAL_OFFSET = 352, DSC_SERIAL_LEN = 20, CSCA_MERKLE_DEPTH = 8, SMT_DEPTH = 32, CSCA_RSA_EXPONENT = 65537, DSC_RSA_EXPONENT = 65537 }
+constants = { MAX_DG_COUNT = 2, MAX_DG_SIZE = 512, DSC_RSA_EXPONENT = 65537 }
 
-min_positive_tests = 7   # v3.1 unit tests: DG chain + commitment + DSC extract + revocation
-min_negative_tests = 6
+min_positive_tests = 7   # DG chain + commitment (6) + dsc_id binding
+min_negative_tests = 3
 
 exports = { out_commitment_x = "Field", out_commitment_y = "Field" }
+imports = { in_dsc_id = "dsc_chain" }
 
 [circuits.passport_adapter.dependencies]
 noir_rsa = "v0.10.0"
@@ -677,6 +721,22 @@ imports = { in_commitment_passport_x = "passport_adapter", in_commitment_passpor
 
 [circuits.composite_show.dependencies]
 openac_core = "path"
+
+# ============================================================
+# Cross-Circuit Trust-Chain Link (Phase 6 flow — sec.7.2)
+# ============================================================
+# dsc_chain proves the public CSCA->DSC trust chain once per DSC and exports
+# `out_dsc_id`; passport_adapter (core) re-derives the same id from its DSC
+# modulus and pins it as `in_dsc_id`. The verifier checks the two ids are equal,
+# so the per-holder SOD signer is exactly the DSC the cacheable proof validated.
+[cross_circuit.phase6_dsc_chain]
+description = "Phase 6 DSC linking-id chain: dsc_chain.out_dsc_id == passport_adapter.in_dsc_id (compute_dsc_id over the CSCA-signed DSC modulus)"
+
+[[cross_circuit.phase6_dsc_chain.links]]
+from = "dsc_chain"
+to = "passport_adapter"
+via = "out_dsc_id"  # passport_adapter imports it as in_dsc_id
+type = "Field"
 
 # ============================================================
 # Cross-Circuit Commitment Chain (v3.1 flow — Path A)

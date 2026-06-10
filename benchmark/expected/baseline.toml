@@ -10,8 +10,10 @@
 #   * v1/v2 circuits (passport_verifier, data_integrity, disclosure,
 #     prepare_link, show_link, device_binding) retired to circuits-legacy/ --
 #     dropped from this baseline; ~1.28 MB removed from the bundle.
-#   Headline gate wins: openac_show 1802 -> 647 (-64%), passport_adapter
-#   36247 -> 28596 (-21%), x509_show 549 -> 488 (-11%).
+#   Headline gate wins: openac_show 1802 -> 647 (-64%), x509_show 549 -> 488.
+# 2026-06-10 sec.7.3 + Phase 6: passport prepare 28596 -> 19997 (DG count 4->2 +
+#   DSC_TBS_LEN 1536->512) -> phone-side core 11000 after splitting the cacheable
+#   CSCA trust chain into dsc_chain (10111). compute_dsc_id ties the two proofs.
 # Update this after confirmed improvements via: make bench-update-baseline
 
 [meta]
@@ -24,11 +26,15 @@ nargo_version = "1.0.0-beta.19"
 # openac_core v3.1: show module rewritten (digest tests removed, unified
 # link-tag + cross-domain replay tests added); profile claims pack/unpack
 # tests replace passport_profile roundtrip; commit gains arity-8 tests.
-openac_core = { positive = 53, negative = 3, total = 95 }
+# openac_core: +4 Phase 6 compute_dsc_id tests (merkle module) -> 99.
+openac_core = { positive = 57, negative = 3, total = 99 }
 # openac_show v3.1: legacy digest tests removed; adds stale-nonce, forged
 # claims, wrong-link-tag, CRITICAL-2 sentinel regressions.
 openac_show = { positive = 8, negative = 8, total = 16 }
-passport_adapter = { positive = 12, negative = 9, total = 21 }
+# Phase 6: dsc_chain is the cacheable CSCA trust-chain proof; passport_adapter
+# slimmed to the per-holder core (DSC->SOD + DG + commitment + dsc_id pin).
+dsc_chain = { positive = 5, negative = 7, total = 12 }
+passport_adapter = { positive = 9, negative = 3, total = 12 }
 sdjwt_adapter = { positive = 15, negative = 8, total = 23 }
 jwt_x5c_adapter = { positive = 13, negative = 13, total = 26 }
 # x509_show v3.1: digest negative test replaced by stale-nonce regression.
@@ -38,16 +44,19 @@ composite_show = { positive = 3, negative = 11, total = 14 }
 mdoc_adapter = { positive = 13, negative = 15, total = 28 }
 
 [tests.total]
-minimum = 234
+minimum = 241
 
 # Gate count baselines (ACIR opcodes, warn if > 10% regression)
 # Measured: 2026-06-10, nargo 1.0.0-beta.19 (`nargo info --workspace`,
 # main-function ACIR column).
 [gates]
-# v3.1 sec.7.3 prepare reduction (-30% vs 28596): MAX_DG_COUNT 4->2 drops two
-# unconditional SHA256(512B) DG hashes; DSC_TBS_LEN 1536->512 cuts the DSC-TBS
-# SHA256 from ~25 to ~9 compression blocks.
-passport_adapter = 19997
+# Phase 6 split (sec.7.2): cacheable CSCA trust chain (CSCA->DSC RSA + Merkle +
+# revocation SMT) -> cacheable dsc_id, precomputable once per DSC.
+dsc_chain = 10111
+# Phase 6 core (-45% vs 19997, -62% vs 28596): only the per-holder DSC->SOD RSA
+# + DG chain + commitment + dsc_id pin run on the phone; the CSCA RSA chain,
+# Merkle, and SMT moved to dsc_chain.
+passport_adapter = 11000
 # v3.1 (-64% vs 1802): 2-block SHA256 challenge digest, epoch byte/field
 # equality, and the packed-profile unpack/re-bind loops all removed.
 openac_show = 647
@@ -63,17 +72,19 @@ mdoc_adapter = 692381
 # Artifact sizes in bytes (warn if > 20% regression)
 # Measured: 2026-06-10, nargo 1.0.0-beta.19 (circuits/target/*.json).
 [artifact_bytes]
-passport_adapter = 1007039
+dsc_chain = 664739
+passport_adapter = 753946
 openac_show = 146805
 sdjwt_adapter = 792963
 jwt_x5c_adapter = 3242540
 x509_show = 125312
 composite_show = 150762
 mdoc_adapter = 10119930
-# 2026-06-10 v3.1: 15.6 MB. Pre-v3.1 was 17.0 MB; legacy circuits dropped +
-# openac_show/passport_adapter shrink, then sec.7.3 cut passport_adapter a
-# further 0.33 MB (1.33 -> 1.01 MB).
-total = 15585351
+# 2026-06-10 v3.1 + Phase 6: 16.0 MB across 8 bin circuits. The phone-side
+# prepare footprint dropped (passport core 1.01 -> 0.75 MB); dsc_chain (0.66 MB)
+# is a separate proof that is cacheable / server-distributed with the CSCA
+# snapshot, so it does not have to ship in the phone bundle.
+total = 15996997
 
 # Bytes per gate (lower = more compact artifact representation)
 # Grade: A(≤10) B(≤30) C(≤60) D(≤100) F(>100)
@@ -81,7 +92,8 @@ total = 15585351
 # on this ratio by construction -- low gate count inflates bytes/gate; their
 # absolute artifact size (<150 KB each) is what matters for the bundle.
 [bytes_per_gate]
-passport_adapter = 50
+dsc_chain = 66
+passport_adapter = 69
 openac_show = 227
 sdjwt_adapter = 22
 jwt_x5c_adapter = 24

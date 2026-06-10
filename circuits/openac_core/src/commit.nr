@@ -39,6 +39,14 @@ pub global DOMAIN_X509_ISSUER: Field = 0x78353039;
 pub global DOMAIN_CSCA_NODE: Field = 0x6373636e;
 pub global DOMAIN_CSCA_LEAF: Field = 0x6373636c;
 
+// Phase 6 DSC linking id domain. ASCII "dsci". Binds the DSC RSA-2048 modulus
+// (+ exponent) into one Field so the cacheable `dsc_chain` proof and the
+// per-holder passport core proof can be tied together without recursion: the
+// dsc_chain proof outputs it, the core proof pins it and re-derives it from the
+// DSC modulus it uses for the DSC->SOD signature. Separate domain so a DSC id
+// can never collide with a CSCA leaf, an SMT node, or a pk digest.
+pub global DOMAIN_DSC_ID: Field = 0x64736369;
+
 // Paper: Com(m; r) = product(g_i^{m_i}) * h^r
 // Noir: pedersen_commitment([domain, attrs..., r]) -> EmbeddedCurvePoint (Grumpkin)
 //

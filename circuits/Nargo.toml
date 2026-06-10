@@ -6,6 +6,7 @@
 [workspace]
 members = [
     "openac_core",
+    "dsc_chain",
     "passport_adapter",
     "openac_show",
     "sdjwt_adapter",

@@ -20,9 +20,10 @@ Passport → MRZ OCR → NFC chip read → CSCA passive auth → OpenPassport No
 ## Project Structure
 
 ```
-circuits/                   # Noir workspace (Nargo.toml at root) — 8 production circuits (v3.1)
+circuits/                   # Noir workspace (Nargo.toml at root) — 9 production circuits (v3.1)
 ├── openac_core/            # v3.1: Shared Pedersen library (commit/show/predicate/profile/smt/merkle/base64)
-├── passport_adapter/       # v3.1: Passport prepare (CSCA root + DSC SMT + arity-8 commitment)
+├── dsc_chain/              # Phase 6: cacheable DSC trust chain (CSCA→DSC RSA + Merkle + revocation SMT → dsc_id)
+├── passport_adapter/       # v3.1+Phase 6: Passport core (DSC→SOD RSA + DG chain + arity-8 commitment, pins dsc_id)
 ├── openac_show/            # v3.1: Passport show (digest-free; nonce_hash freshness + unified link tag)
 ├── sdjwt_adapter/          # v3.2: SD-JWT (ES256) → Pedersen commitment
 ├── jwt_x5c_adapter/        # v3.1: JWT x5c (RSA + JWT payload) → X.509 commitment
@@ -194,11 +195,18 @@ Release workflow: compile circuits → build xcframework on macOS → zip + uplo
 
 ## Circuit Details
 
-### passport_adapter (v3.1 Prepare Phase — combined, offline once)
-Single prepare circuit replacing the old v1 trio: RSA-2048 (PKCS#1 v1.5) DSC→SOD verify + CSCA→DSC chain (depth-8 Master List Merkle) + depth-32 DSC revocation SMT + DG hash chain + arity-8 Pedersen commitment.
-- **Public inputs**: `csca_root`, `dsc_smt_root`, `exponent` (=65537), `out_commitment_x/y`
+### dsc_chain (Phase 6 — cacheable DSC trust chain, offline/server-side once per DSC)
+Phase 6 split (spec/upgrade-plan-v3.1.md §7.2): the public-data CSCA trust chain extracted from `passport_adapter` so it can be precomputed once per DSC (a single DSC signs hundreds of thousands of passports) and shipped with each CSCA Master List snapshot. CSCA→DSC RSA-2048 chain (depth-8 Master List Merkle) + depth-32 DSC revocation SMT + serial binding.
+- **Public inputs**: `csca_root`, `dsc_smt_root`, `exponent` (=65537), `out_dsc_id`
+- `out_dsc_id = compute_dsc_id(CSCA-signed DSC modulus, exponent)` — the linking id the passport core proof pins (`in_dsc_id`); the verifier checks the two are equal, so no recursion is needed.
+- ~10.1k ACIR; cacheable, so it does not run on the phone's prepare hot path.
+
+### passport_adapter (v3.1 + Phase 6 — passport core prepare, phone-side per passport)
+The per-holder half of the prepare proof after the Phase 6 split: RSA-2048 (PKCS#1 v1.5) DSC→SOD verify + DG hash chain + arity-8 Pedersen commitment, pinned to the trusted DSC via `in_dsc_id`. ~11k ACIR (was 28.6k before §7.3 + Phase 6).
+- **Public inputs**: `in_dsc_id` (= `dsc_chain.out_dsc_id`), `exponent` (=65537), `out_commitment_x/y`
+- DSC binding: `compute_dsc_id(modulus_limbs, exponent) == in_dsc_id` ties the SOD signer to the DSC `dsc_chain` validated.
 - Commitment: `commit_passport_v3_1(claims, sod_hash_hi/lo, dg1_hash_hi/lo, pk_digest, link_rand)` — full-width hashes, no truncation; `claims` = 9-byte packed birth date + nationality
-- **SOD hash format (hard constraint)**: `sod_hash = SHA256(dg0_hash || dg1_hash || dg2_hash || dg3_hash)` with **zero-padding** for unused DG slots (each slot is 32 bytes regardless of `dg_count`). This is **NOT** the ICAO 9303 LDS Security Object's TLV-encoded `signedAttrs` structure. The iOS app pipeline must normalize NFC chip data into this raw-concatenation layout before feeding the circuit.
+- **SOD hash format (hard constraint)**: `sod_hash = SHA256(dg1_hash || dg15_hash)` over `MAX_DG_COUNT = 2` slots (§7.3: DG1 predicate claims + DG15 active-auth key), each slot 32 bytes with **zero-padding** for unused slots. This is **NOT** the ICAO 9303 LDS Security Object's TLV-encoded `signedAttrs` structure. The iOS app pipeline must normalize NFC chip data into this raw-concatenation layout before feeding the circuit.
 
 ### openac_show (v3.1 Show Phase — mobile hot path, per presentation)
 - **No in-circuit challenge digest** (v3.1): freshness/replay protection = the public `nonce_hash`, which the verifier pins against the nonce it issued AND which is the ECDSA-P256 message of the in-circuit device binding. UltraHonk's public-input binding makes a separate transcript digest redundant — removing it cut openac_show from 1,802 to 647 ACIR opcodes and deleted 2 SHA256 blocks from every presentation.
@@ -209,12 +217,13 @@ Single prepare circuit replacing the old v1 trio: RSA-2048 (PKCS#1 v1.5) DSC→S
 ### x509_show / composite_show (v3.1)
 Same digest-free pattern: ECDSA-P256 over pinned `nonce_hash` + commitment re-open + predicate + unified link tag. composite_show opens the arity-8 passport commitment AND an arity-5 aux commitment (X.509 or SD-JWT) under one shared `pk_digest`; its link tag is keyed on `(DOMAIN_PASSPORT, link_rand_p)` so a scoped verifier recognises the holder across solo and bundle presentations.
 
-### OpenAC Flow (v3.1 composition)
+### OpenAC Flow (v3.1 + Phase 6 composition)
 ```
-passport_adapter ──(out_commitment_x/y)──► openac_show        (passport-only presentation)
-                └─(out_commitment_x/y)──► composite_show ◄──(aux commitment)── jwt_x5c_adapter / sdjwt_adapter
-jwt_x5c_adapter ──(out_commitment_x/y)──► x509_show           (X.509-only presentation)
+dsc_chain ──(out_dsc_id)──► passport_adapter ──(out_commitment_x/y)──► openac_show     (passport-only presentation)
+                                            └─(out_commitment_x/y)──► composite_show ◄──(aux commitment)── jwt_x5c_adapter / sdjwt_adapter
+jwt_x5c_adapter ─────────────────────────────(out_commitment_x/y)──► x509_show         (X.509-only presentation)
 ```
+- **Phase 6 (§7.2)**: `dsc_chain` (cacheable, once per DSC) outputs `out_dsc_id`; `passport_adapter` pins `in_dsc_id`. Verifier checks `dsc_chain.out_dsc_id == passport_adapter.in_dsc_id` (no recursion). Keeps the phone-side core at ~11k ACIR while preserving the full CSCA trust chain.
 - **Paper reference**: OpenAC (zkID Team @ PSE, Nov 2025) — see `openAC.md`; v3.1 design rationale in `spec/upgrade-plan-v3.1.md`
 - **Device binding**: in-circuit ECDSA-P256 over `nonce_hash`; `pk_digest` bound inside every commitment (Path A)
 - **Domain separation** (Noir / Rust / Swift consistent):

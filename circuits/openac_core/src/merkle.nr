@@ -1,6 +1,6 @@
 use std::hash::pedersen_hash;
 
-use crate::commit::{DOMAIN_CSCA_LEAF, DOMAIN_CSCA_NODE};
+use crate::commit::{DOMAIN_CSCA_LEAF, DOMAIN_CSCA_NODE, DOMAIN_DSC_ID};
 
 // Fixed-depth Merkle inclusion proof for the CSCA Master List (ICAO 9303
 // country signing certificate anchors). Mirrors the static-snapshot trust
@@ -56,6 +56,25 @@ pub fn compute_csca_leaf_v2(
     inputs[3] = tbs_hash_lo;
     for i in 0..CSCA_MODULUS_LIMBS {
         inputs[4 + i] = csca_modulus_limbs[i] as Field;
+    }
+    pedersen_hash(inputs)
+}
+
+/// Phase 6 DSC linking id (spec/upgrade-plan-v3.1.md sec.7.2). Binds the DSC
+/// RSA-2048 modulus and exponent into one Field. The cacheable `dsc_chain`
+/// proof derives it from the DSC modulus it extracted from the CSCA-signed TBS
+/// and exposes it as a public output; the per-holder passport core proof
+/// re-derives it from the DSC modulus it uses for the DSC->SOD signature and
+/// pins it as a public input. The verifier checks the two ids are equal, so the
+/// holder's SOD must have been signed by exactly the DSC the dsc_chain proof
+/// validated -- without either proof carrying the other's RSA witnesses.
+pub fn compute_dsc_id(dsc_modulus_limbs: [u128; CSCA_MODULUS_LIMBS], rsa_exponent: u32) -> Field {
+    // Layout: [DOMAIN, exponent, modulus_limbs[0..18]] = 20.
+    let mut inputs: [Field; 20] = [0; 20];
+    inputs[0] = DOMAIN_DSC_ID;
+    inputs[1] = rsa_exponent as Field;
+    for i in 0..CSCA_MODULUS_LIMBS {
+        inputs[2 + i] = dsc_modulus_limbs[i] as Field;
     }
     pedersen_hash(inputs)
 }
@@ -200,4 +219,41 @@ fn test_csca_leaf_v2_changes_with_exponent() {
     let a = compute_csca_leaf_v2(test_modulus_limbs(), 65537, 0, 0);
     let b = compute_csca_leaf_v2(test_modulus_limbs(), 3, 0, 0);
     assert(a != b, "compute_csca_leaf_v2 must bind RSA exponent");
+}
+
+// ---------- compute_dsc_id (Phase 6 dsc_chain link) tests ----------
+
+#[test]
+fn test_dsc_id_deterministic() {
+    let a = compute_dsc_id(test_modulus_limbs(), 65537);
+    let b = compute_dsc_id(test_modulus_limbs(), 65537);
+    assert(a == b, "compute_dsc_id must be deterministic for the same DSC key");
+}
+
+#[test]
+fn test_dsc_id_changes_with_modulus() {
+    // Phase 6 soundness: a different DSC modulus must produce a different id,
+    // otherwise a passport core proof could pin a dsc_chain id while signing
+    // the SOD with an unrelated DSC key.
+    let mut other = test_modulus_limbs();
+    other[0] ^= 1;
+    let a = compute_dsc_id(test_modulus_limbs(), 65537);
+    let b = compute_dsc_id(other, 65537);
+    assert(a != b, "compute_dsc_id must bind the DSC modulus");
+}
+
+#[test]
+fn test_dsc_id_changes_with_exponent() {
+    let a = compute_dsc_id(test_modulus_limbs(), 65537);
+    let b = compute_dsc_id(test_modulus_limbs(), 3);
+    assert(a != b, "compute_dsc_id must bind the RSA exponent");
+}
+
+#[test]
+fn test_dsc_id_separated_from_csca_leaf() {
+    // Distinct domain + arity (20 vs 22) keeps a DSC id from ever colliding
+    // with a CSCA Master List leaf, even on the same modulus + exponent.
+    let dsc = compute_dsc_id(test_modulus_limbs(), 65537);
+    let csca = compute_csca_leaf_v2(test_modulus_limbs(), 65537, 0, 0);
+    assert(dsc != csca, "compute_dsc_id must be domain-separated from compute_csca_leaf_v2");
 }

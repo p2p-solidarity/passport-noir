@@ -79,6 +79,10 @@ echo "=== v3.1 Commitment Chain ==="
 check_link "passport_adapter" "openac_show" "out_commitment_x" "v3.1[1]"
 check_link "passport_adapter" "openac_show" "out_commitment_y" "v3.1[2]"
 
+# Phase 6 (sec.7.2): dsc_chain exports out_dsc_id, passport core pins in_dsc_id;
+# the verifier checks they are equal so the SOD signer is the trusted DSC.
+check_link "dsc_chain" "passport_adapter" "dsc_id" "phase6[dsc_id]"
+
 echo ""
 echo "=== Shared Library Usage ==="
 
