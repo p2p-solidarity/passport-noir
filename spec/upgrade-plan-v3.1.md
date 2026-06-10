@@ -296,6 +296,21 @@ cross_circuit 鏈。
 
 ### 7.4 Phase 8 — Active Authentication（DG15）防複製
 
+> Status: **IMPLEMENTED 2026-06-10（EC-P256 變體，圈內 #2 長期方案）**。
+> passport_adapter 新增 `verify_active_authentication`：從 DG-chain 綁定的
+> DG15（slot 1，`AA_PK_X/Y_OFFSET`）抽出 AA EC-P256 公鑰，驗證晶片對公開
+> `aa_challenge` 的 ECDSA 簽章（私有 `aa_signature`），證明晶片在場 —— 只有
+> DG dump + SOD 的複製者沒有 AA 私鑰，無法通過。以公開 `require_aa` 旗標閘控
+> （verifier 要防複製就 pin true，與 disclose_* 同 fail-closed 模式），故無
+> DG15 的護照仍可用 `require_aa=false`。`require_aa=true` 時另 assert
+> `dg_count > DG15_SLOT` 確保 AA 公鑰確實被 DG chain 雜湊綁定。+104 ACIR（一個
+> ECDSA-P256 blackbox；後端成本約等於一條 P256 verify，與 show 端 device
+> binding 同級）。
+>
+> 註：本實作走 EC-P256 AA（std::ecdsa_secp256r1 原生支援，與 device binding
+> 共用），對應現代護照的 EC AA 金鑰；ICAO RSA AA（ISO 9796-2）與「無 DG15」
+> 由 `require_aa=false`/未來變體處理。下方 #2 的 RSA 假設因此調整為 EC 主線。
+
 Passive Auth 證明「資料來自真護照」但**不防晶片複製**：拿到他人 DG dump +
 SOD 的人可以在自己手機上 enroll。防複製需要 Active Authentication（DG15
 公鑰挑戰簽章，證明晶片在場）。app 的 NFC 層已讀 DG15；路線：

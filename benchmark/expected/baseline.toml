@@ -34,7 +34,7 @@ openac_show = { positive = 8, negative = 8, total = 16 }
 # Phase 6: dsc_chain is the cacheable CSCA trust-chain proof; passport_adapter
 # slimmed to the per-holder core (DSC->SOD + DG + commitment + dsc_id pin).
 dsc_chain = { positive = 5, negative = 7, total = 12 }
-passport_adapter = { positive = 10, negative = 3, total = 13 }
+passport_adapter = { positive = 15, negative = 3, total = 18 }
 sdjwt_adapter = { positive = 15, negative = 8, total = 23 }
 jwt_x5c_adapter = { positive = 13, negative = 13, total = 26 }
 # x509_show v3.1: digest negative test replaced by stale-nonce regression.
@@ -44,7 +44,7 @@ composite_show = { positive = 3, negative = 11, total = 14 }
 mdoc_adapter = { positive = 13, negative = 15, total = 28 }
 
 [tests.total]
-minimum = 246
+minimum = 251
 
 # Gate count baselines (ACIR opcodes, warn if > 10% regression)
 # Measured: 2026-06-10, nargo 1.0.0-beta.19 (`nargo info --workspace`,
@@ -55,8 +55,9 @@ minimum = 246
 dsc_chain = 10111
 # Phase 6 core (-61% vs 28596): only the per-holder DSC->SOD RSA + DG chain +
 # commitment + dsc_id pin run on the phone; the CSCA RSA chain, Merkle, and SMT
-# moved to dsc_chain. +63 for sec.7.1 in-circuit per-scope link_rand derivation.
-passport_adapter = 11063
+# moved to dsc_chain. +63 sec.7.1 scoped link_rand, +104 sec.7.4 DG15 ECDSA-P256
+# active authentication (ACIR blackbox; backend cost ~ one P256 verify).
+passport_adapter = 11167
 # v3.1 (-64% vs 1802): 2-block SHA256 challenge digest, epoch byte/field
 # equality, and the packed-profile unpack/re-bind loops all removed.
 openac_show = 647
@@ -73,7 +74,7 @@ mdoc_adapter = 692381
 # Measured: 2026-06-10, nargo 1.0.0-beta.19 (circuits/target/*.json).
 [artifact_bytes]
 dsc_chain = 664739
-passport_adapter = 759855
+passport_adapter = 769483
 openac_show = 146805
 sdjwt_adapter = 792963
 jwt_x5c_adapter = 3242540
@@ -84,7 +85,7 @@ mdoc_adapter = 10119930
 # prepare footprint dropped (passport core 1.01 -> 0.75 MB); dsc_chain (0.66 MB)
 # is a separate proof that is cacheable / server-distributed with the CSCA
 # snapshot, so it does not have to ship in the phone bundle.
-total = 16002906
+total = 16012534
 
 # Bytes per gate (lower = more compact artifact representation)
 # Grade: A(≤10) B(≤30) C(≤60) D(≤100) F(>100)

@@ -8,6 +8,7 @@ use openac_core::device::pk_digest_from_bytes;
 use openac_core::merkle::compute_dsc_id;
 use openac_core::predicate::two_digit_year_to_four;
 use openac_core::profile::{derive_scoped_link_rand, pack_passport_claims};
+use std::ecdsa_secp256r1::verify_signature;
 use std::embedded_curve_ops::EmbeddedCurvePoint;
 
 // OpenAC Passport Core Adapter (Prepare Phase, v3.1 + Phase 6 -- Path A)
@@ -20,15 +21,23 @@ use std::embedded_curve_ops::EmbeddedCurvePoint;
 //   2. DSC linking-id pin: re-derive `compute_dsc_id(DSC modulus, exponent)`
 //      and assert it equals the public `in_dsc_id` the dsc_chain proof output.
 //   3. DG hash chain verification (SOD -> DG1 / DG15).
-//   4. Pedersen commitment on Grumpkin with pk_digest [Path A device binding].
+//   4. DG15 active authentication (sec.7.4, anti-cloning): the AA EC-P256 key
+//      lives in the DG-chain-bound DG15; verify the chip's ECDSA signature over
+//      a fresh challenge to prove chip-in-possession (a cloner with only DG
+//      dumps + SOD lacks the AA private key). Gated by the public `require_aa`.
+//   5. Pedersen commitment on Grumpkin with pk_digest [Path A device binding].
 //
-// No ECDSA verify runs here (Prepare has no nonce yet -- that lives in
-// openac_show). The commitment (C.x, C.y) links this prepare proof to the show
-// proof; `in_dsc_id` links it to the dsc_chain trust proof.
+// The commitment (C.x, C.y) links this prepare proof to the show proof;
+// `in_dsc_id` links it to the dsc_chain trust proof.
 //
 // Public inputs:
 //   - in_dsc_id: DSC linking id (= dsc_chain.out_dsc_id). Verifier pins both.
 //   - exponent: ICAO-mandated 65537 (asserted in-circuit).
+//   - link_scope: per-scope pseudonym selector (sec.7.1).
+//   - require_aa: when true, DG15 active authentication is enforced. Verifiers
+//     wanting anti-cloning pin it true (same fail-closed pattern as disclose_*).
+//   - aa_challenge: 32-byte message the chip's AA key signed (verifier-pinnable
+//     for freshness / replay protection of the chip-presence proof).
 //   - out_commitment_x, out_commitment_y: Grumpkin Pedersen commitment point.
 
 // v3.1 prepare reduction (spec/upgrade-plan-v3.1.md sec.7.3): the DG chain
@@ -42,10 +51,17 @@ use std::embedded_curve_ops::EmbeddedCurvePoint;
 global MAX_DG_COUNT: u32 = 2;
 global MAX_DG_SIZE: u32 = 512;
 
-// Conventional DG slot index for DG1 (predicate claims, sole commitment
-// input). Slot 1 is reserved for DG15 (active-authentication public key),
-// consumed by the Phase 8 AA check.
+// DG slot indices inside the reduced chain. Slot 0 = DG1 (predicate claims,
+// sole commitment input). Slot 1 = DG15 (active-authentication EC public key).
 global DG1_SLOT: u32 = 0;
+global DG15_SLOT: u32 = 1;
+
+// Byte offsets of the AA EC-P256 public-key coordinates inside the normalised
+// DG15 content (x at [0..32), y at [32..64)). The app's DG15 normaliser places
+// the SubjectPublicKeyInfo EC point at the front; these 64 bytes are covered by
+// the DG chain hash (DG15 -> SOD), so the extracted key is passive-auth bound.
+global AA_PK_X_OFFSET: u32 = 0;
+global AA_PK_Y_OFFSET: u32 = 32;
 
 global RSA_LIMB_COUNT: u32 = 18;
 
@@ -107,6 +123,45 @@ fn extract_passport_profile(dg1_content: [u8; MAX_DG_SIZE]) -> (u32, u32, u32, [
     (birth_year, birth_mm, birth_dd, nationality)
 }
 
+/// Extract the AA EC-P256 public-key coordinates from the normalised DG15
+/// content. The 64 bytes [0..64) are covered by the DG chain hash, so the key
+/// is passive-auth bound to the SOD.
+fn extract_aa_pubkey(dg15_content: [u8; MAX_DG_SIZE]) -> ([u8; 32], [u8; 32]) {
+    let mut aa_pk_x: [u8; 32] = [0; 32];
+    let mut aa_pk_y: [u8; 32] = [0; 32];
+    for i in 0..32 {
+        aa_pk_x[i] = dg15_content[AA_PK_X_OFFSET + i];
+        aa_pk_y[i] = dg15_content[AA_PK_Y_OFFSET + i];
+    }
+    (aa_pk_x, aa_pk_y)
+}
+
+/// DG15 active authentication (sec.7.4, anti-cloning). Verifies the chip signed
+/// `aa_challenge` with the AA private key whose public key lives in the
+/// DG-chain-bound DG15. When `require_aa` is false the check is skipped (the
+/// ECDSA blackbox still runs -- Noir cannot drop it conditionally -- but its
+/// result is not asserted), so non-AA passports stay supported while a verifier
+/// wanting chip-presence simply pins `require_aa = true`.
+fn verify_active_authentication(
+    dg15_content: [u8; MAX_DG_SIZE],
+    dg_count: u8,
+    aa_signature: [u8; 64],
+    aa_challenge: [u8; 32],
+    require_aa: bool,
+) {
+    let (aa_pk_x, aa_pk_y) = extract_aa_pubkey(dg15_content);
+    let aa_valid = verify_signature(aa_pk_x, aa_pk_y, aa_signature, aa_challenge);
+    if require_aa {
+        // DG15 must be in the chain (slot 1 hashed), otherwise the AA key is not
+        // passive-auth bound and a prover could supply an arbitrary key + sig.
+        assert(
+            dg_count as u32 > DG15_SLOT,
+            "DG15 must be present when active authentication is required",
+        );
+        assert(aa_valid, "Active Authentication signature verification failed");
+    }
+}
+
 /// Compute the v3.1 Pedersen commitment for a passport credential.
 ///
 /// v3.1 (spec/upgrade-plan-v3.1.md sec.3.3): the SOD and DG1 hashes enter the
@@ -145,6 +200,8 @@ fn main(
     // === Path A device-binding witnesses (enclave pk is private) ===
     enclave_pk_x: [u8; 32],
     enclave_pk_y: [u8; 32],
+    // === DG15 active-authentication witness (chip's ECDSA over aa_challenge) ===
+    aa_signature: [u8; 64],
     // === Public DSC linking id (= dsc_chain.out_dsc_id) ===
     in_dsc_id: pub Field,
     // === Public RSA exponent (P0-3, 2026-04-28) ===
@@ -152,6 +209,9 @@ fn main(
     // === Public verifier scope (sec.7.1): pins which service this commitment
     // is the holder's pseudonym for. Different scope -> different commitment. ===
     link_scope: pub Field,
+    // === Public active-authentication policy + challenge (sec.7.4) ===
+    require_aa: pub bool,
+    aa_challenge: pub [u8; 32],
     // === Public outputs ===
     out_commitment_x: pub Field,
     out_commitment_y: pub Field,
@@ -189,14 +249,25 @@ fn main(
         expected_dg_hashes,
     );
 
-    // Step 4: Derive pk_digest from enclave pk (Path A, no ECDSA in prepare).
+    // Step 4 (sec.7.4): DG15 active authentication -- prove chip-in-possession
+    // so a clone of the DG dumps + SOD alone cannot enroll. The AA key is read
+    // from the DG-chain-bound DG15 (slot 1).
+    verify_active_authentication(
+        dg_contents[DG15_SLOT],
+        dg_count,
+        aa_signature,
+        aa_challenge,
+        require_aa,
+    );
+
+    // Step 5: Derive pk_digest from enclave pk (Path A device binding).
     let pk_digest = pk_digest_from_bytes(enclave_pk_x, enclave_pk_y);
 
-    // Step 5: Derive the per-scope blinding (sec.7.1) so the commitment is the
+    // Step 6: Derive the per-scope blinding (sec.7.1) so the commitment is the
     // holder's pseudonym for `link_scope` -- and only for that scope.
     let link_rand = derive_scoped_link_rand(link_rand_seed, link_scope);
 
-    // Step 6: Compute v3.1 Pedersen commitment on Grumpkin (binds pk_digest).
+    // Step 7: Compute v3.1 Pedersen commitment on Grumpkin (binds pk_digest).
     let dg1_hash = expected_dg_hashes[DG1_SLOT];
     let dg1_content = dg_contents[DG1_SLOT];
     let commitment =
@@ -456,4 +527,97 @@ fn test_scoped_commitment_differs_across_scopes() {
     let c_a = compute_passport_commitment(sod_hash, dg1, dg1_hash, pk_digest, r_a);
     let c_b = compute_passport_commitment(sod_hash, dg1, dg1_hash, pk_digest, r_b);
     assert(c_a.x != c_b.x, "different scope must yield a different scoped commitment");
+}
+
+// --- DG15 active authentication (sec.7.4) ---
+//
+// Reuses the canonical ECDSA-P256 fixture from openac_core::device: the AA
+// public key is the same point as test_enclave_pk_x/y, and (signature, message)
+// below are a valid triple under it. So an "AA chip" whose DG15 key is that
+// point, signing test_aa_challenge(), produces test_aa_signature().
+
+fn test_aa_signature() -> [u8; 64] {
+    [
+        0x6e, 0xd8, 0x75, 0x24, 0xa9, 0xc8, 0x44, 0xad, 0x2c, 0x67, 0x2c, 0x33, 0xaa, 0x15, 0x73,
+        0xdd, 0xcc, 0xba, 0x5a, 0x2c, 0x74, 0xf6, 0xa6, 0xbd, 0xb3, 0x40, 0xcf, 0x18, 0xac, 0xd8,
+        0x43, 0x89, 0x1c, 0xd8, 0xf8, 0xa8, 0x63, 0x76, 0x98, 0x3c, 0x44, 0xa2, 0x9a, 0x61, 0xe9,
+        0x0c, 0x85, 0xc0, 0x37, 0x34, 0xd6, 0xb3, 0xba, 0x68, 0xb3, 0xaa, 0xbc, 0x9f, 0x64, 0x11,
+        0xe1, 0x3b, 0x45, 0x4c,
+    ]
+}
+
+fn test_aa_challenge() -> [u8; 32] {
+    [
+        0xd6, 0xe9, 0xef, 0x3f, 0xc3, 0x44, 0x1a, 0xb5, 0x33, 0xb3, 0x84, 0x31, 0xda, 0x4c, 0xa9,
+        0x67, 0x49, 0xaf, 0x9a, 0x3e, 0x2f, 0x8e, 0x99, 0x35, 0x38, 0x91, 0xbd, 0xf4, 0x05, 0x94,
+        0x5a, 0xde,
+    ]
+}
+
+/// Normalised DG15 fixture: AA EC-P256 pubkey x at [0..32), y at [32..64).
+fn build_dg15_with_aa_key() -> [u8; MAX_DG_SIZE] {
+    let mut dg15: [u8; MAX_DG_SIZE] = [0; MAX_DG_SIZE];
+    let x = test_enclave_pk_x();
+    let y = test_enclave_pk_y();
+    for i in 0..32 {
+        dg15[AA_PK_X_OFFSET + i] = x[i];
+        dg15[AA_PK_Y_OFFSET + i] = y[i];
+    }
+    dg15
+}
+
+#[test]
+fn test_aa_extract_roundtrips_key() {
+    let (x, y) = extract_aa_pubkey(build_dg15_with_aa_key());
+    assert(x == test_enclave_pk_x(), "AA pubkey x must round-trip from DG15");
+    assert(y == test_enclave_pk_y(), "AA pubkey y must round-trip from DG15");
+}
+
+#[test]
+fn test_aa_passes_with_valid_dg15_signature() {
+    // dg_count = 2 => DG15 (slot 1) is in the chain; valid chip signature.
+    verify_active_authentication(
+        build_dg15_with_aa_key(),
+        2,
+        test_aa_signature(),
+        test_aa_challenge(),
+        true,
+    );
+}
+
+#[test(should_fail_with = "Active Authentication signature verification failed")]
+fn test_aa_rejects_tampered_signature() {
+    // Anti-cloning core: a cloner without the AA private key cannot forge the
+    // chip signature, so a tampered signature must be rejected when AA required.
+    let mut bad = test_aa_signature();
+    bad[0] ^= 0xFF;
+    verify_active_authentication(build_dg15_with_aa_key(), 2, bad, test_aa_challenge(), true);
+}
+
+#[test(should_fail_with = "DG15 must be present when active authentication is required")]
+fn test_aa_rejects_missing_dg15_when_required() {
+    // dg_count = 1 means DG15 is not hashed into the chain, so its key is not
+    // passive-auth bound; require_aa must reject rather than trust a loose key.
+    verify_active_authentication(
+        build_dg15_with_aa_key(),
+        1,
+        test_aa_signature(),
+        test_aa_challenge(),
+        true,
+    );
+}
+
+#[test]
+fn test_aa_skipped_when_not_required() {
+    // Non-AA passport: require_aa = false, so an unusable signature is tolerated
+    // (the verifier that wants anti-cloning pins require_aa = true instead).
+    let mut garbage = test_aa_signature();
+    garbage[0] ^= 0xFF;
+    verify_active_authentication(
+        build_dg15_with_aa_key(),
+        1,
+        garbage,
+        test_aa_challenge(),
+        false,
+    );
 }

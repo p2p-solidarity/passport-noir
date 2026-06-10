@@ -98,6 +98,8 @@ check_assertions "passport_adapter" \
   "DG length exceeds maximum" \
   "Data group hash mismatch" \
   "SOD combined hash mismatch" \
+  "DG15 must be present when active authentication is required" \
+  "Active Authentication signature verification failed" \
   "Commitment X mismatch" \
   "Commitment Y mismatch"
 

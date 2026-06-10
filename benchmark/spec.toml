@@ -216,11 +216,11 @@ openac_core = "path"
 # ============================================================
 [circuits.passport_adapter]
 type = "bin"
-description = "Passport core prepare (v3.1 + Phase 6): DSC->SOD RSA verify + DG hash chain + arity-8 Pedersen commitment (commit_passport_v3_1, full-width SOD/DG1 hashes, pk_digest-bound), pinned to the cacheable dsc_chain trust proof via compute_dsc_id(in_dsc_id)"
+description = "Passport core prepare (v3.1 + Phase 6 + sec.7.4 AA): DSC->SOD RSA verify + DG hash chain + DG15 ECDSA-P256 active authentication (anti-cloning, gated by require_aa) + per-scope link_rand + arity-8 Pedersen commitment (commit_passport_v3_1, pk_digest-bound), pinned to the cacheable dsc_chain trust proof via compute_dsc_id(in_dsc_id)"
 source = "circuits/passport_adapter/src/main.nr"
 version = "v3.1"
 
-gate_budget = 50000  # Phase 6 + sec.7.1 measured 11,063 opcodes (was 28,596 pre-7.3)
+gate_budget = 50000  # Phase 6 + sec.7.1 + sec.7.4 AA measured 11,167 opcodes (was 28,596 pre-7.3)
 
 # Phase 6 (sec.7.2): the CSCA trust anchors moved to dsc_chain. `in_dsc_id`
 # (= dsc_chain.out_dsc_id) is pinned equal across the two proofs so the DSC that
@@ -234,21 +234,24 @@ public_inputs = [
   "in_dsc_id",
   "exponent",
   "link_scope",
+  "require_aa", "aa_challenge",
   "out_commitment_x", "out_commitment_y",
 ]
-public_input_types = ["Field", "u32", "Field", "Field", "Field"]
+public_input_types = ["Field", "u32", "Field", "bool", "[u8; 32]", "Field", "Field"]
 
 private_inputs = [
   "sod_hash", "signature_limbs", "modulus_limbs", "redc_limbs",
   "dg_count", "dg_contents", "dg_lengths", "expected_dg_hashes",
   "link_rand_seed",
   "enclave_pk_x", "enclave_pk_y",
+  "aa_signature",
 ]
 private_input_types = [
   "[u8; 32]", "[u128; 18]", "[u128; 18]", "[u128; 18]",
   "u8", "[[u8; 512]; 2]", "[u32; 2]", "[[u8; 32]; 2]",
   "Field",
   "[u8; 32]", "[u8; 32]",
+  "[u8; 64]",
 ]
 
 assertions = [
@@ -260,11 +263,13 @@ assertions = [
   "DG length exceeds maximum",
   "Data group hash mismatch",
   "SOD combined hash mismatch",
+  "DG15 must be present when active authentication is required",
+  "Active Authentication signature verification failed",
   "Commitment X mismatch",
   "Commitment Y mismatch",
 ]
 
-constants = { MAX_DG_COUNT = 2, MAX_DG_SIZE = 512, DSC_RSA_EXPONENT = 65537 }
+constants = { MAX_DG_COUNT = 2, MAX_DG_SIZE = 512, DG1_SLOT = 0, DG15_SLOT = 1, AA_PK_X_OFFSET = 0, AA_PK_Y_OFFSET = 32, DSC_RSA_EXPONENT = 65537 }
 
 min_positive_tests = 7   # DG chain + commitment (6) + dsc_id binding
 min_negative_tests = 3
