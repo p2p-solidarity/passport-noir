@@ -15,7 +15,10 @@ circuits/target/
 # Rust build artifacts
 mopro-binding/target/
 mopro-binding/build/
-mopro-binding/Cargo.lock
+# Cargo.lock IS tracked: this crate produces the distributed xcframework, so
+# CI/release must resolve identical deps. Leaving it untracked let fresh resolves
+# drift (mopro-ffi 0.3.5 -> 0.3.6, uniffi 0.29 -> 0.31), breaking the build and
+# producing a binary whose UniFFI contract mismatched the committed mopro.swift.
 mopro-binding/MoproiOSBindings/
 mopro-binding/MoproAndroidBindings/
 
