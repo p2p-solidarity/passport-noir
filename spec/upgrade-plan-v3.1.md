@@ -261,7 +261,7 @@ unlinkable mode 只是不發 link tag；多個 verifier 合謀比對 commitment 
 ### 7.2 Phase 6 — passport prepare 拆分：快取式 DSC 信任鏈證明（最高優先）
 
 > Status: **IMPLEMENTED 2026-06-10**。新增 `dsc_chain` 電路（CSCA→DSC RSA + depth-8 Merkle + 撤銷 SMT + serial binding → 公開 `out_dsc_id`），`passport_adapter` 瘦身為 per-holder core（DSC→SOD + DG + commitment + `in_dsc_id` pin）。連結用 `openac_core::merkle::compute_dsc_id(DSC modulus, exponent)`（新 `DOMAIN_DSC_ID`），verifier 檢查 `dsc_chain.out_dsc_id == passport_adapter.in_dsc_id`（無遞迴）。
-> 實測（nargo info）：dsc_chain **10,111 ACIR**（可快取）、passport_adapter 手機端 core **19,997 → 11,000 ACIR**（比原始 28,596 −62%，優於本節預估的 ~18k，因 §7.3 的 MAX_DG_COUNT=2 已先讓 DG chain 變便宜）。dsc_chain 12 測試、passport_adapter 12 測試、openac_core +4（compute_dsc_id）全綠。mopro 雙 proof verifier 為後續 commit。
+> 實測（nargo info）：dsc_chain **10,111 ACIR**（可快取）、passport_adapter 手機端 core **19,997 → 11,000 ACIR**（比原始 28,596 −62%，優於本節預估的 ~18k，因 §7.3 的 MAX_DG_COUNT=2 已先讓 DG chain 變便宜）。dsc_chain 12 測試、passport_adapter 18 測試（含 sec.7.1/7.4）、openac_core +8（compute_dsc_id + scoped link_rand）全綠。mopro 雙 proof verifier 已完成：`verify_openac_v3_phase6` 驗 dsc_chain proof + passport core + show，並 pin `dsc_chain.out_dsc_id == passport.in_dsc_id`（openac_v3 62 測試全綠）。
 
 **背景**：v1 passport_verifier 只有 11.7k ACIR 是因為它只驗 DSC→SOD 一條
 簽章，「DSC 是否可信」靠 verifier 圈外查表；v3.1 的 28.6k 多出來的是第二條

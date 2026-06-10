@@ -28,6 +28,12 @@
 //!     `spec/x509-migration.md §3`).
 //!   * v3.1: passport commitments are arity-8 — v3 passport prepare
 //!     artifacts must be re-prepared (offline, no user interaction).
+//!   * Phase 6 (spec sec.7.2): passport prepare is now TWO proofs — the
+//!     cacheable `dsc_chain` trust proof (`DscChainArtifactV3`) plus the
+//!     per-holder passport core proof, tied by `out_dsc_id == in_dsc_id`.
+//!     Verify the pair with `verify_openac_v3_phase6`. The passport prepare
+//!     layout grew to 38 public inputs (in_dsc_id, exponent, link_scope,
+//!     require_aa, aa_challenge[32], commitment) — see `prepare_layout_passport`.
 
 use crate::MoproError;
 use sha2::{Digest, Sha256};
@@ -206,20 +212,72 @@ pub fn pin_field(field_index: usize, value: [u8; FIELD_BYTES]) -> (usize, [u8; F
 // must be updated in lockstep -- the strict verifier will catch any drift
 // because the proof's actual public inputs will not match the layout.
 
-/// passport_adapter v3.1 prepare layout. Public inputs (5 total):
+/// passport_adapter v3.1 + Phase 6 + sec.7.4 prepare layout. Public inputs
+/// (38 total):
+///   0:      in_dsc_id  (= dsc_chain.out_dsc_id -- linked by the verifier)
+///   1:      exponent (must be 65537 -- circuit asserts this internally too)
+///   2:      link_scope (sec.7.1 per-scope pseudonym selector)
+///   3:      require_aa (sec.7.4 active-authentication policy flag)
+///   4..36:  aa_challenge bytes (one Field per byte, the chip-signed message)
+///   36:     out_commitment_x
+///   37:     out_commitment_y
+///
+/// Phase 6 split the CSCA trust chain into the `dsc_chain` proof; `csca_root` /
+/// `dsc_smt_root` are now pinned by `dsc_chain_layout`, and the two proofs are
+/// tied together by the verifier checking `dsc_chain.out_dsc_id == in_dsc_id`
+/// (see `verify_openac_v3_phase6`).
+///
+/// `require_aa` and `aa_challenge` are REQUIRED pins because the circuit only
+/// enforces active authentication when `require_aa` is true (fail-closed like
+/// the disclose_* flags): a verifier wanting anti-cloning MUST pin
+/// `require_aa = true` and a fresh `aa_challenge`, or a prover could present a
+/// proof with `require_aa = false` and the chip-presence check is skipped.
+pub fn prepare_layout_passport(
+    expected_dsc_id: [u8; FIELD_BYTES],
+    link_scope: [u8; FIELD_BYTES],
+    require_aa: bool,
+    aa_challenge: &[u8; 32],
+) -> PrepareLayoutV3 {
+    let mut pins = vec![
+        pin_field(0, expected_dsc_id),
+        pin_field(1, u32_as_field(65537)),
+        pin_field(2, link_scope),
+        pin_field(3, bool_as_field(require_aa)),
+    ];
+    pins.extend(pin_byte_array(4, aa_challenge));
+    PrepareLayoutV3 {
+        num_public_inputs: 38,
+        commitment_x_index: 36,
+        commitment_y_index: 37,
+        extra_pinned_fields: pins,
+    }
+}
+
+/// dsc_chain (Phase 6) public-input layout. Public inputs (4 total):
 ///   0: csca_root
 ///   1: dsc_smt_root
-///   2: exponent (must be 65537 -- circuit asserts this internally too)
-///   3: out_commitment_x
-///   4: out_commitment_y
-pub fn prepare_layout_passport(
+///   2: exponent (must be 65537)
+///   3: out_dsc_id  (linked to passport_adapter.in_dsc_id)
+///
+/// The cacheable DSC trust-chain proof carries no commitment, so it does not
+/// use `PrepareLayoutV3`; `verify_dsc_chain_proof` pins these fields directly
+/// and returns the decoded `out_dsc_id`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DscChainLayoutV3 {
+    pub num_public_inputs: usize,
+    /// Field index of `out_dsc_id`.
+    pub dsc_id_index: usize,
+    /// Pins for csca_root / dsc_smt_root / exponent.
+    pub extra_pinned_fields: Vec<(usize, [u8; FIELD_BYTES])>,
+}
+
+pub fn dsc_chain_layout(
     csca_root: [u8; FIELD_BYTES],
     dsc_smt_root: [u8; FIELD_BYTES],
-) -> PrepareLayoutV3 {
-    PrepareLayoutV3 {
-        num_public_inputs: 5,
-        commitment_x_index: 3,
-        commitment_y_index: 4,
+) -> DscChainLayoutV3 {
+    DscChainLayoutV3 {
+        num_public_inputs: 4,
+        dsc_id_index: 3,
         extra_pinned_fields: vec![
             pin_field(0, csca_root),
             pin_field(1, dsc_smt_root),
@@ -478,6 +536,26 @@ pub struct PrepareArtifactV3 {
     pub vk: Vec<u8>,
 }
 
+/// Cacheable DSC trust-chain artifact (Phase 6, spec sec.7.2). Precomputed once
+/// per DSC (public data only) and distributed with the CSCA Master List
+/// snapshot. Its `dsc_id` (= the proof's `out_dsc_id`) is pinned equal to the
+/// passport prepare proof's `in_dsc_id` so the per-holder SOD signer is exactly
+/// the DSC this proof validated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DscChainArtifactV3 {
+    pub created_at_unix: u64,
+    pub expires_at_unix: u64,
+    /// Trust anchors the verifier pins (must match policy).
+    pub csca_root: [u8; FIELD_BYTES],
+    pub dsc_smt_root: [u8; FIELD_BYTES],
+    /// out_dsc_id — links to passport_adapter.in_dsc_id.
+    pub dsc_id: [u8; FIELD_BYTES],
+    /// Noir proof bytes (dsc_chain circuit).
+    pub proof: Vec<u8>,
+    /// Verification key bytes (dsc_chain circuit).
+    pub vk: Vec<u8>,
+}
+
 /// Show presentation with in-circuit ECDSA device binding (v3.1 Path A).
 ///
 /// v3.1: the `challenge` / `challenge_digest` fields were removed — the
@@ -699,6 +777,90 @@ where
     }
 
     Ok(())
+}
+
+/// Verify a Phase 6 `dsc_chain` proof and return its decoded `out_dsc_id`.
+///
+/// Pins `csca_root` / `dsc_smt_root` / `exponent`(=65537) at their ABI indices,
+/// verifies the proof, and confirms the artifact's `dsc_id` matches the proof's
+/// `out_dsc_id` public output. The returned id is what the passport prepare
+/// proof must pin as `in_dsc_id` (enforced by `verify_openac_v3_phase6`).
+pub fn verify_dsc_chain_proof<F>(
+    dsc_chain: &DscChainArtifactV3,
+    layout: &DscChainLayoutV3,
+    dsc_chain_vk_hash: &[u8; 32],
+    verifier: &F,
+) -> Result<[u8; FIELD_BYTES], MoproError>
+where
+    F: Fn(Vec<u8>, Vec<u8>) -> Result<bool, MoproError>,
+{
+    if sha256_hash(&dsc_chain.vk) != *dsc_chain_vk_hash {
+        return Err(verification_error("untrusted_dsc_chain_vk"));
+    }
+    if dsc_chain.proof.is_empty() || dsc_chain.vk.is_empty() {
+        return Err(verification_error("empty_dsc_chain_bundle"));
+    }
+    if !verifier(dsc_chain.proof.clone(), dsc_chain.vk.clone())? {
+        return Err(verification_error("invalid_dsc_chain_proof"));
+    }
+
+    let pis = decode_public_input_prefix(&dsc_chain.proof, layout.num_public_inputs)?;
+    assert_public_inputs_at(
+        &pis,
+        &layout.extra_pinned_fields,
+        "dsc_chain_public_input_mismatch",
+    )?;
+    let out_dsc_id = *pis
+        .get(layout.dsc_id_index)
+        .ok_or_else(|| verification_error("dsc_chain_missing_dsc_id"))?;
+    // The artifact metadata must reflect the proof's public output.
+    if out_dsc_id != dsc_chain.dsc_id {
+        return Err(verification_error("dsc_chain_dsc_id_mismatch"));
+    }
+    Ok(out_dsc_id)
+}
+
+/// Verify a full Phase 6 presentation: the cacheable `dsc_chain` trust proof,
+/// the per-holder passport prepare proof, and the show proof — tying the first
+/// two together by `dsc_chain.out_dsc_id == passport.in_dsc_id`.
+///
+/// `policy.prepare_layout` MUST be a `prepare_layout_passport(...)` built with
+/// `expected_dsc_id == dsc_chain.dsc_id` (it pins `in_dsc_id` at field index 0);
+/// this function defensively re-checks that pin against the dsc_chain proof's
+/// decoded `out_dsc_id`, so a mismatched or unlinked pair is rejected even if
+/// the caller built the layout incorrectly.
+pub fn verify_openac_v3_phase6<F>(
+    dsc_chain: &DscChainArtifactV3,
+    prepare: &PrepareArtifactV3,
+    show: &ShowPresentationV3,
+    policy: &PolicyV3,
+    dsc_chain_layout: &DscChainLayoutV3,
+    dsc_chain_vk_hash: &[u8; 32],
+    verifier: &F,
+) -> Result<(), MoproError>
+where
+    F: Fn(Vec<u8>, Vec<u8>) -> Result<bool, MoproError>,
+{
+    // 1. Verify the cacheable DSC trust-chain proof; extract out_dsc_id.
+    let out_dsc_id =
+        verify_dsc_chain_proof(dsc_chain, dsc_chain_layout, dsc_chain_vk_hash, verifier)?;
+
+    // 2. The passport prepare layout must pin in_dsc_id (index 0) to that id, so
+    //    the SOD signer is exactly the DSC the chain proof validated.
+    let passport_in_dsc_id = policy
+        .prepare_layout
+        .extra_pinned_fields
+        .iter()
+        .find(|(idx, _)| *idx == 0)
+        .map(|(_, value)| *value)
+        .ok_or_else(|| verification_error("passport_layout_missing_dsc_id_pin"))?;
+    if passport_in_dsc_id != out_dsc_id {
+        return Err(verification_error("dsc_id_link_mismatch"));
+    }
+
+    // 3. Verify the passport prepare + show pair (pins in_dsc_id at its index,
+    //    so the proof itself carries the linked id).
+    verify_openac_v3_with_verifier(prepare, show, policy, verifier)
 }
 
 #[cfg(test)]
@@ -1100,19 +1262,187 @@ mod tests {
 
     #[test]
     fn test_prepare_layout_passport_pins_required_fields() {
-        // Task 3: passport prepare layout must pin csca_root, dsc_smt_root,
-        // and exponent (=65537) -- the verifier policy's off-chain trust
-        // anchors. The constructor takes them as required arguments.
-        let csca_root = sample_field(0xC1);
-        let dsc_smt_root = sample_field(0xC2);
-        let layout = prepare_layout_passport(csca_root, dsc_smt_root);
-        assert_eq!(layout.num_public_inputs, 5);
-        assert_eq!(layout.commitment_x_index, 3);
-        assert_eq!(layout.commitment_y_index, 4);
-        assert_eq!(layout.extra_pinned_fields.len(), 3);
-        assert_eq!(layout.extra_pinned_fields[0], (0, csca_root));
-        assert_eq!(layout.extra_pinned_fields[1], (1, dsc_smt_root));
+        // Phase 6 + sec.7.1/7.4: the passport prepare layout pins in_dsc_id,
+        // exponent(=65537), link_scope, require_aa, and the 32-byte aa_challenge;
+        // the commitment moves to indices 36/37.
+        let dsc_id = sample_field(0xC1);
+        let link_scope = sample_field(0xC2);
+        let aa_challenge = sample_hash32(0xC3);
+        let layout = prepare_layout_passport(dsc_id, link_scope, true, &aa_challenge);
+        assert_eq!(layout.num_public_inputs, 38);
+        assert_eq!(layout.commitment_x_index, 36);
+        assert_eq!(layout.commitment_y_index, 37);
+        assert_eq!(layout.extra_pinned_fields[0], (0, dsc_id));
+        assert_eq!(layout.extra_pinned_fields[1], (1, u32_as_field(65537)));
+        assert_eq!(layout.extra_pinned_fields[2], (2, link_scope));
+        assert_eq!(layout.extra_pinned_fields[3], (3, bool_as_field(true)));
+        // aa_challenge bytes pinned across field indices 4..36.
+        assert!(layout
+            .extra_pinned_fields
+            .contains(&(4, byte_as_field(aa_challenge[0]))));
+        assert!(layout
+            .extra_pinned_fields
+            .contains(&(35, byte_as_field(aa_challenge[31]))));
+    }
+
+    // ============================================================
+    // Phase 6 (sec.7.2): dsc_chain proof + two-proof linkage tests.
+    // ============================================================
+
+    fn mock_dsc_chain_proof(
+        csca_root: &[u8; FIELD_BYTES],
+        dsc_smt_root: &[u8; FIELD_BYTES],
+        dsc_id: &[u8; FIELD_BYTES],
+        suffix: &[u8],
+    ) -> Vec<u8> {
+        let mut proof = Vec::new();
+        proof.extend_from_slice(csca_root);
+        proof.extend_from_slice(dsc_smt_root);
+        proof.extend_from_slice(&u32_as_field(65537));
+        proof.extend_from_slice(dsc_id);
+        proof.extend_from_slice(suffix);
+        proof
+    }
+
+    fn dsc_chain_fixture() -> (DscChainArtifactV3, DscChainLayoutV3, [u8; 32]) {
+        let csca_root = sample_field(0xA1);
+        let dsc_smt_root = sample_field(0xA2);
+        let dsc_id = sample_field(0xA3);
+        let vk = vec![7, 8, 9];
+        let dsc_chain = DscChainArtifactV3 {
+            created_at_unix: 100,
+            expires_at_unix: 200,
+            csca_root,
+            dsc_smt_root,
+            dsc_id,
+            proof: mock_dsc_chain_proof(&csca_root, &dsc_smt_root, &dsc_id, &[1, 2, 3]),
+            vk: vk.clone(),
+        };
+        let layout = dsc_chain_layout(csca_root, dsc_smt_root);
+        (dsc_chain, layout, sha256_hash(&vk))
+    }
+
+    #[test]
+    fn test_dsc_chain_layout_indices() {
+        let csca = sample_field(0xA1);
+        let smt = sample_field(0xA2);
+        let layout = dsc_chain_layout(csca, smt);
+        assert_eq!(layout.num_public_inputs, 4);
+        assert_eq!(layout.dsc_id_index, 3);
+        assert_eq!(layout.extra_pinned_fields[0], (0, csca));
+        assert_eq!(layout.extra_pinned_fields[1], (1, smt));
         assert_eq!(layout.extra_pinned_fields[2], (2, u32_as_field(65537)));
+    }
+
+    #[test]
+    fn test_verify_dsc_chain_proof_happy_path() {
+        let (dsc_chain, layout, vk_hash) = dsc_chain_fixture();
+        let out = verify_dsc_chain_proof(&dsc_chain, &layout, &vk_hash, &always_valid)
+            .expect("dsc_chain should verify");
+        assert_eq!(out, dsc_chain.dsc_id);
+    }
+
+    #[test]
+    fn test_verify_dsc_chain_proof_rejects_wrong_anchor() {
+        // Pinning a different csca_root than the proof carries must reject.
+        let (dsc_chain, _layout, vk_hash) = dsc_chain_fixture();
+        let wrong_layout = dsc_chain_layout(sample_field(0xFF), dsc_chain.dsc_smt_root);
+        let err = verify_dsc_chain_proof(&dsc_chain, &wrong_layout, &vk_hash, &always_valid)
+            .expect_err("must reject wrong anchor");
+        assert!(err.to_string().contains("dsc_chain_public_input_mismatch"));
+    }
+
+    #[test]
+    fn test_verify_dsc_chain_proof_rejects_metadata_mismatch() {
+        // The artifact's dsc_id must equal the proof's out_dsc_id public output.
+        let (mut dsc_chain, layout, vk_hash) = dsc_chain_fixture();
+        dsc_chain.dsc_id = sample_field(0xEE); // metadata lies about the id
+        let err = verify_dsc_chain_proof(&dsc_chain, &layout, &vk_hash, &always_valid)
+            .expect_err("must reject metadata mismatch");
+        assert!(err.to_string().contains("dsc_chain_dsc_id_mismatch"));
+    }
+
+    #[test]
+    fn test_verify_dsc_chain_proof_rejects_untrusted_vk() {
+        let (dsc_chain, layout, _vk_hash) = dsc_chain_fixture();
+        let err = verify_dsc_chain_proof(&dsc_chain, &layout, &sample_hash32(0x99), &always_valid)
+            .expect_err("must reject untrusted vk");
+        assert!(err.to_string().contains("untrusted_dsc_chain_vk"));
+    }
+
+    /// Build a (prepare, show, policy) triple whose prepare layout pins
+    /// `in_dsc_id` at field index 0 (mirroring prepare_layout_passport) so the
+    /// Phase 6 linkage can be exercised without a full 38-field passport proof.
+    fn phase6_prepare_fixture(
+        dsc_id: [u8; FIELD_BYTES],
+    ) -> (PrepareArtifactV3, ShowPresentationV3, PolicyV3) {
+        let (mut prepare, show, mut policy) = fixture();
+        // Prepare proof layout: field 0 = in_dsc_id, 1 = commitment.x, 2 = commitment.y.
+        let mut proof = Vec::new();
+        proof.extend_from_slice(&dsc_id);
+        proof.extend_from_slice(&prepare.commitment.x);
+        proof.extend_from_slice(&prepare.commitment.y);
+        proof.extend_from_slice(&[9, 9, 9]);
+        prepare.proof = proof;
+        policy.prepare_layout = PrepareLayoutV3 {
+            num_public_inputs: 3,
+            commitment_x_index: 1,
+            commitment_y_index: 2,
+            extra_pinned_fields: vec![pin_field(0, dsc_id)],
+        };
+        (prepare, show, policy)
+    }
+
+    #[test]
+    fn test_phase6_linkage_happy_path() {
+        let (dsc_chain, dsc_layout, dsc_vk_hash) = dsc_chain_fixture();
+        let (prepare, show, policy) = phase6_prepare_fixture(dsc_chain.dsc_id);
+        verify_openac_v3_phase6(
+            &dsc_chain,
+            &prepare,
+            &show,
+            &policy,
+            &dsc_layout,
+            &dsc_vk_hash,
+            &always_valid,
+        )
+        .expect("phase 6 linked presentation should verify");
+    }
+
+    #[test]
+    fn test_phase6_rejects_dsc_id_link_mismatch() {
+        // dsc_chain validated DSC id A, but the passport prepare pins id B.
+        let (dsc_chain, dsc_layout, dsc_vk_hash) = dsc_chain_fixture();
+        let (prepare, show, policy) = phase6_prepare_fixture(sample_field(0xBB));
+        let err = verify_openac_v3_phase6(
+            &dsc_chain,
+            &prepare,
+            &show,
+            &policy,
+            &dsc_layout,
+            &dsc_vk_hash,
+            &always_valid,
+        )
+        .expect_err("must reject unlinked dsc_id");
+        assert!(err.to_string().contains("dsc_id_link_mismatch"));
+    }
+
+    #[test]
+    fn test_phase6_rejects_invalid_dsc_chain_proof() {
+        let (dsc_chain, dsc_layout, dsc_vk_hash) = dsc_chain_fixture();
+        let (prepare, show, policy) = phase6_prepare_fixture(dsc_chain.dsc_id);
+        let dsc_bytes = dsc_chain.proof.clone();
+        let err = verify_openac_v3_phase6(
+            &dsc_chain,
+            &prepare,
+            &show,
+            &policy,
+            &dsc_layout,
+            &dsc_vk_hash,
+            &|proof: Vec<u8>, _| Ok(proof != dsc_bytes),
+        )
+        .expect_err("must reject invalid dsc_chain proof");
+        assert!(err.to_string().contains("invalid_dsc_chain_proof"));
     }
 
     #[test]
@@ -1226,7 +1556,9 @@ mod tests {
             true,
             sample_field(0xE3),
         );
-        assert!(layout.extra_pinned_fields.contains(&(36, u32_as_field(2026))));
+        assert!(layout
+            .extra_pinned_fields
+            .contains(&(36, u32_as_field(2026))));
         assert!(layout.extra_pinned_fields.contains(&(37, u32_as_field(6))));
         assert!(layout.extra_pinned_fields.contains(&(38, u32_as_field(10))));
         assert!(
@@ -1310,7 +1642,9 @@ mod tests {
             layout.extra_pinned_fields.contains(&(37, u32_as_field(21))),
             "age_threshold must be pinned at field index 37",
         );
-        assert!(layout.extra_pinned_fields.contains(&(38, u32_as_field(2026))));
+        assert!(layout
+            .extra_pinned_fields
+            .contains(&(38, u32_as_field(2026))));
         assert!(layout.extra_pinned_fields.contains(&(39, u32_as_field(6))));
         assert!(layout.extra_pinned_fields.contains(&(40, u32_as_field(10))));
     }

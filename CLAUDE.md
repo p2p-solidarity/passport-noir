@@ -38,7 +38,7 @@ circuits-legacy/            # RETIRED v1/v2 circuits (standalone workspace; buil
 mopro-binding/              # Mobile prover integration via mopro
 ├── src/openac.rs           # v1 SHA256 OpenAC verifier (Rust, legacy artifacts only)
 ├── src/openac_v2.rs        # v2 Pedersen OpenAC verifier (Rust, legacy)
-├── src/openac_v3.rs        # v3.1 Pedersen verifier (nonce_hash pinning, no digest)
+├── src/openac_v3.rs        # v3.1 Pedersen verifier + Phase 6 two-proof (verify_openac_v3_phase6: dsc_chain + passport core, dsc_id linked)
 ├── src/noir.rs             # noir_rs prove/verify entry points
 └── test-vectors/noir/      # Compiled circuit JSONs for cargo tests
 benchmark/                  # Circuit benchmark & spec compliance suite

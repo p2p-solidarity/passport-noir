@@ -850,7 +850,7 @@ link_tag = "0x6c746167"  # ASCII "ltag" (DOMAIN_LINK_TAG)
 [cross_layer.rust]
 source = "mopro-binding/src/openac.rs"
 domain_separators_version = "v1"  # legacy Rust verifier targets v1 artifacts
-v3_source = "mopro-binding/src/openac_v3.rs"  # v3.1: nonce_hash pinning, no digest
+v3_source = "mopro-binding/src/openac_v3.rs"  # v3.1: nonce_hash pinning, no digest; Phase 6: verify_openac_v3_phase6 ties dsc_chain.out_dsc_id == passport.in_dsc_id
 
 # ============================================================
 # Performance Baselines (update after benchmarking)
