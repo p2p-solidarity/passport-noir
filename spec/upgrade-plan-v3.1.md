@@ -286,7 +286,12 @@ cross_circuit 鏈。
 
 ### 7.3 Phase 7 — Adapter 約束減重細目（更新 Phase 4 的優先序）
 
-> Status: **jwt_x5c + passport 已 IMPLEMENTED 2026-06-10**；mdoc 進行中。
+> Status: **jwt_x5c + passport + mdoc(部分) 已 IMPLEMENTED 2026-06-10**。
+> mdoc：MAX_MSG_LEN 512 → 384（仍覆蓋 MAX_CLAIMS=4 的 synthetic mso ~270B），
+> O(N·K) substring selector scan 是主導成本，**實測 692,381 → 521,407 ACIR
+> （−25%）、artifact 10.1 → 7.7 MB**。量級下降（order-of-magnitude）需把 selector
+> scan 換成 poly-eval substring 原語（研究項，row 3），且 real mDL mso ~1792B 也
+> 要等該原語才能放大 MAX_MSG_LEN；在此之前本電路是 synthetic prototype。
 > jwt_x5c：P1-4 的 decode + byte 等值收斂到 claim 視窗 [0, CLAIM_WINDOW_BYTES=48)
 > （email_domain claim 最大讀到 byte 47：max offset 17 + MAX_DOMAIN_LEN 31），
 > 不再 decode 整段 1024B payload — 尾段不餵 commitment（仍由 jwt_payload_b64h
@@ -297,7 +302,7 @@ cross_circuit 鏈。
 |---|---|---|---|
 | jwt_x5c_adapter 136k | P1-4 整段 1024B payload 圈內 base64 decode + byte 等值（+115k） | 只 decode/bind claim 視窗 [0,48)（4-char→3-byte 群組），成本從 ∝1024B 變 ∝視窗 | ✅ 136,440 → 35,329（−74%）|
 | passport_adapter 28.6k | 圈內 if 兩分支都付費 → 4 個 DG slot 的 SHA256(512B) 永遠全額；DSC_TBS_LEN 1536 = 24 個 SHA block | MAX_DG_COUNT 4→2（commitment 只用 DG1）；DSC_TBS_LEN 收緊到真實 normalized layout 需要的大小（本來就是 app 合成 layout，非真 ASN.1） | ✅ 28,596 → 19,997；再經 7.2 拆分 → 11,167 |
-| mdoc_adapter 692k | 變動位置 byte 視窗掃描：Noir 動態索引每次存取 O(N) selector，4 claim envelope × 512B message + validUntil/deviceKey 視窗 | (a) MAX_MSG_LEN / MAX_PREIMAGE_LEN 對照真實 MSO 收緊；(b) 多視窗合併單次掃描；(c) 接受離線定位、評估 server 端跑（MSO 是 issuer 簽的公開結構，無隱私問題） | 進行中（見 batch 7）|
+| mdoc_adapter 692k | 變動位置 byte 視窗掃描：Noir 動態索引每次存取 O(N) selector，4 claim envelope × message + validUntil/deviceKey 視窗 | (a) ✅ MAX_MSG_LEN 512→384（MAX_PREIMAGE_LEN 不能動：preimage hash 進 issuer 簽章，改值會破壞 fixture 簽章）；(b)(c) poly-eval substring 原語 / server 端 = 後續研究 | ✅ 692,381 → 521,407（−25%）；量級降仍待 poly-eval |
 
 （原 Phase 4 的 Poseidon2 項目維持：獨立評估、不擋主線。）
 

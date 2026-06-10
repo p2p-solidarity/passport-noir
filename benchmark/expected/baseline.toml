@@ -70,7 +70,10 @@ x509_show = 488
 # v3.1 (+1.5% vs 815): arity-8 passport opening slightly outweighs the
 # removed composite digest. Acceptable -- still tiny.
 composite_show = 827
-mdoc_adapter = 692381
+# sec.7.3 (-25% vs 692381): MAX_MSG_LEN 512 -> 384 shrinks the O(N*K) substring
+# selector scan (the dominant cost); order-of-magnitude cut needs a poly-eval
+# substring primitive (research, see upgrade-plan-v3.1.md sec.7.3 row 3).
+mdoc_adapter = 521407
 
 # Artifact sizes in bytes (warn if > 20% regression)
 # Measured: 2026-06-10, nargo 1.0.0-beta.19 (circuits/target/*.json).
@@ -82,13 +85,14 @@ sdjwt_adapter = 792963
 jwt_x5c_adapter = 1750450
 x509_show = 125312
 composite_show = 150762
-mdoc_adapter = 10119930
+mdoc_adapter = 7672100
 # 2026-06-10 v3.1 + Phase 6: 16.0 MB across 8 bin circuits. The phone-side
 # prepare footprint dropped (passport core 1.01 -> 0.75 MB); dsc_chain (0.66 MB)
 # is a separate proof that is cacheable / server-distributed with the CSCA
-# snapshot, so it does not have to ship in the phone bundle. sec.7.3 windowing
-# then cut jwt_x5c_adapter 3.24 -> 1.75 MB.
-total = 14520444
+# snapshot, so it does not have to ship in the phone bundle. sec.7.3 then cut
+# jwt_x5c_adapter 3.24 -> 1.75 MB (base64 windowing) and mdoc_adapter 10.1 -> 7.7
+# MB (MAX_MSG_LEN 512 -> 384).
+total = 12072614
 
 # Bytes per gate (lower = more compact artifact representation)
 # Grade: A(≤10) B(≤30) C(≤60) D(≤100) F(>100)

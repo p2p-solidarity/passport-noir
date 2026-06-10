@@ -72,11 +72,19 @@ use openac_core::device::pk_digest_from_bytes;
 global MAX_CLAIMS: u32 = 4;
 global MAX_PREIMAGE_LEN: u32 = 256;
 
-// v1 message envelope. 512 bytes covers the synthetic v2 fixture (165
-// signed bytes); future revisions will scale this towards zkID's 1792
-// once we move from the O(N*K) selector substring check to a
-// polynomial-evaluation primitive.
-global MAX_MSG_LEN: u32 = 512;
+// v1 message envelope. sec.7.3 tightening (2026-06-10): 512 -> 384. The
+// substring inclusion check is O(MAX_MSG_LEN * window_bytes) selector
+// constraints, so this buffer size directly scales the dominant gate cost.
+// 384 still covers a full MAX_CLAIMS=4 synthetic mso (32 header + 4*35 envelopes
+// + 23 validUntil + 75 deviceKey ~= 270 bytes, plus headroom) while the current
+// 1-claim fixture is 165 bytes. The signed hash is sha256_var(message,
+// message_len) over the UNPADDED bytes, so shrinking the buffer does not change
+// any issuer signature. NOTE: real mDL msos are ~1792 bytes; scaling MAX_MSG_LEN
+// past ~1024 for production requires replacing the O(N*K) selector scan with a
+// polynomial-evaluation substring primitive (the order-of-magnitude lever; see
+// spec/upgrade-plan-v3.1.md sec.7.3 row 3). This circuit is a synthetic
+// prototype until then.
+global MAX_MSG_LEN: u32 = 384;
 
 // CBOR encoding constants for the digest envelope. zkID's
 // mdoc-claim-verifier.circom uses the same layout
