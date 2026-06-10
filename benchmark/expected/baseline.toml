@@ -44,9 +44,10 @@ minimum = 234
 # Measured: 2026-06-10, nargo 1.0.0-beta.19 (`nargo info --workspace`,
 # main-function ACIR column).
 [gates]
-# v3.1 (-21% vs 36247): removing pack_passport_profile's truncation loops in
-# favour of direct hash_to_fields halves + single claims Field.
-passport_adapter = 28596
+# v3.1 sec.7.3 prepare reduction (-30% vs 28596): MAX_DG_COUNT 4->2 drops two
+# unconditional SHA256(512B) DG hashes; DSC_TBS_LEN 1536->512 cuts the DSC-TBS
+# SHA256 from ~25 to ~9 compression blocks.
+passport_adapter = 19997
 # v3.1 (-64% vs 1802): 2-block SHA256 challenge digest, epoch byte/field
 # equality, and the packed-profile unpack/re-bind loops all removed.
 openac_show = 647
@@ -62,16 +63,17 @@ mdoc_adapter = 692381
 # Artifact sizes in bytes (warn if > 20% regression)
 # Measured: 2026-06-10, nargo 1.0.0-beta.19 (circuits/target/*.json).
 [artifact_bytes]
-passport_adapter = 1334587
+passport_adapter = 1007039
 openac_show = 146805
 sdjwt_adapter = 792963
 jwt_x5c_adapter = 3242540
 x509_show = 125312
 composite_show = 150762
 mdoc_adapter = 10119930
-# 2026-06-10 v3.1: 15.9 MB vs 17.0 MB pre-v3.1 (legacy circuits dropped from
-# the bundle + openac_show/passport_adapter shrink).
-total = 15912899
+# 2026-06-10 v3.1: 15.6 MB. Pre-v3.1 was 17.0 MB; legacy circuits dropped +
+# openac_show/passport_adapter shrink, then sec.7.3 cut passport_adapter a
+# further 0.33 MB (1.33 -> 1.01 MB).
+total = 15585351
 
 # Bytes per gate (lower = more compact artifact representation)
 # Grade: A(≤10) B(≤30) C(≤60) D(≤100) F(>100)
@@ -79,7 +81,7 @@ total = 15912899
 # on this ratio by construction -- low gate count inflates bytes/gate; their
 # absolute artifact size (<150 KB each) is what matters for the bundle.
 [bytes_per_gate]
-passport_adapter = 47
+passport_adapter = 50
 openac_show = 227
 sdjwt_adapter = 22
 jwt_x5c_adapter = 24

@@ -33,13 +33,29 @@ use std::hash::pedersen_hash;
 // The commitment (C.x, C.y) is what links this prepare proof to the show proof.
 // Verifier checks: prepare.out_commitment == show.out_commitment
 
-global MAX_DG_COUNT: u32 = 4;
+// v3.1 prepare reduction (spec/upgrade-plan-v3.1.md sec.7.3): the DG chain
+// carries only the two slots the trust model needs -- DG1 (predicate claims,
+// the sole commitment input) and DG15 (active-authentication public key, see
+// sec.7.4 / Phase 8). Dropping the two unused slots removes two unconditional
+// SHA256(MAX_DG_SIZE) computations from every prepare proof (Noir evaluates
+// both `if` branches, so an unused slot still costs a full hash). Real
+// passports expose more data groups; the app normalises the SOD-hash preimage
+// into this DG1||DG15 layout before feeding the circuit.
+global MAX_DG_COUNT: u32 = 2;
 global MAX_DG_SIZE: u32 = 512;
 
-// DSC certificate TBS envelope size. Matches jwt_x5c_adapter's CERT_TBS_LEN so
-// off-circuit tooling that generates RSA test vectors can be shared between the
-// passport and x509 prepare flows.
-global DSC_TBS_LEN: u32 = 1536;
+// Conventional DG slot index for DG1 (predicate claims, sole commitment
+// input). Slot 1 is reserved for DG15 (active-authentication public key),
+// consumed by the Phase 8 AA check.
+global DG1_SLOT: u32 = 0;
+
+// DSC certificate TBS envelope size. v3.1 prepare reduction
+// (spec/upgrade-plan-v3.1.md sec.7.3): tightened 1536 -> 512 to fit the real
+// normalised layout (RSA-2048 modulus at [0..288) + meta envelope + 20-byte
+// serial at [352..372)), cutting the DSC-TBS SHA256 from ~25 to ~9 compression
+// blocks. The app's TBS normaliser must emit exactly DSC_TBS_LEN bytes; this is
+// a synthetic envelope, not raw ICAO ASN.1, so the length is ours to pin.
+global DSC_TBS_LEN: u32 = 512;
 global RSA_LIMB_COUNT: u32 = 18;
 global RSA_LIMB_BYTES: u32 = 16;
 global DSC_MODULUS_BYTES: u32 = RSA_LIMB_COUNT * RSA_LIMB_BYTES;
@@ -345,8 +361,8 @@ fn main(
     let pk_digest = pk_digest_from_bytes(enclave_pk_x, enclave_pk_y);
 
     // Step 6: Compute v3 Pedersen commitment on Grumpkin (binds pk_digest).
-    let dg1_hash = expected_dg_hashes[0];
-    let dg1_content = dg_contents[0];
+    let dg1_hash = expected_dg_hashes[DG1_SLOT];
+    let dg1_content = dg_contents[DG1_SLOT];
     let commitment =
         compute_passport_commitment(sod_hash, dg1_content, dg1_hash, pk_digest, link_rand);
     assert_commitment_eq(commitment, out_commitment_x, out_commitment_y);
@@ -403,9 +419,9 @@ fn build_single_dg_fixture() -> ([u8; 32], [[u8; MAX_DG_SIZE]; MAX_DG_COUNT], [u
     }
     let sod_hash: [u8; 32] = digest(combined_preimage);
 
-    let dg_contents = [dg1_data, [0; MAX_DG_SIZE], [0; MAX_DG_SIZE], [0; MAX_DG_SIZE]];
-    let dg_lengths: [u32; MAX_DG_COUNT] = [64, 0, 0, 0];
-    let expected_dg_hashes = [dg1_hash, [0; 32], [0; 32], [0; 32]];
+    let dg_contents = [dg1_data, [0; MAX_DG_SIZE]];
+    let dg_lengths: [u32; MAX_DG_COUNT] = [64, 0];
+    let expected_dg_hashes = [dg1_hash, [0; 32]];
 
     (sod_hash, dg_contents, dg_lengths, expected_dg_hashes)
 }
@@ -424,9 +440,9 @@ fn build_two_dg_fixture() -> ([u8; 32], [[u8; MAX_DG_SIZE]; MAX_DG_COUNT], [u32;
     }
     let sod_hash: [u8; 32] = digest(combined_preimage);
 
-    let dg_contents = [dg1_data, dg2_data, [0; MAX_DG_SIZE], [0; MAX_DG_SIZE]];
-    let dg_lengths: [u32; MAX_DG_COUNT] = [64, 128, 0, 0];
-    let expected_dg_hashes = [dg1_hash, dg2_hash, [0; 32], [0; 32]];
+    let dg_contents = [dg1_data, dg2_data];
+    let dg_lengths: [u32; MAX_DG_COUNT] = [64, 128];
+    let expected_dg_hashes = [dg1_hash, dg2_hash];
 
     (sod_hash, dg_contents, dg_lengths, expected_dg_hashes)
 }

@@ -155,7 +155,7 @@ description = "Combined passport prepare (v3.1): DSC->SOD RSA verify + CSCA->DSC
 source = "circuits/passport_adapter/src/main.nr"
 version = "v3.1"
 
-gate_budget = 50000  # v3.1 measured 36,223 opcodes; ~28% headroom
+gate_budget = 50000  # v3.1 sec.7.3 reduction measured 19,997 opcodes (was 28,596)
 
 # v3.1 promotes the trust anchor model: `csca_root` (ICAO Master List snapshot)
 # and `dsc_smt_root` (DSC revocation list) are the only non-commitment public
@@ -184,11 +184,11 @@ private_inputs = [
 private_input_types = [
   "[u8; 32]", "[u128; 18]", "[u128; 18]", "[u128; 18]",
   "[u128; 18]", "[u128; 18]",
-  "[u8; 1536]", "[u128; 18]",
+  "[u8; 512]", "[u128; 18]",
   "u32", "[Field; 8]",
   "Field", "Field",
   "[u8; 20]", "[Field; 32]", "Field", "Field", "bool",
-  "u8", "[[u8; 512]; 4]", "[u32; 4]", "[[u8; 32]; 4]",
+  "u8", "[[u8; 512]; 2]", "[u32; 2]", "[[u8; 32]; 2]",
   "Field",
   "[u8; 32]", "[u8; 32]",
 ]
@@ -216,7 +216,7 @@ assertions = [
   "Commitment Y mismatch",
 ]
 
-constants = { MAX_DG_COUNT = 4, MAX_DG_SIZE = 512, DSC_TBS_LEN = 1536, DSC_SERIAL_OFFSET = 352, DSC_SERIAL_LEN = 20, CSCA_MERKLE_DEPTH = 8, SMT_DEPTH = 32, CSCA_RSA_EXPONENT = 65537, DSC_RSA_EXPONENT = 65537 }
+constants = { MAX_DG_COUNT = 2, MAX_DG_SIZE = 512, DSC_TBS_LEN = 512, DSC_SERIAL_OFFSET = 352, DSC_SERIAL_LEN = 20, CSCA_MERKLE_DEPTH = 8, SMT_DEPTH = 32, CSCA_RSA_EXPONENT = 65537, DSC_RSA_EXPONENT = 65537 }
 
 min_positive_tests = 7   # v3.1 unit tests: DG chain + commitment + DSC extract + revocation
 min_negative_tests = 6

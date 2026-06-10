@@ -226,8 +226,9 @@ check_constant() {
 }
 
 # MAX_DG_COUNT / MAX_DG_SIZE (data_integrity retired; passport_adapter is the
-# production DG-chain implementation)
-check_constant "MAX_DG_COUNT" "4" "$CIRCUIT_DIR/passport_adapter/src/main.nr"
+# production DG-chain implementation). v3.1 sec.7.3 cut MAX_DG_COUNT 4->2
+# (DG1 + DG15 only).
+check_constant "MAX_DG_COUNT" "2" "$CIRCUIT_DIR/passport_adapter/src/main.nr"
 check_constant "MAX_DG_SIZE" "512" "$CIRCUIT_DIR/passport_adapter/src/main.nr"
 
 echo ""
