@@ -5,7 +5,12 @@ edition = "2021"
 description = "Mopro FFI bindings for passport ZK verification circuits (Noir) → Swift"
 
 [dependencies]
-mopro-ffi = "0.3"
+# Pinned exactly: mopro-ffi 0.3.6 removed `KotlinBindingGenerator` (used by
+# bin/android_zig.rs) and bumped uniffi 0.29 -> 0.31. Cargo.lock is gitignored,
+# so CI/release resolve fresh -- without this pin `cargo build` picks 0.3.6 and
+# fails with `unresolved import mopro_ffi::KotlinBindingGenerator`. Re-check the
+# binding-generator API before unpinning.
+mopro-ffi = "=0.3.5"
 noir_rs = { package = "noir", git = "https://github.com/zkmopro/noir-rs", features = ["barretenberg"], tag = "v1.0.0-beta.19" }
 serde_json = "1.0"
 thiserror = "2.0"
@@ -18,7 +23,7 @@ sha2 = "0.10"
 camino = "1.1"
 
 [build-dependencies]
-mopro-ffi = "0.3"
+mopro-ffi = "=0.3.5"
 
 [lib]
 crate-type = ["lib", "cdylib", "staticlib"]
