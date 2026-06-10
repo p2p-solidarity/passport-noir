@@ -26,7 +26,7 @@ let package = Package(
         ),
         .binaryTarget(
             name: "passportMoproBindings",
-            url: "https://github.com/p2p-solidarity/passport-noir/releases/download/v0.3.0/PassportMoproBindings.xcframework.zip",
+            url: "https://github.com/p2p-solidarity/passport-noir/releases/download/v0.3.1/PassportMoproBindings.xcframework.zip",
             checksum: "19945b519bc25c40fd446c9d5f9214adef8dbab259623f7f7a810be506f4556d"
         ),
         .testTarget(
