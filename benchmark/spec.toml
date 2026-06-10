@@ -111,11 +111,13 @@ min_negative_tests = 1
 
 [circuits.openac_core.module_profile]
 source = "circuits/openac_core/src/profile.nr"
-functions = ["fields_to_bytes32", "derive_x509_link_rand", "derive_sdjwt_link_rand", "pack_passport_claims", "unpack_passport_claims", "pack_x509_domain", "unpack_x509_domain"]
+functions = ["fields_to_bytes32", "derive_scoped_link_rand", "derive_x509_link_rand", "derive_sdjwt_link_rand", "pack_passport_claims", "unpack_passport_claims", "pack_x509_domain", "unpack_x509_domain"]
 # Path A salts for per-credential link_rand derivation (ASCII tags). The v3
 # CHALLENGE_DOMAIN / LINK_TAG_DOMAIN digest constants were retired in v3.1
 # (link tag moved to module_show with DOMAIN_LINK_TAG; digest removed).
-domain_constants = { SALT_X509 = "0x78353039", SALT_SDJWT = "0x73646a77" }
+# sec.7.1: SALT_SCOPE_RAND ("scrd") domain-separates the in-circuit per-scope
+# blinding derivation used by passport_adapter.
+domain_constants = { SALT_X509 = "0x78353039", SALT_SDJWT = "0x73646a77", SALT_SCOPE_RAND = "0x73637264" }
 assertions = ["Packed X.509 domain length exceeds maximum", "Birth month must fit in one byte", "Birth day must fit in one byte"]
 min_positive_tests = 3
 min_negative_tests = 1
@@ -218,25 +220,28 @@ description = "Passport core prepare (v3.1 + Phase 6): DSC->SOD RSA verify + DG 
 source = "circuits/passport_adapter/src/main.nr"
 version = "v3.1"
 
-gate_budget = 50000  # Phase 6 measured 11,000 opcodes (was 19,997 pre-split, 28,596 pre-7.3)
+gate_budget = 50000  # Phase 6 + sec.7.1 measured 11,063 opcodes (was 28,596 pre-7.3)
 
-# Phase 6 (sec.7.2): the CSCA trust anchors moved to dsc_chain. The only
-# non-commitment public input here is `in_dsc_id` (= dsc_chain.out_dsc_id),
-# which the verifier pins equal across the two proofs so the DSC that signed
-# this SOD is exactly the one dsc_chain validated.
+# Phase 6 (sec.7.2): the CSCA trust anchors moved to dsc_chain. `in_dsc_id`
+# (= dsc_chain.out_dsc_id) is pinned equal across the two proofs so the DSC that
+# signed this SOD is exactly the one dsc_chain validated.
+# sec.7.1: `link_scope` is PUBLIC; the circuit derives the commitment blinding
+# from a private `link_rand_seed` + `link_scope` so the commitment is a
+# scope-specific pseudonym (different scope -> different commitment coords).
 # 2026-04-28 P0-3: `exponent` is PUBLIC and asserted to equal 65537 so verifiers
 # can rely on the DSC RSA exponent being ICAO-mandated.
 public_inputs = [
   "in_dsc_id",
   "exponent",
+  "link_scope",
   "out_commitment_x", "out_commitment_y",
 ]
-public_input_types = ["Field", "u32", "Field", "Field"]
+public_input_types = ["Field", "u32", "Field", "Field", "Field"]
 
 private_inputs = [
   "sod_hash", "signature_limbs", "modulus_limbs", "redc_limbs",
   "dg_count", "dg_contents", "dg_lengths", "expected_dg_hashes",
-  "link_rand",
+  "link_rand_seed",
   "enclave_pk_x", "enclave_pk_y",
 ]
 private_input_types = [

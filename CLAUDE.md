@@ -203,8 +203,9 @@ Phase 6 split (spec/upgrade-plan-v3.1.md §7.2): the public-data CSCA trust chai
 
 ### passport_adapter (v3.1 + Phase 6 — passport core prepare, phone-side per passport)
 The per-holder half of the prepare proof after the Phase 6 split: RSA-2048 (PKCS#1 v1.5) DSC→SOD verify + DG hash chain + arity-8 Pedersen commitment, pinned to the trusted DSC via `in_dsc_id`. ~11k ACIR (was 28.6k before §7.3 + Phase 6).
-- **Public inputs**: `in_dsc_id` (= `dsc_chain.out_dsc_id`), `exponent` (=65537), `out_commitment_x/y`
+- **Public inputs**: `in_dsc_id` (= `dsc_chain.out_dsc_id`), `exponent` (=65537), `link_scope`, `out_commitment_x/y`
 - DSC binding: `compute_dsc_id(modulus_limbs, exponent) == in_dsc_id` ties the SOD signer to the DSC `dsc_chain` validated.
+- **Per-scope pseudonym (§7.1)**: `link_rand = derive_scoped_link_rand(link_rand_seed, link_scope)` (private seed + public scope, `SALT_SCOPE_RAND`); a different `link_scope` yields a different commitment, so colluding verifiers cannot correlate the holder by commitment coordinates while the holder stores only one seed.
 - Commitment: `commit_passport_v3_1(claims, sod_hash_hi/lo, dg1_hash_hi/lo, pk_digest, link_rand)` — full-width hashes, no truncation; `claims` = 9-byte packed birth date + nationality
 - **SOD hash format (hard constraint)**: `sod_hash = SHA256(dg1_hash || dg15_hash)` over `MAX_DG_COUNT = 2` slots (§7.3: DG1 predicate claims + DG15 active-auth key), each slot 32 bytes with **zero-padding** for unused slots. This is **NOT** the ICAO 9303 LDS Security Object's TLV-encoded `signedAttrs` structure. The iOS app pipeline must normalize NFC chip data into this raw-concatenation layout before feeding the circuit.
 

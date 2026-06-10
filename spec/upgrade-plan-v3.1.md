@@ -241,6 +241,15 @@ unlinkable mode 只是不發 link tag；多個 verifier 合謀比對 commitment 
 
 補法（按建議順序）：
 
+> Status: **IMPLEMENTED 2026-06-10（in-circuit per-scope 派生，比短期方案更強）**。
+> passport_adapter 新增公開輸入 `link_scope` 與私有 `link_rand_seed`，圈內
+> `link_rand = openac_core::profile::derive_scoped_link_rand(seed, link_scope)`
+> （新 `SALT_SCOPE_RAND` = "scrd"）綁進 commitment。每個 scope → 不同
+> commitment 座標，holder 只需保存單一 seed 即可重生，且 verifier pin
+> `link_scope` 後可在密碼學上確定該 commitment 是「對應此 scope」的假名（跨
+> scope 重用的 commitment 無法通過）。+63 ACIR（一個 pedersen_hash）。下方
+> #1 的短期手動方案因此被取代；#2 長期 re-randomization 仍為研究項。
+
 1. **短期（零電路改動，建議立即採用）**：每個 verifier scope 用不同
    `link_rand` 重跑 prepare（prepare 本來就離線），每個服務一個獨立
    commitment。代價是多份 prepare proof 的儲存。此方案需寫進 verifier

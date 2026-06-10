@@ -8,6 +8,17 @@ pub global TARGET_DOMAIN_LEN: u32 = 64;
 pub global SALT_X509: Field = 0x78353039;
 pub global SALT_SDJWT: Field = 0x73646a77;
 
+// Per-scope link_rand derivation domain. ASCII "scrd" (scope rand). Phase 6
+// follow-up / spec sec.7.1: each verifier scope gets its own credential
+// commitment so colluding verifiers cannot correlate the holder by the
+// commitment coordinates. Instead of the app picking an arbitrary link_rand
+// per scope, the prepare circuit DERIVES it from a single holder seed + the
+// public scope, so (a) the holder regenerates the same per-scope commitment
+// from one secret, and (b) the verifier pins `link_scope` and is cryptographic-
+// ally sure the commitment is the holder's pseudonym for THAT scope (a reused
+// cross-scope commitment can no longer pass).
+pub global SALT_SCOPE_RAND: Field = 0x73637264;
+
 // v3.1 (2026-06-10, spec/upgrade-plan-v3.1.md):
 //   * compute_link_challenge_digest / compute_show_challenge_digest_v2 /
 //     compute_composite_challenge_digest were DELETED -- the in-circuit
@@ -32,6 +43,15 @@ pub fn fields_to_bytes32(hi: Field, lo: Field) -> [u8; 32] {
     }
 
     out
+}
+
+/// Derive a per-scope blinding value from one holder seed + the verifier scope
+/// (spec sec.7.1). Binding the scope in-circuit makes the resulting commitment
+/// a scope-specific pseudonym: a different `link_scope` yields a different
+/// commitment, so verifiers cannot correlate the holder across scopes by the
+/// committed coordinates, yet the holder needs to store only `link_rand_seed`.
+pub fn derive_scoped_link_rand(link_rand_seed: Field, link_scope: Field) -> Field {
+    pedersen_hash([SALT_SCOPE_RAND, link_rand_seed, link_scope])
 }
 
 pub fn derive_x509_link_rand(link_rand_p: Field) -> Field {
@@ -157,4 +177,36 @@ fn test_derive_link_rands_are_domain_separated() {
     let x509 = derive_x509_link_rand(777);
     let sdjwt = derive_sdjwt_link_rand(777);
     assert(x509 != sdjwt, "X.509 and SD-JWT link_rand derivations must differ");
+}
+
+#[test]
+fn test_scoped_link_rand_deterministic() {
+    let a = derive_scoped_link_rand(12345, 99);
+    let b = derive_scoped_link_rand(12345, 99);
+    assert(a == b, "scoped link_rand must be deterministic for the same seed + scope");
+}
+
+#[test]
+fn test_scoped_link_rand_changes_with_scope() {
+    // Core unlinkability property (sec.7.1): the same holder seed under two
+    // verifier scopes must produce different blinding -> different commitments.
+    let s1 = derive_scoped_link_rand(12345, 99);
+    let s2 = derive_scoped_link_rand(12345, 100);
+    assert(s1 != s2, "different scope must produce different scoped link_rand");
+}
+
+#[test]
+fn test_scoped_link_rand_changes_with_seed() {
+    let a = derive_scoped_link_rand(12345, 99);
+    let b = derive_scoped_link_rand(54321, 99);
+    assert(a != b, "different seed must produce different scoped link_rand");
+}
+
+#[test]
+fn test_scoped_link_rand_domain_separated_from_credential_derivations() {
+    // Distinct domain + arity keeps the scope derivation from colliding with
+    // the per-credential link_rand derivations.
+    let scoped = derive_scoped_link_rand(777, 0);
+    let x509 = derive_x509_link_rand(777);
+    assert(scoped != x509, "scoped link_rand must differ from x509 link_rand derivation");
 }

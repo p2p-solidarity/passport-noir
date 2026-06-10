@@ -7,7 +7,7 @@ use openac_core::commit::{assert_commitment_eq, commit_passport_v3_1, hash_to_fi
 use openac_core::device::pk_digest_from_bytes;
 use openac_core::merkle::compute_dsc_id;
 use openac_core::predicate::two_digit_year_to_four;
-use openac_core::profile::pack_passport_claims;
+use openac_core::profile::{derive_scoped_link_rand, pack_passport_claims};
 use std::embedded_curve_ops::EmbeddedCurvePoint;
 
 // OpenAC Passport Core Adapter (Prepare Phase, v3.1 + Phase 6 -- Path A)
@@ -138,7 +138,10 @@ fn main(
     dg_lengths: [u32; MAX_DG_COUNT],
     expected_dg_hashes: [[u8; 32]; MAX_DG_COUNT],
     // === OpenAC commitment inputs ===
-    link_rand: Field,
+    // Per-scope blinding seed (private). The circuit derives the actual
+    // link_rand from this seed + the public `link_scope` so the commitment is a
+    // scope-specific pseudonym (spec sec.7.1).
+    link_rand_seed: Field,
     // === Path A device-binding witnesses (enclave pk is private) ===
     enclave_pk_x: [u8; 32],
     enclave_pk_y: [u8; 32],
@@ -146,6 +149,9 @@ fn main(
     in_dsc_id: pub Field,
     // === Public RSA exponent (P0-3, 2026-04-28) ===
     exponent: pub u32,
+    // === Public verifier scope (sec.7.1): pins which service this commitment
+    // is the holder's pseudonym for. Different scope -> different commitment. ===
+    link_scope: pub Field,
     // === Public outputs ===
     out_commitment_x: pub Field,
     out_commitment_y: pub Field,
@@ -186,7 +192,11 @@ fn main(
     // Step 4: Derive pk_digest from enclave pk (Path A, no ECDSA in prepare).
     let pk_digest = pk_digest_from_bytes(enclave_pk_x, enclave_pk_y);
 
-    // Step 5: Compute v3.1 Pedersen commitment on Grumpkin (binds pk_digest).
+    // Step 5: Derive the per-scope blinding (sec.7.1) so the commitment is the
+    // holder's pseudonym for `link_scope` -- and only for that scope.
+    let link_rand = derive_scoped_link_rand(link_rand_seed, link_scope);
+
+    // Step 6: Compute v3.1 Pedersen commitment on Grumpkin (binds pk_digest).
     let dg1_hash = expected_dg_hashes[DG1_SLOT];
     let dg1_content = dg_contents[DG1_SLOT];
     let commitment =
@@ -428,4 +438,22 @@ fn test_passport_rejects_wrong_dsc_id() {
     let id = compute_dsc_id(test_dsc_modulus(), DSC_RSA_EXPONENT);
     let pinned = id + 1; // verifier pinned a different, trusted DSC id
     assert(id == pinned, "DSC modulus does not match the trusted dsc_chain id");
+}
+
+// --- Per-scope pseudonym (sec.7.1) ---
+
+#[test]
+fn test_scoped_commitment_differs_across_scopes() {
+    // The same holder seed under two verifier scopes must produce different
+    // commitments, so colluding verifiers cannot correlate by commitment coords.
+    let sod_hash = sample_bytes(0x10);
+    let dg1 = build_profile_dg1([84, 87, 78], [48, 48, 48, 51, 49, 53], 60);
+    let dg1_hash: [u8; 32] = digest(dg1);
+    let pk_digest = pk_digest_from_bytes(test_enclave_pk_x(), test_enclave_pk_y());
+    let seed: Field = 0xABCDEF;
+    let r_a = derive_scoped_link_rand(seed, 1);
+    let r_b = derive_scoped_link_rand(seed, 2);
+    let c_a = compute_passport_commitment(sod_hash, dg1, dg1_hash, pk_digest, r_a);
+    let c_b = compute_passport_commitment(sod_hash, dg1, dg1_hash, pk_digest, r_b);
+    assert(c_a.x != c_b.x, "different scope must yield a different scoped commitment");
 }
