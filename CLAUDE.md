@@ -26,7 +26,7 @@ circuits/                   # Noir workspace (Nargo.toml at root) — 9 producti
 ├── passport_adapter/       # v3.1+Phase 6: Passport core (DSC→SOD RSA + DG chain + arity-8 commitment, pins dsc_id)
 ├── openac_show/            # v3.1: Passport show (digest-free; nonce_hash freshness + unified link tag)
 ├── sdjwt_adapter/          # v3.2: SD-JWT (ES256) → Pedersen commitment
-├── jwt_x5c_adapter/        # v3.1: JWT x5c (RSA + JWT payload) → X.509 commitment
+├── jwt_x5c_adapter/        # v3.1: JWT x5c (RSA + windowed base64 claim binding, §7.3) → X.509 commitment
 ├── x509_show/              # v3.1: X.509 show (commitment opening + ECDSA device binding)
 ├── composite_show/         # v3.1: Multi-credential show (passport + X.509 OR SD-JWT)
 ├── mdoc_adapter/           # v3: mDoc/mDL prepare adapter (Direction D, ES256 issuer)
@@ -138,7 +138,7 @@ Each circuit is graded by **bytes/gate** (artifact bytes ÷ ACIR gate count).
 | D | ≤ 100 | Bloated — review artifact structure |
 | F | > 100 | Critical — likely low gate count inflating ratio |
 
-Total artifact size: **~15.9 MB** across the 7 production bin circuits (2026-06-10). `mdoc_adapter` dominates (~10.1 MB), followed by `jwt_x5c_adapter` (~3.2 MB) and `passport_adapter` (~1.3 MB); the three show circuits are <150 KB each. For exact per-circuit sizes, run `make bench-size` or check `benchmark/expected/baseline.toml`.
+Total artifact size: **~14.5 MB** across the 8 production bin circuits (2026-06-10, post Phase 6 + §7.3). `mdoc_adapter` dominates (~10.1 MB), followed by `jwt_x5c_adapter` (~1.75 MB, after §7.3 base64 windowing), `passport_adapter` (~0.77 MB, after Phase 6 split) and `dsc_chain` (~0.66 MB, cacheable/server-distributed); the three show circuits are <150 KB each. For exact per-circuit sizes, run `make bench-size` or check `benchmark/expected/baseline.toml`.
 
 ## Benchmark
 

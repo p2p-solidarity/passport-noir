@@ -58,6 +58,19 @@ global GOOGLE_OIDC_V1_EMAIL_DOMAIN_OFFSET: u32 = 17;
 global APPLE_ID_V1_EMAIL_DOMAIN_OFFSET: u32 = 16;
 global MICROSOFT_ENTRA_V1_EMAIL_DOMAIN_OFFSET: u32 = 15;
 
+// sec.7.3 base64 windowing: only the claim window of the payload feeds the
+// commitment. `extract_claim_by_tag` reads `payload[offset + i]` for
+// `i in 0..MAX_DOMAIN_LEN` with `offset <= 17` (max over the issuer layouts),
+// so the last byte ever read is index `17 + 31 - 1 = 47`. We therefore bind
+// only payload bytes [0, CLAIM_WINDOW_BYTES) to the issuer-signed input instead
+// of decoding all 1024 -- the trailing payload does not affect the committed
+// claim. CLAIM_WINDOW_BYTES is a multiple of 3 (clean base64 group boundary);
+// CLAIM_WINDOW_B64 = CLAIM_WINDOW_BYTES / 3 * 4 base64url chars decode to it.
+// SECURITY: if a future issuer offset + MAX_DOMAIN_LEN exceeds this, the window
+// MUST grow in lock-step, or the extracted claim would read unbound bytes.
+global CLAIM_WINDOW_BYTES: u32 = 48;
+global CLAIM_WINDOW_B64: u32 = 64;
+
 fn build_runtime_signature(
     signature_limbs: [u128; LIMB_COUNT],
     modulus_limbs: [u128; LIMB_COUNT],
@@ -148,15 +161,15 @@ fn main(
     // the gap where jwt_signed_hash and jwt_payload_b64h were unrelated.
     jwt_signing_input: [u8; JWT_SIGNING_INPUT_LEN],
     jwt_signing_input_len: u32,
-    // Issue P1-4 (2026-04-28): private witnesses pointing to where the
-    // base64url-encoded payload section lives inside `jwt_signing_input`
-    // (after the dot separating header from payload). The circuit base64url-
-    // decodes that span and asserts byte-equality with `jwt_payload_norm`,
-    // closing the gap where the JWS-signed payload could differ from the
-    // canonical normalized payload that feeds the commitment.
+    // Issue P1-4 (2026-04-28) + sec.7.3 windowing: private witness pointing to
+    // where the base64url-encoded payload section starts inside
+    // `jwt_signing_input` (after the dot separating header from payload). The
+    // circuit base64url-decodes the CLAIM WINDOW of that span and asserts
+    // byte-equality with `jwt_payload_norm[0..CLAIM_WINDOW_BYTES)`, closing the
+    // gap where the JWS-signed payload could differ from the canonical
+    // normalized payload that feeds the commitment -- without decoding all 1024
+    // payload bytes (the trailing payload does not feed the claim/commitment).
     payload_b64_offset: u32,
-    payload_b64_len: u32,
-    payload_norm_len: u32,
     jwt_sig: [u128; LIMB_COUNT],
     jwt_modulus_limbs: [u128; LIMB_COUNT],
     jwt_redc_limbs: [u128; LIMB_COUNT],
@@ -255,20 +268,22 @@ fn main(
         );
     }
 
-    // Issue P1-4 (2026-04-28): close the residual gap by base64url-decoding
-    // the payload section of `jwt_signing_input` in-circuit and asserting
-    // it equals `jwt_payload_norm`. Combined with the P0-4 hash binding,
-    // this means: the bytes the issuer RSA-signed (covered by
-    // jwt_signed_hash) base64url-decode to exactly the canonical payload
-    // (covered by jwt_payload_b64h) used for claim extraction and the
-    // commitment. A prover can no longer route a valid issuer signature
-    // around an attacker-chosen jwt_payload_norm.
+    // Issue P1-4 (2026-04-28) + sec.7.3 windowing: close the residual gap by
+    // base64url-decoding the CLAIM WINDOW of the payload section of
+    // `jwt_signing_input` in-circuit and asserting it equals
+    // `jwt_payload_norm[0..CLAIM_WINDOW_BYTES)`. Combined with the P0-4 hash
+    // binding, this means: the bytes the issuer RSA-signed (covered by
+    // jwt_signed_hash) base64url-decode to exactly the canonical payload prefix
+    // that the claim is extracted from. Only the window feeds the commitment,
+    // so binding the full 1024-byte payload was unnecessary; the trailing
+    // payload is still pinned by `jwt_payload_b64h` (digest above) for verifiers
+    // that wish to fix the entire payload, but it never reaches the claim.
     assert(
         jwt_signing_input_len <= JWT_SIGNING_INPUT_LEN as u32,
         "jwt_signing_input_len exceeds JWT_SIGNING_INPUT_LEN",
     );
     assert(
-        payload_b64_offset + payload_b64_len <= jwt_signing_input_len,
+        payload_b64_offset + CLAIM_WINDOW_B64 <= jwt_signing_input_len,
         "payload b64 window past signing input",
     );
     assert(payload_b64_offset >= 1, "payload b64 must follow header.dot");
@@ -279,15 +294,15 @@ fn main(
         jwt_signing_input[payload_b64_offset - 1] == 46,
         "payload b64 must follow a '.' separator",
     );
-    let decoded: [u8; JWT_PAYLOAD_LEN] = b64url_decode_into(
+    let decoded_window: [u8; CLAIM_WINDOW_BYTES] = b64url_decode_into(
         jwt_signing_input,
         payload_b64_offset,
-        payload_b64_len,
-        payload_norm_len,
+        CLAIM_WINDOW_B64,
+        CLAIM_WINDOW_BYTES,
     );
-    for i in 0..JWT_PAYLOAD_LEN {
+    for i in 0..CLAIM_WINDOW_BYTES {
         assert(
-            decoded[i] == jwt_payload_norm[i],
+            decoded_window[i] == jwt_payload_norm[i],
             "jwt_payload_norm does not match base64url-decoded signing-input payload",
         );
     }
@@ -810,8 +825,6 @@ fn test_jwt_x5c_adapter_rejects_wrong_payload_hash() {
         [0; JWT_SIGNING_INPUT_LEN],
         0,
         0,
-        0,
-        0,
         jwt_sig_limbs(),
         leaf_modulus_limbs(),
         leaf_redc_limbs(),
@@ -858,8 +871,6 @@ fn test_jwt_x5c_adapter_rejects_wrong_enclave_pk() {
         [0; JWT_SIGNING_INPUT_LEN],
         0,
         0,
-        0,
-        0,
         jwt_sig_limbs(),
         leaf_modulus_limbs(),
         leaf_redc_limbs(),
@@ -899,8 +910,6 @@ fn test_jwt_x5c_adapter_rejects_wrong_commitment() {
         true,
         payload,
         [0; JWT_SIGNING_INPUT_LEN],
-        0,
-        0,
         0,
         0,
         jwt_sig_limbs(),
@@ -979,8 +988,6 @@ fn run_main_with_override(
         true,
         payload,
         [0; JWT_SIGNING_INPUT_LEN],
-        0,
-        0,
         0,
         0,
         jwt_sig_limbs(),
@@ -1211,8 +1218,6 @@ fn run_payload_b64_binding(
     jwt_signing_input: [u8; JWT_SIGNING_INPUT_LEN],
     jwt_signing_input_len: u32,
     payload_b64_offset: u32,
-    payload_b64_len: u32,
-    payload_norm_len: u32,
     jwt_payload_norm: [u8; JWT_PAYLOAD_LEN],
 ) {
     assert(
@@ -1220,7 +1225,7 @@ fn run_payload_b64_binding(
         "jwt_signing_input_len exceeds JWT_SIGNING_INPUT_LEN",
     );
     assert(
-        payload_b64_offset + payload_b64_len <= jwt_signing_input_len,
+        payload_b64_offset + CLAIM_WINDOW_B64 <= jwt_signing_input_len,
         "payload b64 window past signing input",
     );
     assert(payload_b64_offset >= 1, "payload b64 must follow header.dot");
@@ -1228,15 +1233,15 @@ fn run_payload_b64_binding(
         jwt_signing_input[payload_b64_offset - 1] == 46,
         "payload b64 must follow a '.' separator",
     );
-    let decoded: [u8; JWT_PAYLOAD_LEN] = b64url_decode_into(
+    let decoded_window: [u8; CLAIM_WINDOW_BYTES] = b64url_decode_into(
         jwt_signing_input,
         payload_b64_offset,
-        payload_b64_len,
-        payload_norm_len,
+        CLAIM_WINDOW_B64,
+        CLAIM_WINDOW_BYTES,
     );
-    for i in 0..JWT_PAYLOAD_LEN {
+    for i in 0..CLAIM_WINDOW_BYTES {
         assert(
-            decoded[i] == jwt_payload_norm[i],
+            decoded_window[i] == jwt_payload_norm[i],
             "jwt_payload_norm does not match base64url-decoded signing-input payload",
         );
     }
@@ -1245,84 +1250,57 @@ fn run_payload_b64_binding(
 #[test]
 fn test_payload_b64_binding_roundtrips_against_real_payload() {
     // Positive path: encoding `build_payload()` to base64url and placing it
-    // after a header.dot must decode back to the same bytes.
+    // after a header.dot must decode (its claim window) back to the same bytes.
     let payload = build_payload();
-    let payload_norm_len: u32 = 67; // build_payload() writes 67 bytes
-    let (signing_input, signing_input_len, b64_off, b64_len) =
-        build_signing_input_for_norm(payload, payload_norm_len);
-    run_payload_b64_binding(
-        signing_input,
-        signing_input_len,
-        b64_off,
-        b64_len,
-        payload_norm_len,
-        payload,
-    );
+    let (signing_input, signing_input_len, b64_off, _b64_len) =
+        build_signing_input_for_norm(payload, 67); // build_payload() writes 67 bytes
+    run_payload_b64_binding(signing_input, signing_input_len, b64_off, payload);
 }
 
 #[test(should_fail)]
 fn test_payload_b64_binding_rejects_missing_dot() {
     // P1-4 dot-anchor: shifting the offset back into the header must fail.
     let payload = build_payload();
-    let (mut signing_input, signing_input_len, _, b64_len) =
+    let (mut signing_input, signing_input_len, _, _b64_len) =
         build_signing_input_for_norm(payload, 67);
     // Erase the dot so the offset still points where the b64 begins, but the
     // anchor byte is now wrong.
     signing_input[20] = 65;
-    run_payload_b64_binding(signing_input, signing_input_len, 21, b64_len, 67, payload);
+    run_payload_b64_binding(signing_input, signing_input_len, 21, payload);
 }
 
 #[test(should_fail)]
 fn test_payload_b64_binding_rejects_offset_drift() {
-    // P1-4 anchor: pulling the offset one byte left (so it lands inside the
-    // header b64) lets the dot anchor still match... only when the byte at
-    // offset-1 is '.', which it isn't. Forcing offset = 22 (1 byte to the
-    // right) makes the decoded payload differ by one byte.
+    // P1-4 anchor: forcing offset = 22 (1 byte to the right of the real start)
+    // leaves a non-'.' byte at offset-1, so the dot anchor must reject.
     let payload = build_payload();
-    let (signing_input, signing_input_len, _, b64_len) = build_signing_input_for_norm(payload, 67);
-    run_payload_b64_binding(
-        signing_input,
-        signing_input_len,
-        22,
-        b64_len - 1,
-        67,
-        payload,
-    );
+    let (signing_input, signing_input_len, _, _b64_len) = build_signing_input_for_norm(payload, 67);
+    run_payload_b64_binding(signing_input, signing_input_len, 22, payload);
 }
 
 #[test(should_fail)]
 fn test_payload_b64_binding_rejects_norm_drift() {
-    // P1-4 byte-equality: swapping a single byte of `jwt_payload_norm` must
-    // fail because the decoded bytes won't match. This is the core attacker
-    // model -- prover signs payload A but commits to payload A'.
+    // sec.7.3 windowed byte-equality: swapping a single byte of the claim
+    // window of `jwt_payload_norm` must fail. This is the core attacker model
+    // -- prover signs payload A but commits to payload A' -- and byte 17 is the
+    // first email_domain byte (inside the window), so it is still caught.
     let payload = build_payload();
-    let (signing_input, signing_input_len, b64_off, b64_len) =
+    let (signing_input, signing_input_len, b64_off, _b64_len) =
         build_signing_input_for_norm(payload, 67);
     let mut tampered_norm = payload;
     tampered_norm[17] ^= 0x20; // toggle case of first email_domain byte
-    run_payload_b64_binding(
-        signing_input,
-        signing_input_len,
-        b64_off,
-        b64_len,
-        67,
-        tampered_norm,
-    );
+    run_payload_b64_binding(signing_input, signing_input_len, b64_off, tampered_norm);
 }
 
 #[test(should_fail)]
-fn test_payload_b64_binding_rejects_truncated_window() {
-    // P1-4 window check: claiming a longer b64 than the signing input
-    // contains must trip the bounds assertion before any decode runs.
+fn test_payload_b64_binding_rejects_window_past_input() {
+    // sec.7.3 window bounds: a signing input whose payload is shorter than the
+    // claim window (CLAIM_WINDOW_B64 base64url chars) must trip the bounds
+    // assertion -- a payload that small cannot contain the full claim.
     let payload = build_payload();
-    let (signing_input, signing_input_len, b64_off, b64_len) =
-        build_signing_input_for_norm(payload, 67);
-    run_payload_b64_binding(
-        signing_input,
-        signing_input_len,
-        b64_off,
-        b64_len + 1024,
-        67,
-        payload,
-    );
+    // Only 10 payload bytes encoded => ~14 b64 chars => signing_input_len ~= 35,
+    // so payload_b64_offset(21) + CLAIM_WINDOW_B64(64) > len.
+    let (signing_input, signing_input_len, b64_off, _b64_len) =
+        build_signing_input_for_norm(payload, 10);
+    run_payload_b64_binding(signing_input, signing_input_len, b64_off, payload);
 }

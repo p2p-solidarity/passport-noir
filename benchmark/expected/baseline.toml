@@ -62,7 +62,9 @@ passport_adapter = 11167
 # equality, and the packed-profile unpack/re-bind loops all removed.
 openac_show = 647
 sdjwt_adapter = 35255
-jwt_x5c_adapter = 136440
+# sec.7.3 windowing (-74% vs 136440): the P1-4 base64url decode + byte-equality
+# now cover only the claim window [0,48) of the payload, not all 1024 bytes.
+jwt_x5c_adapter = 35329
 # v3.1 (-11% vs 549): digest computation removed; unified tag.
 x509_show = 488
 # v3.1 (+1.5% vs 815): arity-8 passport opening slightly outweighs the
@@ -77,15 +79,16 @@ dsc_chain = 664739
 passport_adapter = 769483
 openac_show = 146805
 sdjwt_adapter = 792963
-jwt_x5c_adapter = 3242540
+jwt_x5c_adapter = 1750450
 x509_show = 125312
 composite_show = 150762
 mdoc_adapter = 10119930
 # 2026-06-10 v3.1 + Phase 6: 16.0 MB across 8 bin circuits. The phone-side
 # prepare footprint dropped (passport core 1.01 -> 0.75 MB); dsc_chain (0.66 MB)
 # is a separate proof that is cacheable / server-distributed with the CSCA
-# snapshot, so it does not have to ship in the phone bundle.
-total = 16012534
+# snapshot, so it does not have to ship in the phone bundle. sec.7.3 windowing
+# then cut jwt_x5c_adapter 3.24 -> 1.75 MB.
+total = 14520444
 
 # Bytes per gate (lower = more compact artifact representation)
 # Grade: A(≤10) B(≤30) C(≤60) D(≤100) F(>100)
@@ -97,7 +100,7 @@ dsc_chain = 66
 passport_adapter = 69
 openac_show = 227
 sdjwt_adapter = 22
-jwt_x5c_adapter = 24
+jwt_x5c_adapter = 50
 x509_show = 257
 composite_show = 182
 mdoc_adapter = 15
