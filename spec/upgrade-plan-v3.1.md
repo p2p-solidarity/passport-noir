@@ -216,6 +216,7 @@ baseline.toml 自己標注 `v2_v3_status = "wrappers_pending"`。在 `mopro-bind
 | 9 | bundle artifact | 17.0 MB | ≤ 15.7 MB（Phase 3） | ✅ 15.9 MB（−1.28 MB legacy + openac_show/passport_adapter 縮小；x509/composite/jwt_x5c 實測微增） |
 | 10 | ACIR opcodes（附帶收益） | openac_show 1,802 / passport_adapter 36,247 / x509_show 549 | 不設目標 | ✅ **647（−64%）/ 28,596（−21%）/ 488（−11%）**；composite_show 815 → 827（+1.5%，arity-8 開銷） |
 | 11 | openac_show prove ms | — | Phase 0 實測（待辦） | ⬜ bench wrappers 未實作（`baseline.toml [performance]` 標 pending） |
+| 12 | Predicate context pin（追加修補） | v3 起 `age_threshold` / `current_date` / disclose 旗標是 prover 供給的公開輸入但 verifier 未 pin —— 未成年者可用 threshold=0 或未來日期誠實產出 `out_is_older=true` 騙過只讀布林的 verifier | layout builder 強制收齊 predicate context 並逐欄 pin | ✅ `show_layout_openac` pin 36–41、`show_layout_composite` pin 37–40，+2 回歸測試 |
 
 ---
 

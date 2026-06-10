@@ -318,18 +318,38 @@ pub fn prepare_layout_jwt_x5c(
 ///   44:     out_link_tag
 ///   45:     out_is_older
 ///   46..49: out_nationality bytes
+///
+/// Security (predicate-context pinning, 2026-06-10 follow-up): the current
+/// date, `age_threshold` and both disclosure flags are PROVER-supplied
+/// public inputs. The circuit honestly evaluates whatever context it is
+/// given — a minor can produce a valid proof with `out_is_older = true`
+/// against `age_threshold = 0` or a far-future `current_date`. A verifier
+/// that only reads the output boolean would be fooled, so this builder
+/// takes the full predicate context as REQUIRED arguments and pins each
+/// value at its ABI index (same fail-closed philosophy as P0-2).
 pub fn show_layout_openac(
     expected_link_mode: bool,
     expected_link_scope: [u8; FIELD_BYTES],
     expected_epoch: [u8; FIELD_BYTES],
+    expected_current_date: (u32, u32, u32),
+    expected_age_threshold: u32,
+    expected_disclose_nationality: bool,
+    expected_disclose_age: bool,
     expected_link_tag: [u8; FIELD_BYTES],
 ) -> ShowLayoutV3 {
+    let (year, month, day) = expected_current_date;
     let mut pins = Vec::new();
     // P1-8: pin credential_type to DOMAIN_PASSPORT.
     pins.push(pin_field(0, byte_as_field(DOMAIN_PASSPORT)));
     pins.push(pin_field(33, bool_as_field(expected_link_mode)));
     pins.push(pin_field(34, expected_link_scope));
     pins.push(pin_field(35, expected_epoch));
+    pins.push(pin_field(36, u32_as_field(year)));
+    pins.push(pin_field(37, u32_as_field(month)));
+    pins.push(pin_field(38, u32_as_field(day)));
+    pins.push(pin_field(39, u32_as_field(expected_age_threshold)));
+    pins.push(pin_field(40, bool_as_field(expected_disclose_nationality)));
+    pins.push(pin_field(41, bool_as_field(expected_disclose_age)));
     pins.push(pin_field(44, expected_link_tag));
     ShowLayoutV3 {
         num_public_inputs: 49,
@@ -396,19 +416,32 @@ pub fn show_layout_x509(
 /// pinned via `extra_pinned_fields`. Without binding the aux pair, an
 /// attacker could swap their X.509 / SD-JWT credential for a different one
 /// while keeping the passport bundle visible.
+///
+/// Security (predicate-context pinning, 2026-06-10 follow-up): same as
+/// `show_layout_openac` — `age_threshold` and the current date are
+/// prover-supplied public inputs, so they are REQUIRED pins; otherwise a
+/// prover could evaluate the age predicate against threshold 0 or a future
+/// date and the verifier would misread `out_is_older`.
 pub fn show_layout_composite(
     aux_commitment: &PedersenPoint,
     aux_domain: [u8; FIELD_BYTES],
     expected_target_aux_hash: [u8; FIELD_BYTES],
+    expected_age_threshold: u32,
+    expected_current_date: (u32, u32, u32),
     expected_link_mode: bool,
     expected_link_scope: [u8; FIELD_BYTES],
     expected_epoch: [u8; FIELD_BYTES],
     expected_link_tag: [u8; FIELD_BYTES],
 ) -> ShowLayoutV3 {
+    let (year, month, day) = expected_current_date;
     let mut pins = Vec::new();
     pins.push(pin_field(2, aux_commitment.x));
     pins.push(pin_field(3, aux_commitment.y));
     pins.push(pin_field(4, aux_domain));
+    pins.push(pin_field(37, u32_as_field(expected_age_threshold)));
+    pins.push(pin_field(38, u32_as_field(year)));
+    pins.push(pin_field(39, u32_as_field(month)));
+    pins.push(pin_field(40, u32_as_field(day)));
     pins.push(pin_field(41, expected_target_aux_hash));
     pins.push(pin_field(42, bool_as_field(expected_link_mode)));
     pins.push(pin_field(43, expected_link_scope));
@@ -1156,7 +1189,8 @@ mod tests {
         let scope = sample_field(0xE0);
         let epoch = sample_field(0xE1);
         let link_tag = sample_field(0xE3);
-        let layout = show_layout_openac(true, scope, epoch, link_tag);
+        let layout =
+            show_layout_openac(true, scope, epoch, (2026, 6, 10), 18, true, true, link_tag);
         assert_eq!(layout.num_public_inputs, 49);
         assert_eq!(layout.commitment_x_index, 42);
         assert_eq!(layout.commitment_y_index, 43);
@@ -1173,6 +1207,38 @@ mod tests {
             layout.extra_pinned_fields.contains(&(44, link_tag)),
             "link tag must be pinned at field index 44",
         );
+    }
+
+    #[test]
+    fn test_show_layout_openac_pins_predicate_context() {
+        // Predicate-context pinning (2026-06-10): current date, age
+        // threshold and disclosure flags are prover-supplied public inputs.
+        // Without these pins a minor could prove out_is_older = true against
+        // age_threshold = 0 (or a future current_date) and a verifier that
+        // only reads the boolean would accept it as ">= 18".
+        let layout = show_layout_openac(
+            true,
+            sample_field(0xE0),
+            sample_field(0xE1),
+            (2026, 6, 10),
+            18,
+            false,
+            true,
+            sample_field(0xE3),
+        );
+        assert!(layout.extra_pinned_fields.contains(&(36, u32_as_field(2026))));
+        assert!(layout.extra_pinned_fields.contains(&(37, u32_as_field(6))));
+        assert!(layout.extra_pinned_fields.contains(&(38, u32_as_field(10))));
+        assert!(
+            layout.extra_pinned_fields.contains(&(39, u32_as_field(18))),
+            "age_threshold must be pinned at field index 39",
+        );
+        assert!(layout
+            .extra_pinned_fields
+            .contains(&(40, bool_as_field(false))));
+        assert!(layout
+            .extra_pinned_fields
+            .contains(&(41, bool_as_field(true))));
     }
 
     #[test]
@@ -1204,6 +1270,8 @@ mod tests {
             &aux_commitment,
             aux_domain,
             target,
+            18,
+            (2026, 6, 10),
             true,
             scope,
             epoch,
@@ -1220,5 +1288,30 @@ mod tests {
         assert!(layout.extra_pinned_fields.contains(&(43, scope)));
         assert!(layout.extra_pinned_fields.contains(&(44, epoch)));
         assert!(layout.extra_pinned_fields.contains(&(45, tag)));
+    }
+
+    #[test]
+    fn test_show_layout_composite_pins_predicate_context() {
+        // Same predicate-context regression as openac_show, composite layout:
+        // age_threshold at 37, current date at 38..41.
+        let aux_commitment = sample_point(0x81);
+        let layout = show_layout_composite(
+            &aux_commitment,
+            byte_as_field(DOMAIN_X509),
+            sample_field(0x82),
+            21,
+            (2026, 6, 10),
+            true,
+            sample_field(0x83),
+            sample_field(0x84),
+            sample_field(0x85),
+        );
+        assert!(
+            layout.extra_pinned_fields.contains(&(37, u32_as_field(21))),
+            "age_threshold must be pinned at field index 37",
+        );
+        assert!(layout.extra_pinned_fields.contains(&(38, u32_as_field(2026))));
+        assert!(layout.extra_pinned_fields.contains(&(39, u32_as_field(6))));
+        assert!(layout.extra_pinned_fields.contains(&(40, u32_as_field(10))));
     }
 }
