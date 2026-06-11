@@ -13,8 +13,36 @@ description = "Mopro FFI bindings for passport ZK verification circuits (Noir) â
 mopro-ffi = "=0.3.5"
 noir_rs = { package = "noir", git = "https://github.com/zkmopro/noir-rs", features = ["barretenberg"], tag = "v1.0.0-beta.19" }
 serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
 thiserror = "2.0"
-sha2 = "0.10"
+# "oid" gives sha2 digests an AssociatedOid impl, required by rsa's
+# Pkcs1v15Sign::new::<Sha256>() DigestInfo encoding.
+sha2 = { version = "0.10", features = ["oid"] }
+base64 = "0.22"
+# --- OpenAC v3 witness builder (openac_v3_witness.rs) ---
+# Grumpkin Pedersen primitives must match Noir stdlib bit-for-bit; reuse the
+# exact generator derivation the compiler embeds (same git rev as noir_rs's
+# transitive acvm) plus ark curve arithmetic pinned to the lockfile versions.
+bn254_blackbox_solver = { git = "https://github.com/noir-lang/noir.git", rev = "v1.0.0-beta.19" }
+ark-grumpkin = "0.5.0"
+ark-ec = "0.5"
+ark-ff = "0.5"
+num-bigint = "0.4"
+# Same crate family rsa/noir-bignum-paramgen use internally (they alias it as
+# `num_bigint`); we construct their BigUint inputs from raw bytes.
+num-bigint-dig = "0.8"
+# Local attestation chain: RSA-2048 keygen + PKCS#1 v1.5 prehashed signing.
+rsa = "0.9"
+rand = "0.8"
+# Off-circuit pre-validation of DG15 Active Authentication (ECDSA P-256).
+p256 = { version = "0.13", features = ["ecdsa"] }
+# SOD (CMS SignedData) / DSC certificate / DG15 SubjectPublicKeyInfo parsing.
+# BER-tolerant parser family â€” real ICAO SODs are not always strict DER.
+x509-parser = "0.16"
+# 120-bit limb + Barrett redc parameter encoding for noir-bignum RSA inputs.
+noir-bignum-paramgen = "0.1"
+# Legacy LDS digest algorithms still seen on older passports.
+sha1 = "0.10"
 # Needed only by `bin/android_zig.rs` for the UniFFI bindings step.
 # `uniffi` itself is reached via `mopro_ffi::*` (mopro-ffi does
 # `pub use uniffi::*;`) to avoid the macro vs direct-extern name

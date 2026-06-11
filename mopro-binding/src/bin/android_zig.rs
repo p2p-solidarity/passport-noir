@@ -87,8 +87,7 @@ fn project_dir() -> PathBuf {
 /// `lib<crate_name>.so` — UniFFI / cargo's default cdylib filename.
 /// Pulled from Cargo.toml so we stay in sync if the crate is renamed.
 fn lib_name() -> String {
-    let manifest = fs::read_to_string(project_dir().join("Cargo.toml"))
-        .expect("read Cargo.toml");
+    let manifest = fs::read_to_string(project_dir().join("Cargo.toml")).expect("read Cargo.toml");
     for line in manifest.lines() {
         let line = line.trim();
         if let Some(rest) = line.strip_prefix("name") {
@@ -205,9 +204,7 @@ fn main() {
         // absolute is the only way the link survives.
         let api_lib_dir = format!("{sysroot}/usr/lib/{arch}/{api_level}");
         let arch_lib_dir = format!("{sysroot}/usr/lib/{arch}");
-        let rustflags = format!(
-            "-C link-arg=-L{api_lib_dir} -C link-arg=-L{arch_lib_dir}"
-        );
+        let rustflags = format!("-C link-arg=-L{api_lib_dir} -C link-arg=-L{arch_lib_dir}");
         let rustflags_key = format!(
             "CARGO_TARGET_{}_RUSTFLAGS",
             arch.to_uppercase().replace('-', "_")
@@ -219,7 +216,11 @@ fn main() {
         cmd.env("ANDROID_NDK_HOME", &ndk_root);
         cmd.env("ANDROID_NDK", &ndk_root);
 
-        let status = cmd.spawn().expect("spawn cargo zigbuild").wait().expect("wait");
+        let status = cmd
+            .spawn()
+            .expect("spawn cargo zigbuild")
+            .wait()
+            .expect("wait");
         if !status.success() {
             panic!("cargo zigbuild failed for {arch}");
         }
@@ -239,7 +240,11 @@ fn main() {
         fs::create_dir_all(&dest_dir).expect("create abi dir");
         let dest = dest_dir.join(&lib_so);
         fs::copy(&produced, &dest).expect("copy cdylib");
-        println!("==> [zig] copied {} → {}", produced.display(), dest.display());
+        println!(
+            "==> [zig] copied {} → {}",
+            produced.display(),
+            dest.display()
+        );
 
         last_so_path = Some(produced);
     }
@@ -260,7 +265,10 @@ fn main() {
     let uniffi_dir = bindings_dest.join("uniffi");
     fs::create_dir_all(&uniffi_dir).expect("create uniffi dir");
 
-    println!("==> [zig] generating UniFFI Kotlin bindings from {}", source_so.display());
+    println!(
+        "==> [zig] generating UniFFI Kotlin bindings from {}",
+        source_so.display()
+    );
     let metadata_supplier = CargoMetadataConfigSupplier::default();
     generate_bindings_library_mode(
         Utf8Path::from_path(&source_so).expect("utf-8 path"),

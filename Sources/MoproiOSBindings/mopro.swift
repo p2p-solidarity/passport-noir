@@ -723,6 +723,16 @@ fileprivate struct FfiConverterDictionaryStringSequenceString: FfiConverterRustB
     }
 }
 /**
+ * UniFFI entry point — generates fresh attestation keys per request.
+ */
+public func buildOpenAcV3WitnessBundle(requestJson: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMoproError_lift) {
+    uniffi_passport_zk_mopro_fn_func_build_open_ac_v3_witness_bundle(
+        FfiConverterString.lower(requestJson),$0
+    )
+})
+}
+/**
  * Generate a Noir proof for a given circuit.
  *
  * # Arguments
@@ -793,6 +803,9 @@ private let initializationResult: InitializationResult = {
     let scaffolding_contract_version = ffi_passport_zk_mopro_uniffi_contract_version()
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
+    }
+    if (uniffi_passport_zk_mopro_checksum_func_build_open_ac_v3_witness_bundle() != 10629) {
+        return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_passport_zk_mopro_checksum_func_generate_noir_proof() != 30133) {
         return InitializationResult.apiChecksumMismatch

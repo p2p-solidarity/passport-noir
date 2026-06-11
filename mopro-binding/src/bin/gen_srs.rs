@@ -31,25 +31,35 @@ fn print_help() {
     eprintln!(
         "gen_srs — generate bundled SRS blobs for Noir circuits\n\n\
          Usage:\n\
-           gen_srs --circuit <path.json> --out <path.srs.bin> [--recursive]\n\
-           gen_srs --circuits-dir <dir> --out-dir <dir>      [--recursive]\n"
+           gen_srs --circuit <path.json> --out <path.srs.bin>           [--recursive]\n\
+           gen_srs --circuits-dir <dir> --out-dir <dir>                 [--recursive]\n\
+           gen_srs --circuit a.json --circuit b.json --merged-out <f>   [--recursive]\n\n\
+         --merged-out writes ONE SRS sized to the largest of the listed\n\
+         --circuit files. Because barretenberg's SRS is a prefix (a bigger SRS\n\
+         contains every smaller one), that single file serves all of them — so\n\
+         the app bundles one blob instead of one per circuit. List only the\n\
+         circuits you actually ship, or the SRS is sized to the biggest one.\n"
     );
 }
 
 struct Args {
-    circuit: Option<String>,
+    /// Repeatable. One value = single mode (with --out); multiple = merged
+    /// mode (with --merged-out).
+    circuit: Vec<String>,
     out: Option<String>,
     circuits_dir: Option<String>,
     out_dir: Option<String>,
+    merged_out: Option<String>,
     recursive: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
     let mut args = Args {
-        circuit: None,
+        circuit: Vec::new(),
         out: None,
         circuits_dir: None,
         out_dir: None,
+        merged_out: None,
         recursive: false,
     };
 
@@ -61,7 +71,8 @@ fn parse_args() -> Result<Args, String> {
                 std::process::exit(0);
             }
             "--circuit" => {
-                args.circuit = Some(iter.next().ok_or("--circuit requires a value")?);
+                args.circuit
+                    .push(iter.next().ok_or("--circuit requires a value")?);
             }
             "--out" => {
                 args.out = Some(iter.next().ok_or("--out requires a value")?);
@@ -72,24 +83,32 @@ fn parse_args() -> Result<Args, String> {
             "--out-dir" => {
                 args.out_dir = Some(iter.next().ok_or("--out-dir requires a value")?);
             }
+            "--merged-out" => {
+                args.merged_out = Some(iter.next().ok_or("--merged-out requires a value")?);
+            }
             "--recursive" => args.recursive = true,
             other => return Err(format!("Unknown argument: {}", other)),
         }
     }
 
-    let single = args.circuit.is_some() || args.out.is_some();
-    let batch = args.circuits_dir.is_some() || args.out_dir.is_some();
-    if single && batch {
-        return Err("--circuit/--out and --circuits-dir/--out-dir are mutually exclusive".into());
+    let single = args.out.is_some();
+    let merged = args.merged_out.is_some();
+    let batch = args.out_dir.is_some();
+    let modes = [single, merged, batch].iter().filter(|m| **m).count();
+    if modes > 1 {
+        return Err("--out, --out-dir and --merged-out are mutually exclusive".into());
     }
-    if !single && !batch {
-        return Err("Must specify either --circuit/--out or --circuits-dir/--out-dir".into());
+    if modes == 0 {
+        return Err("Must specify --out, --out-dir, or --merged-out".into());
     }
-    if single && (args.circuit.is_none() || args.out.is_none()) {
-        return Err("--circuit and --out must both be set".into());
+    if single && args.circuit.len() != 1 {
+        return Err("--out requires exactly one --circuit".into());
     }
-    if batch && (args.circuits_dir.is_none() || args.out_dir.is_none()) {
-        return Err("--circuits-dir and --out-dir must both be set".into());
+    if batch && args.circuits_dir.is_none() {
+        return Err("--out-dir requires --circuits-dir".into());
+    }
+    if merged && args.circuit.is_empty() {
+        return Err("--merged-out requires one or more --circuit values".into());
     }
     Ok(args)
 }
@@ -159,6 +178,75 @@ fn generate_one(circuit_path: &Path, output_path: &Path, recursive: bool) -> Res
     Ok(())
 }
 
+/// Generate ONE SRS sized to the largest circuit in `circuits_dir`.
+///
+/// barretenberg's SRS is a prefix: `Srs::get(n)` truncates a larger SRS to the
+/// first `n` points, so an SRS sized to the biggest circuit verifiably serves
+/// every smaller circuit too (confirmed end-to-end against the real prover).
+/// Bundling this single blob instead of one per circuit roughly halves the app
+/// payload for the OpenAC v3 passport set.
+fn run_merged(circuits: &[String], merged_out: &Path, recursive: bool) -> Result<(), String> {
+    if circuits.is_empty() {
+        return Err("merged mode needs at least one --circuit".into());
+    }
+
+    let mut max_prover_size: u32 = 0;
+    let mut largest = String::new();
+    for circuit in circuits {
+        let path = Path::new(circuit);
+        let bytecode = match extract_bytecode(path) {
+            Ok(b) => b,
+            Err(err) => {
+                eprintln!("  SKIP {}: {}", path.display(), err);
+                continue;
+            }
+        };
+        let subgroup_size = get_subgroup_size(&bytecode, recursive);
+        let prover_size = subgroup_size
+            .checked_mul(ULTRA_HONK_SRS_MULTIPLIER)
+            .ok_or_else(|| format!("subgroup_size {} overflows u32", subgroup_size))?;
+        println!(
+            "  {}: subgroup_size = {} → prover SRS points = {}",
+            path.display(),
+            subgroup_size,
+            prover_size
+        );
+        if prover_size > max_prover_size {
+            max_prover_size = prover_size;
+            largest = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("?")
+                .to_string();
+        }
+    }
+    if max_prover_size == 0 {
+        return Err("No parseable circuits to size the merged SRS".into());
+    }
+    println!(
+        "merged SRS sized to {} points (largest circuit: {}) — serves all circuits",
+        max_prover_size, largest
+    );
+
+    let srs = get_srs(max_prover_size, None);
+    let local = LocalSrs(srs);
+    if let Some(parent) = merged_out.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create {}: {}", parent.display(), e))?;
+        }
+    }
+    let out_str = merged_out
+        .to_str()
+        .ok_or_else(|| format!("Non-UTF8 path: {}", merged_out.display()))?;
+    local.save(Some(out_str));
+    let size = fs::metadata(merged_out)
+        .map(|m| m.len())
+        .unwrap_or_default();
+    println!("  -> wrote {} ({} bytes)", merged_out.display(), size);
+    Ok(())
+}
+
 fn run_batch(circuits_dir: &Path, out_dir: &Path, recursive: bool) -> Result<(), String> {
     let entries = fs::read_dir(circuits_dir)
         .map_err(|e| format!("Failed to read {}: {}", circuits_dir.display(), e))?;
@@ -195,8 +283,10 @@ fn main() {
         }
     };
 
-    let result = if let (Some(circuit), Some(out)) = (&args.circuit, &args.out) {
-        generate_one(Path::new(circuit), Path::new(out), args.recursive)
+    let result = if let Some(out) = &args.out {
+        generate_one(Path::new(&args.circuit[0]), Path::new(out), args.recursive)
+    } else if let Some(merged_out) = &args.merged_out {
+        run_merged(&args.circuit, Path::new(merged_out), args.recursive)
     } else {
         let dir = args.circuits_dir.as_deref().unwrap();
         let out_dir = args.out_dir.as_deref().unwrap();

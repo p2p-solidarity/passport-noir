@@ -61,14 +61,19 @@ sync-ios-bindings:
 	cp -R $(MOPRO_IOS_BINDINGS_DIR) $(SWIFT_PACKAGE_BINDINGS_DIR)
 	./scripts/patch_mopro_fallback.sh $(SWIFT_PACKAGE_BINDINGS_DIR)/mopro.swift
 
-# Generate bundled SRS for every compiled circuit (internet required on first run).
-# Output goes to mopro-binding/test-vectors/srs/*.srs.bin so the iOS xcframework
-# build can bundle them alongside the circuit JSONs.
+# Generate ONE merged SRS for the OpenAC v3 passport circuit set (internet
+# required on first run). barretenberg's SRS is a prefix, so a single blob
+# sized to the largest of the three circuits serves all of them — the app
+# bundles `passport.srs.bin` once instead of one SRS per circuit (~256MB→128MB).
+# Output goes to mopro-binding/test-vectors/srs/passport.srs.bin so the iOS
+# xcframework build and build-android.sh can bundle it alongside the JSONs.
 gen-srs: copy-circuit-artifacts
-	@echo "Generating SRS for compiled circuits..."
+	@echo "Generating merged OpenAC v3 passport SRS..."
 	cd $(MOPRO_DIR) && cargo run --bin gen_srs --release -- \
-		--circuits-dir test-vectors/noir \
-		--out-dir test-vectors/srs
+		--circuit test-vectors/noir/dsc_chain.json \
+		--circuit test-vectors/noir/passport_adapter.json \
+		--circuit test-vectors/noir/openac_show.json \
+		--merged-out test-vectors/srs/passport.srs.bin
 
 # ──────────────────────────────────────────────────
 # Format & Lint

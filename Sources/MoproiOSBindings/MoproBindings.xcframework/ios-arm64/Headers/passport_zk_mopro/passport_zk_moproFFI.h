@@ -251,6 +251,11 @@ typedef void (*UniffiForeignFutureCompleteVoid)(uint64_t, UniffiForeignFutureStr
     );
 
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PASSPORT_ZK_MOPRO_FN_FUNC_BUILD_OPEN_AC_V3_WITNESS_BUNDLE
+#define UNIFFI_FFIDEF_UNIFFI_PASSPORT_ZK_MOPRO_FN_FUNC_BUILD_OPEN_AC_V3_WITNESS_BUNDLE
+RustBuffer uniffi_passport_zk_mopro_fn_func_build_open_ac_v3_witness_bundle(RustBuffer request_json, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PASSPORT_ZK_MOPRO_FN_FUNC_GENERATE_NOIR_PROOF
 #define UNIFFI_FFIDEF_UNIFFI_PASSPORT_ZK_MOPRO_FN_FUNC_GENERATE_NOIR_PROOF
 RustBuffer uniffi_passport_zk_mopro_fn_func_generate_noir_proof(RustBuffer circuit_path, RustBuffer srs_path, RustBuffer inputs, RustCallStatus *_Nonnull out_status
@@ -544,6 +549,12 @@ void ffi_passport_zk_mopro_rust_future_free_void(uint64_t handle
 #ifndef UNIFFI_FFIDEF_FFI_PASSPORT_ZK_MOPRO_RUST_FUTURE_COMPLETE_VOID
 #define UNIFFI_FFIDEF_FFI_PASSPORT_ZK_MOPRO_RUST_FUTURE_COMPLETE_VOID
 void ffi_passport_zk_mopro_rust_future_complete_void(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PASSPORT_ZK_MOPRO_CHECKSUM_FUNC_BUILD_OPEN_AC_V3_WITNESS_BUNDLE
+#define UNIFFI_FFIDEF_UNIFFI_PASSPORT_ZK_MOPRO_CHECKSUM_FUNC_BUILD_OPEN_AC_V3_WITNESS_BUNDLE
+uint16_t uniffi_passport_zk_mopro_checksum_func_build_open_ac_v3_witness_bundle(void
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PASSPORT_ZK_MOPRO_CHECKSUM_FUNC_GENERATE_NOIR_PROOF
