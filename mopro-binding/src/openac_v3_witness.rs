@@ -1227,9 +1227,17 @@ mod tests {
     /// bench wrappers are Phase 0, not landed yet), so the `#[ignore]` e2e
     /// proofs below SKIP under a blanket `cargo test --ignored` instead of
     /// hard-failing on a missing artifact.
+    /// The crate dir holding `test-vectors/`; `PASSPORT_NOIR_VECTORS_DIR`
+    /// overrides it so a cross-compiled test binary can run on a device
+    /// (`env!` bakes the host path in).
+    fn vectors_dir() -> std::path::PathBuf {
+        std::env::var_os("PASSPORT_NOIR_VECTORS_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")))
+    }
+
     fn e2e_prove_fixtures_present() -> bool {
-        use std::path::PathBuf;
-        let vectors = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let vectors = vectors_dir();
         let circuits = ["dsc_chain", "passport_adapter", "openac_show"]
             .iter()
             .all(|c| vectors.join(format!("test-vectors/noir/{c}.json")).exists());
@@ -1237,7 +1245,7 @@ mod tests {
     }
 
     /// The definitive check: witnesses from a fixture chip read must prove
-    /// AND verify under the shipped 0.3.0 circuit artifacts for all three
+    /// AND verify under the shipped circuit artifacts for all three
     /// circuits, with the device signature bound the way the app binds it.
     /// Heavy (3 UltraHonk proofs) — run explicitly:
     ///   cargo test --release openac_v3_e2e_proofs -- --ignored
@@ -1245,7 +1253,6 @@ mod tests {
     #[ignore = "generates 3 real proofs; run with --ignored (release recommended)"]
     fn openac_v3_e2e_proofs_generate_and_verify() {
         use p256::ecdsa::signature::hazmat::PrehashSigner;
-        use std::path::PathBuf;
 
         if !e2e_prove_fixtures_present() {
             eprintln!(
@@ -1254,7 +1261,7 @@ mod tests {
             return;
         }
 
-        let vectors = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let vectors = vectors_dir();
         let circuit = |name: &str| {
             vectors
                 .join(format!("test-vectors/noir/{name}.json"))
@@ -1326,8 +1333,6 @@ mod tests {
     #[test]
     #[ignore = "generates a real proof; run with --ignored (release recommended)"]
     fn openac_v3_e2e_passive_only_passport_adapter_proves() {
-        use std::path::PathBuf;
-
         if !e2e_prove_fixtures_present() {
             eprintln!(
                 "SKIP openac_v3_e2e_passive_only_passport_adapter_proves: v3.1 prove fixtures absent (run `make gen-srs`)"
@@ -1335,7 +1340,7 @@ mod tests {
             return;
         }
 
-        let vectors = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let vectors = vectors_dir();
         let circuit_path = vectors.join("test-vectors/noir/passport_adapter.json");
         let srs_path = vectors.join("test-vectors/srs/passport.srs.bin");
 
