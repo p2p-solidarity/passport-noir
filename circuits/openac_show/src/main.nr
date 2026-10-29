@@ -2,7 +2,7 @@ use openac_core::commit::{assert_commitment_eq, commit_passport_v3_1, DOMAIN_PAS
 use openac_core::device::verify_device_binding;
 use openac_core::predicate::{check_age_above, check_bytes3_eq};
 use openac_core::profile::unpack_passport_claims;
-use openac_core::show::{HASH_LEN, verify_show};
+use openac_core::show::{HASH_LEN, verify_nullifier, verify_show};
 
 // Generic OpenAC Show Circuit (v3.1 -- Path A, passport only)
 //
@@ -113,6 +113,9 @@ fn main(
     out_link_tag: pub Field,
     out_is_older: pub bool,
     out_nationality: pub [u8; 3],
+    // === Passport nullifier (appended last: earlier ABI indices unchanged) ===
+    nullifier_scope: pub Field,
+    out_nullifier: pub Field,
 ) {
     // Issue P1-8: lock the circuit to passport credentials.
     assert(
@@ -155,6 +158,10 @@ fn main(
         out_link_tag,
     );
 
+    // Step 4b: Passport nullifier -- one value per passport per scope,
+    // independent of link_rand (scope 0 pins it to zero).
+    verify_nullifier(sod_hash_hi, sod_hash_lo, nullifier_scope, out_nullifier);
+
     // Step 5: Predicate evaluation.
     evaluate_predicates(
         birth_year,
@@ -179,7 +186,7 @@ fn main(
 use openac_core::commit::DOMAIN_X509;
 use openac_core::device::pk_digest_from_bytes;
 use openac_core::profile::pack_passport_claims;
-use openac_core::show::compute_link_tag;
+use openac_core::show::{compute_link_tag, compute_passport_nullifier};
 use std::embedded_curve_ops::EmbeddedCurvePoint;
 
 /// Canonical full-width fingerprint fixture (arbitrary but fixed bytes so
@@ -251,8 +258,12 @@ fn invoke_main(
         out_link_tag,
         out_is_older,
         out_nationality,
+        TEST_NULLIFIER_SCOPE,
+        compute_passport_nullifier(sod_hi, sod_lo, TEST_NULLIFIER_SCOPE),
     );
 }
+
+global TEST_NULLIFIER_SCOPE: Field = 0x6372656473;
 
 /// Canonical P-256 enclave test fixture (matches openac_core::device).
 fn test_enclave_pk_x() -> [u8; 32] {

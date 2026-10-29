@@ -187,6 +187,7 @@ pub const DOMAIN_CSCA_LEAF: u128 = 0x6373636c;
 pub const DOMAIN_DSC_ID: u128 = 0x64736369;
 pub const DOMAIN_PK_DIGEST: u128 = 0x706b6467;
 pub const DOMAIN_LINK_TAG: u128 = 0x6c746167;
+pub const DOMAIN_NULLIFIER: u128 = 0x6e756c66;
 pub const SALT_SCOPE_RAND: u128 = 0x73637264;
 
 pub fn field(value: u128) -> FieldElement {
@@ -272,6 +273,15 @@ pub fn compute_link_tag(
         link_scope,
         epoch,
     ])
+}
+
+/// `openac_core::show::compute_passport_nullifier`.
+pub fn compute_passport_nullifier(
+    sod_hash_hi: FieldElement,
+    sod_hash_lo: FieldElement,
+    nullifier_scope: FieldElement,
+) -> FieldElement {
+    pedersen_hash(&[field(DOMAIN_NULLIFIER), sod_hash_hi, sod_hash_lo, nullifier_scope])
 }
 
 /// `openac_core::commit::commit_passport_v3_1` (arity-8 Grumpkin commitment).

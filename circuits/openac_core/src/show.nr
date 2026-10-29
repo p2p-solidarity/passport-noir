@@ -85,6 +85,46 @@ pub fn verify_show(
     }
 }
 
+/// Domain separator for the passport nullifier. ASCII "nulf".
+global DOMAIN_NULLIFIER: Field = 0x6e756c66;
+
+/// Passport nullifier (creds 2.0.0, docs/ref/10 sec.3.11): ONE value per
+/// passport document per scope, whatever link_rand or device the holder
+/// uses, so a verifier can count distinct passports behind witnesses.
+///
+/// nullifier = pedersen_hash([DOMAIN_NULLIFIER, sod_hash_hi, sod_hash_lo, nullifier_scope])
+///
+/// Keyed on the SOD hash, not DG1: DG1 is the MRZ (name, birth date,
+/// document number) and could be brute-forced from a known person's details
+/// to unmask their nullifier; the SOD covers every data-group hash including
+/// the face image, so computing it needs the chip data itself. The SOD hash
+/// is bound to the prepare proof through the commitment opening.
+pub fn compute_passport_nullifier(
+    sod_hash_hi: Field,
+    sod_hash_lo: Field,
+    nullifier_scope: Field,
+) -> Field {
+    pedersen_hash(
+        [DOMAIN_NULLIFIER, sod_hash_hi, sod_hash_lo, nullifier_scope],
+    )
+}
+
+/// Scope 0 = no nullifier: the output is pinned to 0 so a presentation that
+/// opts out cannot carry a free-witness value.
+pub fn verify_nullifier(
+    sod_hash_hi: Field,
+    sod_hash_lo: Field,
+    nullifier_scope: Field,
+    expected_nullifier: Field,
+) {
+    if nullifier_scope == 0 {
+        assert(expected_nullifier == 0, "No nullifier scope requires zero nullifier");
+    } else {
+        let n = compute_passport_nullifier(sod_hash_hi, sod_hash_lo, nullifier_scope);
+        assert(n == expected_nullifier, "Passport nullifier mismatch");
+    }
+}
+
 // ============================================================
 // Tests
 // ============================================================
@@ -182,4 +222,28 @@ fn test_verify_show_fails_unlinkable_with_nonzero_scope() {
 #[test(should_fail_with = "Unlinkable mode requires zero tag")]
 fn test_verify_show_fails_unlinkable_with_nonzero_tag() {
     verify_show(TEST_DOMAIN_A, 77, false, 0, 0x20260401, 99);
+}
+
+#[test]
+fn test_nullifier_ignores_link_rand_and_differs_by_passport_and_scope() {
+    let n = compute_passport_nullifier(1, 2, 7);
+    assert(n == compute_passport_nullifier(1, 2, 7), "deterministic");
+    assert(n != compute_passport_nullifier(1, 3, 7), "different passport -> different nullifier");
+    assert(n != compute_passport_nullifier(1, 2, 8), "different scope -> different nullifier");
+}
+
+#[test]
+fn test_verify_nullifier_accepts_honest_and_zero_scope() {
+    verify_nullifier(1, 2, 7, compute_passport_nullifier(1, 2, 7));
+    verify_nullifier(1, 2, 0, 0);
+}
+
+#[test(should_fail_with = "Passport nullifier mismatch")]
+fn test_verify_nullifier_rejects_forged() {
+    verify_nullifier(1, 2, 7, compute_passport_nullifier(1, 3, 7));
+}
+
+#[test(should_fail_with = "No nullifier scope requires zero nullifier")]
+fn test_verify_nullifier_rejects_value_without_scope() {
+    verify_nullifier(1, 2, 0, 5);
 }

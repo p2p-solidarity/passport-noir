@@ -359,7 +359,7 @@ pub fn prepare_layout_jwt_x5c(
     }
 }
 
-/// openac_show v3.1 (passport-only) layout. Public inputs (49 total):
+/// openac_show v3.1 (passport-only) layout. Public inputs (51 total):
 ///   0:      credential_type (must be DOMAIN_PASSPORT)
 ///   1..33:  nonce_hash bytes
 ///   33:     link_mode
@@ -376,6 +376,8 @@ pub fn prepare_layout_jwt_x5c(
 ///   44:     out_link_tag
 ///   45:     out_is_older
 ///   46..49: out_nationality bytes
+///   49:     nullifier_scope  (0 = no nullifier; pinned)
+///   50:     out_nullifier    (one value per passport per scope)
 ///
 /// Security (predicate-context pinning, 2026-06-10 follow-up): the current
 /// date, `age_threshold` and both disclosure flags are PROVER-supplied
@@ -394,6 +396,7 @@ pub fn show_layout_openac(
     expected_disclose_nationality: bool,
     expected_disclose_age: bool,
     expected_link_tag: [u8; FIELD_BYTES],
+    expected_nullifier_scope: [u8; FIELD_BYTES],
 ) -> ShowLayoutV3 {
     let (year, month, day) = expected_current_date;
     let mut pins = Vec::new();
@@ -409,8 +412,9 @@ pub fn show_layout_openac(
     pins.push(pin_field(40, bool_as_field(expected_disclose_nationality)));
     pins.push(pin_field(41, bool_as_field(expected_disclose_age)));
     pins.push(pin_field(44, expected_link_tag));
+    pins.push(pin_field(49, expected_nullifier_scope));
     ShowLayoutV3 {
-        num_public_inputs: 49,
+        num_public_inputs: 51,
         commitment_x_index: 42,
         commitment_y_index: 43,
         nonce_hash_first_byte_index: Some(1),
@@ -1519,9 +1523,19 @@ mod tests {
         let scope = sample_field(0xE0);
         let epoch = sample_field(0xE1);
         let link_tag = sample_field(0xE3);
-        let layout =
-            show_layout_openac(true, scope, epoch, (2026, 6, 10), 18, true, true, link_tag);
-        assert_eq!(layout.num_public_inputs, 49);
+        let nullifier_scope = sample_field(0xE4);
+        let layout = show_layout_openac(
+            true,
+            scope,
+            epoch,
+            (2026, 6, 10),
+            18,
+            true,
+            true,
+            link_tag,
+            nullifier_scope,
+        );
+        assert_eq!(layout.num_public_inputs, 51);
         assert_eq!(layout.commitment_x_index, 42);
         assert_eq!(layout.commitment_y_index, 43);
         assert_eq!(layout.nonce_hash_first_byte_index, Some(1));
@@ -1536,6 +1550,10 @@ mod tests {
         assert!(
             layout.extra_pinned_fields.contains(&(44, link_tag)),
             "link tag must be pinned at field index 44",
+        );
+        assert!(
+            layout.extra_pinned_fields.contains(&(49, nullifier_scope)),
+            "nullifier scope must be pinned at field index 49",
         );
     }
 
@@ -1555,6 +1573,7 @@ mod tests {
             false,
             true,
             sample_field(0xE3),
+            sample_field(0xE4),
         );
         assert!(layout
             .extra_pinned_fields

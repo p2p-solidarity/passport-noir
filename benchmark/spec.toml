@@ -301,6 +301,7 @@ public_inputs = [
   "out_commitment_x", "out_commitment_y",
   "out_link_tag",
   "out_is_older", "out_nationality",
+  "nullifier_scope", "out_nullifier",
 ]
 public_input_types = [
   "Field",
@@ -311,8 +312,13 @@ public_input_types = [
   "Field", "Field",
   "Field",
   "bool", "[u8; 3]",
+  "Field", "Field",
 ]
 
+# v0.4.0 (2026-10-30, creds docs/ref/10 sec.3.11): passport nullifier appended
+#   last (earlier ABI indices unchanged) -- pedersen(DOMAIN "nulf", sod_hash_hi,
+#   sod_hash_lo, nullifier_scope); scope 0 pins it to 0. Keyed on the SOD hash
+#   (not DG1/MRZ, which is brute-forceable from a known person's details).
 # v3.1 (2026-06-10, spec/upgrade-plan-v3.1.md):
 #   * `challenge` / `out_challenge_digest` / `epoch[u8;4]` / `epoch_field`
 #     REMOVED — freshness rides on the pinned public `nonce_hash`, which is

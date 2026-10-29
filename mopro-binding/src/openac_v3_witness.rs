@@ -47,7 +47,7 @@ use sod::{AaPublicKey, SodError};
 
 const REQUEST_SCHEMA: &str = "gg.solidarity.passport.openac-v3.witness-request.v1";
 const RESULT_SCHEMA: &str = "gg.solidarity.passport.openac-v3.witness-build-result.v1";
-const PASSPORT_NOIR_VERSION: &str = "0.3.0";
+const PASSPORT_NOIR_VERSION: &str = "0.4.0";
 
 /// Domain separator for mapping the app's linkScope string to a Field.
 const SCOPE_FIELD_DOMAIN: &[u8] = b"solidarity.openac.scope.v1";
@@ -70,6 +70,10 @@ struct OpenAcV3WitnessRequest {
     device_public_key_raw_b64: String,
     nonce_hash_b64: String,
     link_scope: String,
+    /// Passport-nullifier scope (creds: one global scope). Empty = no
+    /// nullifier (the circuit pins it to zero).
+    #[serde(default)]
+    nullifier_scope: String,
     #[serde(rename = "requireAA")]
     require_aa: bool,
     #[serde(default)]
@@ -354,6 +358,12 @@ fn witnesses_for_request(
         scope_field,
         epoch,
     );
+    let (nullifier_scope, nullifier) = if request.nullifier_scope.is_empty() {
+        (FieldElement::zero(), FieldElement::zero())
+    } else {
+        let scope = scope_to_field(&request.nullifier_scope);
+        (scope, pedersen::compute_passport_nullifier(sod_hi, sod_lo, scope))
+    };
     let is_older = age_at_least(&claims, year, month, day, AGE_THRESHOLD);
     let nonce_hash: [u8; 32] = nonce_hash.as_slice().try_into().expect("len checked");
 
@@ -396,6 +406,7 @@ fn witnesses_for_request(
         commitment_x,
         commitment_y,
         link_tag,
+        (nullifier_scope, nullifier),
     );
 
     Ok(OpenAcV3WitnessBundle {
@@ -554,6 +565,7 @@ fn openac_show_inputs(
     commitment_x: FieldElement,
     commitment_y: FieldElement,
     link_tag: FieldElement,
+    nullifier: (FieldElement, FieldElement),
 ) -> InputMap {
     let mut map = InputMap::new();
     map.insert("claims", single(field_str(claims_field)));
@@ -590,6 +602,8 @@ fn openac_show_inputs(
             bytes(&[0, 0, 0])
         },
     );
+    map.insert("nullifier_scope", single(field_str(nullifier.0)));
+    map.insert("out_nullifier", single(field_str(nullifier.1)));
     map
 }
 
