@@ -111,7 +111,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: xcframework
-          path: PassportMoproBindings.xcframework.zip
+          # mopro.swift is regenerated with the xcframework; the release job
+          # commits it back so the Swift wrapper matches the binary.
+          path: |
+            PassportMoproBindings.xcframework.zip
+            Sources/MoproiOSBindings/mopro.swift
           retention-days: 5
 
     outputs:
@@ -129,6 +133,13 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: xcframework
+          path: release-assets
+
+      - name: Download circuit artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: circuit-artifacts
+          path: release-assets/circuits
 
       - name: Determine tag
         id: tag
@@ -144,7 +155,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create "${{ steps.tag.outputs.version }}" \
-            PassportMoproBindings.xcframework.zip \
+            release-assets/PassportMoproBindings.xcframework.zip \
+            release-assets/circuits/passport_mrz.json \
             --title "${{ steps.tag.outputs.version }}" \
             --generate-notes
 
@@ -170,10 +182,11 @@ jobs:
           # Replace the download URL version and the checksum line in one shot.
           sed -i "s|releases/download/v[0-9]*\.[0-9]*\.[0-9]*/|releases/download/${VERSION}/|g" Package.swift
           sed -i "s|checksum: \"[a-f0-9]\{64\}\"|checksum: \"${CHECKSUM}\"|g" Package.swift
-          if git diff --quiet Package.swift; then
+          cp release-assets/Sources/MoproiOSBindings/mopro.swift Sources/MoproiOSBindings/mopro.swift
+          if git diff --quiet Package.swift Sources/MoproiOSBindings/mopro.swift; then
             echo "Package.swift already in sync with ${VERSION} (${CHECKSUM})."
           else
-            git add Package.swift
+            git add Package.swift Sources/MoproiOSBindings/mopro.swift
             git commit -m "chore: sync Package.swift to ${VERSION} (checksum ${CHECKSUM:0:12}...)"
             git push origin main
           fi
