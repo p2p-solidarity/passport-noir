@@ -14,6 +14,7 @@ workspace_members = [
   "x509_show",
   "composite_show",
   "mdoc_adapter",
+  "passport_mrz",
 ]
 
 # ============================================================
