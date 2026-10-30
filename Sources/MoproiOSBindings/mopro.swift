@@ -401,6 +401,38 @@ fileprivate final class UniffiHandleMap<T>: @unchecked Sendable {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
+    typealias FfiType = UInt32
+    typealias SwiftType = UInt32
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt32 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterInt64: FfiConverterPrimitive {
+    typealias FfiType = Int64
+    typealias SwiftType = Int64
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Int64 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: Int64, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterBool : FfiConverter {
     typealias FfiType = Int8
     typealias SwiftType = Bool
@@ -552,6 +584,333 @@ public func FfiConverterTypeNoirProofResult_lower(_ value: NoirProofResult) -> R
 }
 
 
+public struct PassportMrzOutputs {
+    /**
+     * False when `min_age` was 0 (not disclosed).
+     */
+    public var ageOk: Bool
+    /**
+     * ICAO nationality code, or "" when not disclosed.
+     */
+    public var nationality: String
+    /**
+     * Per-scope pseudonym of the device key (hex Field).
+     */
+    public var deviceTag: String
+    /**
+     * Per-scope passport nullifier (hex Field), zero without a scope.
+     */
+    public var nullifier: String
+    /**
+     * Country (C=) of the pinned CSCA that issued the DSC.
+     */
+    public var issuerCountry: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * False when `min_age` was 0 (not disclosed).
+         */ageOk: Bool, 
+        /**
+         * ICAO nationality code, or "" when not disclosed.
+         */nationality: String, 
+        /**
+         * Per-scope pseudonym of the device key (hex Field).
+         */deviceTag: String, 
+        /**
+         * Per-scope passport nullifier (hex Field), zero without a scope.
+         */nullifier: String, 
+        /**
+         * Country (C=) of the pinned CSCA that issued the DSC.
+         */issuerCountry: String) {
+        self.ageOk = ageOk
+        self.nationality = nationality
+        self.deviceTag = deviceTag
+        self.nullifier = nullifier
+        self.issuerCountry = issuerCountry
+    }
+}
+
+#if compiler(>=6)
+extension PassportMrzOutputs: Sendable {}
+#endif
+
+
+extension PassportMrzOutputs: Equatable, Hashable {
+    public static func ==(lhs: PassportMrzOutputs, rhs: PassportMrzOutputs) -> Bool {
+        if lhs.ageOk != rhs.ageOk {
+            return false
+        }
+        if lhs.nationality != rhs.nationality {
+            return false
+        }
+        if lhs.deviceTag != rhs.deviceTag {
+            return false
+        }
+        if lhs.nullifier != rhs.nullifier {
+            return false
+        }
+        if lhs.issuerCountry != rhs.issuerCountry {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(ageOk)
+        hasher.combine(nationality)
+        hasher.combine(deviceTag)
+        hasher.combine(nullifier)
+        hasher.combine(issuerCountry)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePassportMrzOutputs: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PassportMrzOutputs {
+        return
+            try PassportMrzOutputs(
+                ageOk: FfiConverterBool.read(from: &buf), 
+                nationality: FfiConverterString.read(from: &buf), 
+                deviceTag: FfiConverterString.read(from: &buf), 
+                nullifier: FfiConverterString.read(from: &buf), 
+                issuerCountry: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PassportMrzOutputs, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.ageOk, into: &buf)
+        FfiConverterString.write(value.nationality, into: &buf)
+        FfiConverterString.write(value.deviceTag, into: &buf)
+        FfiConverterString.write(value.nullifier, into: &buf)
+        FfiConverterString.write(value.issuerCountry, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePassportMrzOutputs_lift(_ buf: RustBuffer) throws -> PassportMrzOutputs {
+    return try FfiConverterTypePassportMrzOutputs.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePassportMrzOutputs_lower(_ value: PassportMrzOutputs) -> RustBuffer {
+    return FfiConverterTypePassportMrzOutputs.lower(value)
+}
+
+
+/**
+ * What the verifier asks for; the prover proves exactly this.
+ */
+public struct PassportMrzRequest {
+    /**
+     * 32 bytes the device key signs (verifier-chosen, fresh per request).
+     */
+    public var challenge: Data
+    /**
+     * Pseudonym scope for the device tag and nullifier; "" = no nullifier.
+     */
+    public var scope: String
+    /**
+     * UTC date as YYYYMMDD.
+     */
+    public var today: UInt32
+    /**
+     * 0 = do not disclose age.
+     */
+    public var minAge: UInt32
+    public var discloseNationality: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * 32 bytes the device key signs (verifier-chosen, fresh per request).
+         */challenge: Data, 
+        /**
+         * Pseudonym scope for the device tag and nullifier; "" = no nullifier.
+         */scope: String, 
+        /**
+         * UTC date as YYYYMMDD.
+         */today: UInt32, 
+        /**
+         * 0 = do not disclose age.
+         */minAge: UInt32, discloseNationality: Bool) {
+        self.challenge = challenge
+        self.scope = scope
+        self.today = today
+        self.minAge = minAge
+        self.discloseNationality = discloseNationality
+    }
+}
+
+#if compiler(>=6)
+extension PassportMrzRequest: Sendable {}
+#endif
+
+
+extension PassportMrzRequest: Equatable, Hashable {
+    public static func ==(lhs: PassportMrzRequest, rhs: PassportMrzRequest) -> Bool {
+        if lhs.challenge != rhs.challenge {
+            return false
+        }
+        if lhs.scope != rhs.scope {
+            return false
+        }
+        if lhs.today != rhs.today {
+            return false
+        }
+        if lhs.minAge != rhs.minAge {
+            return false
+        }
+        if lhs.discloseNationality != rhs.discloseNationality {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(challenge)
+        hasher.combine(scope)
+        hasher.combine(today)
+        hasher.combine(minAge)
+        hasher.combine(discloseNationality)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePassportMrzRequest: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PassportMrzRequest {
+        return
+            try PassportMrzRequest(
+                challenge: FfiConverterData.read(from: &buf), 
+                scope: FfiConverterString.read(from: &buf), 
+                today: FfiConverterUInt32.read(from: &buf), 
+                minAge: FfiConverterUInt32.read(from: &buf), 
+                discloseNationality: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PassportMrzRequest, into buf: inout [UInt8]) {
+        FfiConverterData.write(value.challenge, into: &buf)
+        FfiConverterString.write(value.scope, into: &buf)
+        FfiConverterUInt32.write(value.today, into: &buf)
+        FfiConverterUInt32.write(value.minAge, into: &buf)
+        FfiConverterBool.write(value.discloseNationality, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePassportMrzRequest_lift(_ buf: RustBuffer) throws -> PassportMrzRequest {
+    return try FfiConverterTypePassportMrzRequest.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePassportMrzRequest_lower(_ value: PassportMrzRequest) -> RustBuffer {
+    return FfiConverterTypePassportMrzRequest.lower(value)
+}
+
+
+public struct PassportMrzWitness {
+    /**
+     * Circuit inputs (decimal strings) for `generate_noir_proof`.
+     */
+    public var inputs: [String: [String]]
+    /**
+     * The DSC certificate DER; ships next to the proof for the verifier.
+     */
+    public var dscCertificate: Data
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Circuit inputs (decimal strings) for `generate_noir_proof`.
+         */inputs: [String: [String]], 
+        /**
+         * The DSC certificate DER; ships next to the proof for the verifier.
+         */dscCertificate: Data) {
+        self.inputs = inputs
+        self.dscCertificate = dscCertificate
+    }
+}
+
+#if compiler(>=6)
+extension PassportMrzWitness: Sendable {}
+#endif
+
+
+extension PassportMrzWitness: Equatable, Hashable {
+    public static func ==(lhs: PassportMrzWitness, rhs: PassportMrzWitness) -> Bool {
+        if lhs.inputs != rhs.inputs {
+            return false
+        }
+        if lhs.dscCertificate != rhs.dscCertificate {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(inputs)
+        hasher.combine(dscCertificate)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePassportMrzWitness: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PassportMrzWitness {
+        return
+            try PassportMrzWitness(
+                inputs: FfiConverterDictionaryStringSequenceString.read(from: &buf), 
+                dscCertificate: FfiConverterData.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PassportMrzWitness, into buf: inout [UInt8]) {
+        FfiConverterDictionaryStringSequenceString.write(value.inputs, into: &buf)
+        FfiConverterData.write(value.dscCertificate, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePassportMrzWitness_lift(_ buf: RustBuffer) throws -> PassportMrzWitness {
+    return try FfiConverterTypePassportMrzWitness.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePassportMrzWitness_lower(_ value: PassportMrzWitness) -> RustBuffer {
+    return FfiConverterTypePassportMrzWitness.lower(value)
+}
+
+
 public enum MoproError {
 
     
@@ -700,6 +1059,31 @@ fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceData: FfiConverterRustBuffer {
+    typealias SwiftType = [Data]
+
+    public static func write(_ value: [Data], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterData.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [Data] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [Data]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterData.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterDictionaryStringSequenceString: FfiConverterRustBuffer {
     public static func write(_ value: [String: [String]], into buf: inout [UInt8]) {
         let len = Int32(value.count)
@@ -722,13 +1106,26 @@ fileprivate struct FfiConverterDictionaryStringSequenceString: FfiConverterRustB
         return dict
     }
 }
-/**
- * UniFFI entry point — generates fresh attestation keys per request.
- */
 public func buildOpenAcV3WitnessBundle(requestJson: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMoproError_lift) {
     uniffi_passport_zk_mopro_fn_func_build_open_ac_v3_witness_bundle(
         FfiConverterString.lower(requestJson),$0
+    )
+})
+}
+/**
+ * Circuit inputs for one presentation. `device_public_key` is the SEC1
+ * uncompressed P-256 point (65 bytes); `device_signature` is r ‖ s (64
+ * bytes) over `request.challenge` as a prehash.
+ */
+public func buildPassportMrzWitness(sod: Data, dg1: Data, devicePublicKey: Data, deviceSignature: Data, request: PassportMrzRequest)throws  -> PassportMrzWitness  {
+    return try  FfiConverterTypePassportMrzWitness_lift(try rustCallWithError(FfiConverterTypeMoproError_lift) {
+    uniffi_passport_zk_mopro_fn_func_build_passport_mrz_witness(
+        FfiConverterData.lower(sod),
+        FfiConverterData.lower(dg1),
+        FfiConverterData.lower(devicePublicKey),
+        FfiConverterData.lower(deviceSignature),
+        FfiConverterTypePassportMrzRequest_lower(request),$0
     )
 })
 }
@@ -771,6 +1168,18 @@ public func getNoirVerificationKey(circuitPath: String, srsPath: String?)throws 
 })
 }
 /**
+ * Prove with `passport_mrz.json` and an SRS of exactly the circuit's size.
+ */
+public func provePassportMrz(circuitPath: String, srsPath: String?, inputs: [String: [String]])throws  -> NoirProofResult  {
+    return try  FfiConverterTypeNoirProofResult_lift(try rustCallWithError(FfiConverterTypeMoproError_lift) {
+    uniffi_passport_zk_mopro_fn_func_prove_passport_mrz(
+        FfiConverterString.lower(circuitPath),
+        FfiConverterOptionString.lower(srsPath),
+        FfiConverterDictionaryStringSequenceString.lower(inputs),$0
+    )
+})
+}
+/**
  * Verify a Noir proof.
  *
  * # Arguments
@@ -785,6 +1194,24 @@ public func verifyNoirProof(proof: Data, vk: Data)throws  -> Bool  {
     uniffi_passport_zk_mopro_fn_func_verify_noir_proof(
         FfiConverterData.lower(proof),
         FfiConverterData.lower(vk),$0
+    )
+})
+}
+/**
+ * Verify one presentation. `circuit_path` is the released `passport_mrz.json`
+ * (the verification key is derived from it, never taken from the prover).
+ */
+public func verifyPassportMrz(circuitPath: String, srsPath: String?, proof: Data, dscCertificate: Data, cscaCertificates: [Data], revokedDscSerials: [Data], request: PassportMrzRequest, nowUnix: Int64)throws  -> PassportMrzOutputs  {
+    return try  FfiConverterTypePassportMrzOutputs_lift(try rustCallWithError(FfiConverterTypeMoproError_lift) {
+    uniffi_passport_zk_mopro_fn_func_verify_passport_mrz(
+        FfiConverterString.lower(circuitPath),
+        FfiConverterOptionString.lower(srsPath),
+        FfiConverterData.lower(proof),
+        FfiConverterData.lower(dscCertificate),
+        FfiConverterSequenceData.lower(cscaCertificates),
+        FfiConverterSequenceData.lower(revokedDscSerials),
+        FfiConverterTypePassportMrzRequest_lower(request),
+        FfiConverterInt64.lower(nowUnix),$0
     )
 })
 }
@@ -804,7 +1231,10 @@ private let initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
-    if (uniffi_passport_zk_mopro_checksum_func_build_open_ac_v3_witness_bundle() != 10629) {
+    if (uniffi_passport_zk_mopro_checksum_func_build_open_ac_v3_witness_bundle() != 505) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_passport_zk_mopro_checksum_func_build_passport_mrz_witness() != 19410) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_passport_zk_mopro_checksum_func_generate_noir_proof() != 30133) {
@@ -813,7 +1243,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_passport_zk_mopro_checksum_func_get_noir_verification_key() != 62500) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_passport_zk_mopro_checksum_func_prove_passport_mrz() != 57790) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_passport_zk_mopro_checksum_func_verify_noir_proof() != 537) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_passport_zk_mopro_checksum_func_verify_passport_mrz() != 45034) {
         return InitializationResult.apiChecksumMismatch
     }
 
