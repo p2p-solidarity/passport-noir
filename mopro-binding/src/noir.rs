@@ -181,6 +181,44 @@ pub fn get_noir_verification_key(
     Ok(vk)
 }
 
+/// SRS sized at exactly the circuit's dyadic size (1x). `setup_srs_from_bytecode`
+/// multiplies by 8, which UltraHonk does not need for these circuits (same vk,
+/// same proofs) and which costs 8x the SRS bytes on a phone.
+fn setup_srs_exact(bytecode: &str, srs_path: Option<&str>) -> Result<(), MoproError> {
+    let size = noir_rs::barretenberg::utils::get_circuit_size(bytecode, false);
+    noir_rs::barretenberg::srs::setup_srs(size, srs_path)
+        .map(|_| ())
+        .map_err(|e| MoproError::CircuitError(format!("SRS setup failed: {e}")))
+}
+
+/// `generate_noir_proof` with a 1x SRS (passport_mrz).
+pub(crate) fn generate_noir_proof_exact(
+    circuit_path: &str,
+    srs_path: Option<&str>,
+    inputs: HashMap<String, Vec<String>>,
+) -> Result<NoirProofResult, MoproError> {
+    let bytecode = load_circuit_bytecode(circuit_path)?;
+    setup_srs_exact(&bytecode, srs_path)?;
+    let witness_map = build_witness_map(circuit_path, inputs)?;
+    let vk = noir_rs::barretenberg::verify::get_ultra_honk_verification_key(&bytecode, false)
+        .map_err(|e| MoproError::CircuitError(format!("Failed to get VK: {e}")))?;
+    let proof =
+        noir_rs::barretenberg::prove::prove_ultra_honk(&bytecode, witness_map, vk.clone(), false)
+            .map_err(|e| MoproError::ProofGenerationError(format!("{e}")))?;
+    Ok(NoirProofResult { proof, vk })
+}
+
+/// `get_noir_verification_key` with a 1x SRS (passport_mrz).
+pub(crate) fn get_noir_verification_key_exact(
+    circuit_path: &str,
+    srs_path: Option<&str>,
+) -> Result<Vec<u8>, MoproError> {
+    let bytecode = load_circuit_bytecode(circuit_path)?;
+    setup_srs_exact(&bytecode, srs_path)?;
+    noir_rs::barretenberg::verify::get_ultra_honk_verification_key(&bytecode, false)
+        .map_err(|e| MoproError::CircuitError(format!("{e}")))
+}
+
 /// Verify a Noir proof.
 ///
 /// # Arguments

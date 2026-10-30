@@ -33,7 +33,9 @@ fn print_help() {
          Usage:\n\
            gen_srs --circuit <path.json> --out <path.srs.bin>           [--recursive]\n\
            gen_srs --circuits-dir <dir> --out-dir <dir>                 [--recursive]\n\
-           gen_srs --circuit a.json --circuit b.json --merged-out <f>   [--recursive]\n\n\
+           gen_srs --circuit a.json --circuit b.json --merged-out <f>   [--recursive]\n\
+           gen_srs --circuit <path.json> --out <f> --exact [--source <srs.bin>]\n\n\
+         --exact sizes the SRS at 1x the dyadic size (passport_mrz needs no 8x).\n\
          --merged-out writes ONE SRS sized to the largest of the listed\n\
          --circuit files. Because barretenberg's SRS is a prefix (a bigger SRS\n\
          contains every smaller one), that single file serves all of them — so\n\
@@ -51,6 +53,10 @@ struct Args {
     out_dir: Option<String>,
     merged_out: Option<String>,
     recursive: bool,
+    /// --exact: size the SRS at 1x the dyadic circuit size (passport_mrz).
+    exact: bool,
+    /// --source: read points from this SRS file instead of the network/cache.
+    source: Option<String>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -61,6 +67,8 @@ fn parse_args() -> Result<Args, String> {
         out_dir: None,
         merged_out: None,
         recursive: false,
+        exact: false,
+        source: None,
     };
 
     let mut iter = std::env::args().skip(1);
@@ -87,6 +95,10 @@ fn parse_args() -> Result<Args, String> {
                 args.merged_out = Some(iter.next().ok_or("--merged-out requires a value")?);
             }
             "--recursive" => args.recursive = true,
+            "--exact" => args.exact = true,
+            "--source" => {
+                args.source = Some(iter.next().ok_or("--source requires a value")?);
+            }
             other => return Err(format!("Unknown argument: {}", other)),
         }
     }
@@ -137,16 +149,30 @@ fn extract_bytecode(circuit_path: &Path) -> Result<String, String> {
 const ULTRA_HONK_SRS_MULTIPLIER: u32 = 8;
 
 fn generate_one(circuit_path: &Path, output_path: &Path, recursive: bool) -> Result<(), String> {
+    generate_one_with(
+        circuit_path,
+        output_path,
+        recursive,
+        ULTRA_HONK_SRS_MULTIPLIER,
+        None,
+    )
+}
+
+fn generate_one_with(
+    circuit_path: &Path,
+    output_path: &Path,
+    recursive: bool,
+    multiplier: u32,
+    source: Option<&str>,
+) -> Result<(), String> {
     let bytecode = extract_bytecode(circuit_path)?;
     let subgroup_size = get_subgroup_size(&bytecode, recursive);
-    let prover_size = subgroup_size
-        .checked_mul(ULTRA_HONK_SRS_MULTIPLIER)
-        .ok_or_else(|| {
-            format!(
-                "subgroup_size {} * {} overflows u32",
-                subgroup_size, ULTRA_HONK_SRS_MULTIPLIER
-            )
-        })?;
+    let prover_size = subgroup_size.checked_mul(multiplier).ok_or_else(|| {
+        format!(
+            "subgroup_size {} * {} overflows u32",
+            subgroup_size, multiplier
+        )
+    })?;
     println!(
         "{}: subgroup_size = {} → prover SRS points = {} (recursive={})",
         circuit_path.display(),
@@ -157,7 +183,7 @@ fn generate_one(circuit_path: &Path, output_path: &Path, recursive: bool) -> Res
 
     // Downloads SRS from the public points service unless a cache hit is
     // available. None for srs_path means "use the library's default cache".
-    let srs = get_srs(prover_size, None);
+    let srs = get_srs(prover_size, source);
     let local = LocalSrs(srs);
 
     if let Some(parent) = output_path.parent() {
@@ -284,7 +310,17 @@ fn main() {
     };
 
     let result = if let Some(out) = &args.out {
-        generate_one(Path::new(&args.circuit[0]), Path::new(out), args.recursive)
+        generate_one_with(
+            Path::new(&args.circuit[0]),
+            Path::new(out),
+            args.recursive,
+            if args.exact {
+                1
+            } else {
+                ULTRA_HONK_SRS_MULTIPLIER
+            },
+            args.source.as_deref(),
+        )
     } else if let Some(merged_out) = &args.merged_out {
         run_merged(&args.circuit, Path::new(merged_out), args.recursive)
     } else {

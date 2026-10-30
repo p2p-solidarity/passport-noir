@@ -1,5 +1,5 @@
 .PHONY: all circuits compile-circuits test-circuits verify-circuit-artifacts copy-circuit-artifacts \
-       build-ios sync-ios-bindings gen-srs clean \
+       build-ios sync-ios-bindings gen-srs gen-srs-mrz clean \
        fmt fmt-check lint score benchmark spec-check bench-report bench-size bench-execute bench-prove-verify bench-update-baseline \
        install-hooks release-patch release-minor release-major
 
@@ -9,7 +9,7 @@ MOPRO_IOS_BINDINGS_DIR = $(MOPRO_DIR)/MoproiOSBindings
 SWIFT_PACKAGE_BINDINGS_DIR = Sources/MoproiOSBindings
 # v3.1 production circuits only. Retired v1/v2 circuits live in
 # circuits-legacy/ (own workspace, built on demand -- see circuits-legacy/Nargo.toml).
-CIRCUIT_PACKAGES = passport_adapter openac_show sdjwt_adapter jwt_x5c_adapter x509_show composite_show mdoc_adapter
+CIRCUIT_PACKAGES = passport_mrz passport_adapter openac_show sdjwt_adapter jwt_x5c_adapter x509_show composite_show mdoc_adapter
 IOS_ARCHS ?= aarch64-apple-ios,aarch64-apple-ios-sim
 
 # ──────────────────────────────────────────────────
@@ -74,6 +74,14 @@ gen-srs: copy-circuit-artifacts
 		--circuit test-vectors/noir/passport_adapter.json \
 		--circuit test-vectors/noir/openac_show.json \
 		--merged-out test-vectors/srs/passport.srs.bin
+
+# passport-noir 0.5.0: 1x SRS for passport_mrz (no 8x multiplier), cut from the
+# merged SRS when present so no network is needed.
+gen-srs-mrz: copy-circuit-artifacts
+	cd $(MOPRO_DIR) && cargo run --bin gen_srs --release -- \
+		--circuit test-vectors/noir/passport_mrz.json \
+		--out test-vectors/srs/passport_mrz.srs.bin --exact \
+		$$( [ -f test-vectors/srs/passport.srs.bin ] && echo --source test-vectors/srs/passport.srs.bin )
 
 # ──────────────────────────────────────────────────
 # Format & Lint

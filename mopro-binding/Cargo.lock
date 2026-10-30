@@ -2430,11 +2430,7 @@ dependencies = [
 name = "passport-zk-mopro"
 version = "0.1.0"
 dependencies = [
- "ark-ec",
- "ark-ff",
- "ark-grumpkin",
  "base64",
- "bn254_blackbox_solver",
  "camino",
  "mopro-ffi",
  "noir",
@@ -2442,11 +2438,9 @@ dependencies = [
  "num-bigint",
  "num-bigint-dig",
  "p256 0.13.2",
- "rand 0.8.5",
  "rsa",
  "serde",
  "serde_json",
- "sha1",
  "sha2 0.10.9",
  "thiserror 2.0.18",
  "x509-parser",
@@ -3428,17 +3422,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
-]
-
-[[package]]
-name = "sha1"
-version = "0.10.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3bf829a2d51ab4a5ddf1352d8470c140cadc8301b2ae1789db023f01cedd6ba"
-dependencies = [
- "cfg-if",
- "cpufeatures 0.2.17",
- "digest 0.10.7",
 ]
 
 [[package]]
@@ -4810,6 +4793,7 @@ dependencies = [
  "lazy_static",
  "nom",
  "oid-registry",
+ "ring",
  "rusticata-macros",
  "thiserror 1.0.69",
  "time",
