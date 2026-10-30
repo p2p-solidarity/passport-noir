@@ -6,6 +6,17 @@
 - **不要加假資料**：禁止在正式程式碼中使用 hardcoded sample/mock/dummy data。
 - **先讀再改**：修改任何檔案前必須先讀取該檔案，了解現有邏輯再動手。
 
+## Status (0.5.0, 2026-10-30) — read first
+
+- Passport = `circuits/passport_mrz` + `mopro-binding/src/passport_mrz.rs`:
+  - The circuit checks the real ICAO SOD: DSC RSA-2048 over SignedAttributes, then messageDigest, then the DG1 hash. It also checks device binding.
+  - The verifier chains the DSC to a pinned CSCA list.
+  - SRS is 1× (`make gen-srs-mrz`).
+- The OpenAC v3 passport path (`dsc_chain` / `passport_adapter` / `openac_show` proofs) is NOT issuer-bound. See `SECURITY.md`.
+  - Its witness builder is retired: `build_open_ac_v3_witness_bundle` always returns `ready=false`.
+  - Never re-add a builder that mints its own CSCA/DSC.
+- The repo graduates after 0.5.0 (archived). The sections below describe the pre-0.5.0 layout.
+
 ## Project Overview
 
 This repo contains the **Noir ZK circuits** and **mopro mobile binding** for the AirMeishi (Solidarity) iOS app's passport verification pipeline. These circuits implement the OpenPassport architecture for ICAO 9303 e-passport ZKP verification.

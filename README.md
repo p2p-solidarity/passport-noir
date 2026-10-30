@@ -1,5 +1,29 @@
 # OpenPassportSwift (iOS Only)
 
+> **Status (2026-10-30): graduates in 0.5.0; the repo is archived after that release.** The current
+> code is the `passport_mrz` circuit, `circuits/passport_mrz`:
+> - It proves that a DSC signed this passport's MRZ, and that a device key signed the verifier's challenge.
+> - The verifier (`verify_passport_mrz`) chains that DSC to a **pinned CSCA list**.
+> - SRS is sized at 1×.
+>
+> **Passport proofs from 0.3.x–0.4.0 are not bound to any issuing state.** Read
+> [`SECURITY.md`](SECURITY.md) before relying on any of them.
+>
+> Creds (the app this was built for) no longer ships passport ZK. Its
+> "real person" signal is a device-attested statement after native passive
+> authentication (App Attest / Android Key Attestation), checked with plain
+> JWT-style signature verification. The rest of this README describes the
+> historical package layout.
+>
+> Build and check 0.5.0:
+> ```bash
+> cd circuits && nargo test --package passport_mrz && nargo compile --package passport_mrz
+> cp target/passport_mrz.json ../mopro-binding/test-vectors/noir/
+> cd ../mopro-binding && cargo run --release --bin gen_srs -- \
+>   --circuit test-vectors/noir/passport_mrz.json --out test-vectors/srs/passport_mrz.srs.bin --exact
+> cargo test --release passport_mrz -- --include-ignored
+> ```
+
 Noir passport ZK circuits + mopro bindings packaged in a `SemaphoreSwift`-style Swift Package for iOS.
 
 OpenAC-mode additions are included:
